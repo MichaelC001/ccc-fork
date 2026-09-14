@@ -731,3 +731,107 @@ func TestNewBotIsOnboardedOnItsFirstTurn(t *testing.T) {
 		}
 	}
 }
+
+func TestUsageCommandWorksAnywhere(t *testing.T) {
+	in, _, api := testInstance(t)
+	b, err := in.createBot("spender", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	usageTurn(t, in, b.ID, time.Now(), 12*time.Second,
+		`{"input_tokens":1000,"cache_read_input_tokens":4000,"cost_usd":0.4}`)
+
+	in.handleMessage(ownerMessage(0, "/usage"))
+	texts := api.texts("")
+	if len(texts) == 0 || !strings.Contains(texts[len(texts)-1], "spender") {
+		t.Errorf("/usage did not report the bot: %v", texts)
+	}
+	if !strings.Contains(texts[len(texts)-1], "cache 80%") {
+		t.Errorf("/usage does not show the cache hit ratio: %v", texts)
+	}
+}
+
+func TestMemoryStatsAndRestoreCommands(t *testing.T) {
+	in, _, api := testInstance(t)
+	b, err := in.createBot("rememberer", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedMemories(t, in.db, memCompactMaxCount+10)
+	rep := runMaintenance(in.db, in.cfg, maintenanceDeps{Turner: answering(compactionAnswer(60))}, time.Now())
+	if len(rep.Compactions) != 1 {
+		t.Fatalf("no compaction to work with: %v", rep.Problems)
+	}
+	id := rep.Compactions[0].CompactionID
+
+	in.handleMessage(ownerMessage(b.TopicID, "/memory stats"))
+	last := func() string {
+		texts := api.texts("")
+		return texts[len(texts)-1]
+	}
+	if !strings.Contains(last(), "user memories") {
+		t.Errorf("/memory stats = %q", last())
+	}
+
+	// A non-owner may look, but not undo.
+	stranger := ownerMessage(b.TopicID, fmt.Sprintf("/memory restore %d", id))
+	stranger.From.ID = 4242
+	if err := in.db.Create(&Access{TelegramUserID: 4242, State: accessApproved}).Error; err != nil {
+		t.Fatal(err)
+	}
+	in.handleMessage(stranger)
+	if !strings.Contains(last(), "owner-only") {
+		t.Errorf("restore is owner-only: %q", last())
+	}
+
+	in.handleMessage(ownerMessage(b.TopicID, fmt.Sprintf("/memory restore %d", id)))
+	if !strings.Contains(last(), "Restored") {
+		t.Errorf("/memory restore = %q", last())
+	}
+	var live int64
+	in.db.Model(&Memory{}).Where("scope = ?", scopeUser).Count(&live)
+	if live != int64(memCompactMaxCount+10) {
+		t.Errorf("%d memories after the restore, want the originals back", live)
+	}
+}
+
+func TestSetCommandIsOwnerOnlyAndValidates(t *testing.T) {
+	in, _, api := testInstance(t)
+	last := func() string {
+		texts := api.texts("")
+		return texts[len(texts)-1]
+	}
+
+	in.handleMessage(ownerMessage(0, "/set"))
+	for _, want := range []string{settingDebounceMS, settingCompactionModel, "2500"} {
+		if !strings.Contains(last(), want) {
+			t.Errorf("/set does not list %q: %q", want, last())
+		}
+	}
+
+	in.handleMessage(ownerMessage(0, "/set debounce_ms not-a-number"))
+	if !strings.Contains(last(), "takes a number") {
+		t.Errorf("a non-numeric debounce was accepted: %q", last())
+	}
+	in.handleMessage(ownerMessage(0, "/set nonsense 1"))
+	if !strings.Contains(last(), "Unknown setting") {
+		t.Errorf("an unknown key was accepted: %q", last())
+	}
+	in.handleMessage(ownerMessage(0, "/set debounce_ms 800"))
+	if getSettingInt(in.db, settingDebounceMS, defaultDebounceMS) != 800 {
+		t.Error("the setting was not stored")
+	}
+
+	approved := ownerMessage(0, "/set debounce_ms 1")
+	approved.From.ID = 4242
+	if err := in.db.Create(&Access{TelegramUserID: 4242, State: accessApproved}).Error; err != nil {
+		t.Fatal(err)
+	}
+	in.handleMessage(approved)
+	if !strings.Contains(last(), "owner-only") {
+		t.Errorf("/set must be owner-only: %q", last())
+	}
+	if getSettingInt(in.db, settingDebounceMS, defaultDebounceMS) != 800 {
+		t.Error("a non-owner changed a setting")
+	}
+}

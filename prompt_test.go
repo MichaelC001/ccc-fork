@@ -11,7 +11,7 @@ func TestRenderSystemPromptCarriesIdentityAndRoster(t *testing.T) {
 	got := renderSystemPrompt(
 		promptBot{Name: "deployer", Role: "ships fecha to prod", Cwd: "/srv/fecha"},
 		"jairo.local",
-		[]otherBot{{Name: "watcher", Role: "watches CI", Status: botIdle}},
+		[]otherBot{{Name: "watcher", Role: "watches CI"}},
 		[]string{"🚀", "📝"},
 	)
 	for _, want := range []string{"deployer", "ships fecha to prod", "jairo.local", "/srv/fecha", "watcher", "watches CI",
@@ -162,5 +162,52 @@ func TestEnvelopeOnboardsARoleLessBot(t *testing.T) {
 	}
 	if got := buildEnvelope(in.db, withRole, sourceUser, "hello", time.Now()); strings.Contains(got, "no role yet") {
 		t.Errorf("the onboarding instruction survived the role being set:\n%s", got)
+	}
+}
+
+// The system prompt is the first thing in every request of a session, so the
+// API's prompt cache only helps while it is byte-identical from turn to turn
+// (DESIGN §14.20). Nothing that moves on its own may appear in it.
+func TestSystemPromptIsByteStableAcrossTurns(t *testing.T) {
+	b := promptBot{Name: "deployer", Role: "ships fecha", Cwd: "/srv/fecha"}
+	first := renderSystemPrompt(b, "jairo.local",
+		[]otherBot{{Name: "watcher", Role: "watches CI"}, {Name: "archivist", Role: "keeps notes"}},
+		[]string{"🚀", "📝"})
+	// Same facts, different order, and the bots have been busy meanwhile.
+	second := renderSystemPrompt(b, "jairo.local",
+		[]otherBot{{Name: "archivist", Role: "keeps notes"}, {Name: "watcher", Role: "watches CI"}},
+		[]string{"📝", "🚀"})
+	if first != second {
+		t.Errorf("the system prompt changed between turns:\n--- first ---\n%s\n--- second ---\n%s", first, second)
+	}
+	if strings.Contains(first, botIdle) || strings.Contains(first, botRunning) {
+		t.Error("a bot's live status must not be in the system prompt: it changes every turn")
+	}
+	if strings.Contains(first, time.Now().Format("2006-01-02")) {
+		t.Error("the date belongs in the envelope, not in the system prompt")
+	}
+}
+
+// The prompt tells bots how to spend a teammate's tokens.
+func TestSystemPromptTeachesWakeDiscipline(t *testing.T) {
+	got := renderSystemPrompt(promptBot{Name: "a", Cwd: "/tmp"}, "host", nil, nil)
+	for _, want := range []string{"wake=false", "wake=true", "ONE message"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the system prompt does not teach bot-to-bot wake discipline (%q):\n%s", want, got)
+		}
+	}
+}
+
+// The roster is sorted wherever it is built, not only where it is rendered.
+func TestBotRosterIsSortedByName(t *testing.T) {
+	in, _, _ := testInstance(t)
+	for _, name := range []string{"zeta", "alpha", "mu"} {
+		if _, err := in.createBot(name, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	roster := botRoster(in.db, 0)
+	if len(roster) != 3 || roster[0].Name != "alpha" || roster[2].Name != "zeta" {
+		t.Errorf("roster = %+v, want it sorted by name", roster)
 	}
 }

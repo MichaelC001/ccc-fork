@@ -147,6 +147,11 @@ func main() {
 	case "doctor":
 		doctor()
 
+	case "maintain":
+		// The growth-control job of DESIGN §7, on demand. It is the same pass
+		// the listener runs nightly, against the same database.
+		must(runMaintainCommand())
+
 	case "profile":
 		must(profileCommand(os.Args[2:]))
 

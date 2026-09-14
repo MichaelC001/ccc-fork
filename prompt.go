@@ -33,16 +33,28 @@ type promptBot struct {
 	Cwd  string
 }
 
-// otherBot is one line of the "other bots" roster.
+// otherBot is one line of the "other bots" roster. There is deliberately no
+// status here: see renderSystemPrompt on why the prompt holds nothing that
+// changes between turns.
 type otherBot struct {
-	Name   string
-	Role   string
-	Status string
+	Name string
+	Role string
 }
 
 // renderSystemPrompt builds the --system-prompt text for a session. iconEmoji
 // is the set Telegram accepts as topic icons (see topicIcons): it is listed
 // here so set_name is called with an emoji that actually exists.
+//
+// Byte stability is a requirement, not a nicety (DESIGN §14.20). The API's
+// prompt cache keys on a PREFIX of the request, and the system prompt is the
+// very first thing in it: one character that differs between two turns of the
+// same conversation invalidates the cache for the entire conversation, and the
+// whole history is re-charged as fresh input. So everything here is either
+// fixed for the life of a session (name, role, machine, cwd) or sorted into a
+// deterministic order (the roster, the icon list), and nothing that moves on
+// its own — the date, another bot's status, usage numbers — is allowed in. The
+// date and the live context travel in the envelope instead, which is the tail
+// of the request and costs only itself.
 func renderSystemPrompt(b promptBot, hostname string, others []otherBot, iconEmoji []string) string {
 	role := strings.TrimSpace(b.Role)
 	if role == "" {
@@ -65,17 +77,23 @@ func renderSystemPrompt(b promptBot, hostname string, others []otherBot, iconEmo
 	sb.WriteString("  spawn_bot/archive_bot     create a helper bot with its own topic, or retire one\n")
 	sb.WriteString("  get_project/set_project   the team's notes about a code base\n")
 	if len(iconEmoji) > 0 {
+		// Sorted: Telegram returns the sticker set in whatever order it likes,
+		// and a reshuffled list would rewrite the prompt for no reason.
+		icons := append([]string(nil), iconEmoji...)
+		sort.Strings(icons)
 		fmt.Fprintf(&sb, "\nTopic icons set_name and spawn_bot accept (Telegram allows no others): %s\n",
-			strings.Join(iconEmoji, " "))
+			strings.Join(icons, " "))
 	}
 	if len(others) > 0 {
-		sb.WriteString("\nOther bots:\n")
-		for _, o := range others {
+		roster := append([]otherBot(nil), others...)
+		sort.Slice(roster, func(i, j int) bool { return roster[i].Name < roster[j].Name })
+		sb.WriteString("\nOther bots (call list_bots for their live status):\n")
+		for _, o := range roster {
 			r := strings.TrimSpace(o.Role)
 			if r == "" {
 				r = "(no role set)"
 			}
-			fmt.Fprintf(&sb, "  %s — %s [%s]\n", o.Name, truncate(r, 120), o.Status)
+			fmt.Fprintf(&sb, "  %s — %s\n", o.Name, truncate(r, 120))
 		}
 	}
 	sb.WriteString(`
@@ -90,6 +108,10 @@ Rules:
   irreversible; after calling ask_owner, end your turn — the answer arrives as
   your next message.
 - Use notify_owner only for things worth an interruption.
+- Every message you send another bot with wake=true starts a turn for them, which
+  costs tokens. Use wake=false for anything they only need to know (status, FYI,
+  a result they will read later) and wake=true only when they must act now. Say
+  everything you have for them in ONE message instead of several.
 - Prefer a watch over polling: a watch that sees no change costs nothing, a
   scheduled wakeup that re-runs a command costs a whole turn.
 - Spawn a bot only for work that genuinely runs alongside yours, and archive it
@@ -238,7 +260,10 @@ func botRoster(db *gorm.DB, exceptID int64) []otherBot {
 		if bots[i].ID == exceptID {
 			continue
 		}
-		out = append(out, otherBot{Name: bots[i].Name, Role: bots[i].Role, Status: bots[i].Status})
+		out = append(out, otherBot{Name: bots[i].Name, Role: bots[i].Role})
 	}
+	// Sorted by name so the same set of bots always renders the same bytes
+	// (see renderSystemPrompt on the prompt cache).
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
 }

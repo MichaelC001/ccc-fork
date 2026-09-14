@@ -237,3 +237,90 @@ func TestLiveAskOwner(t *testing.T) {
 		t.Error("the answer was not recorded")
 	}
 }
+
+// TestLiveMemoryCompaction: the real compaction turn (DESIGN §7) against the
+// installed claude, on the cheap model the setting names. Ten synthetic
+// memories, two of them obvious duplicates of others, must come back as fewer
+// entries — with every original safe in memories_archive.
+func TestLiveMemoryCompaction(t *testing.T) {
+	r, _ := liveSetup(t)
+	cfg := r.config()
+	// The compaction turn runs in the data dir, so its transcript lands under a
+	// different slug than the bot's workspace and needs its own cleanup.
+	t.Cleanup(func() { removeLiveTranscripts(t, dataDir(cfg)) })
+	before := liveAgentCount(t)
+
+	seed := []struct{ key, text string }{
+		{"deploy-target", "fecha is deployed to the OVH VPS with systemd and Caddy"},
+		{"deploy-host", "fecha is deployed to the OVH VPS with systemd and Caddy"}, // duplicate of deploy-target
+		{"db-choice", "personal projects use SQLite with Litestream replication"},
+		{"database", "personal projects use SQLite with Litestream replication"}, // duplicate of db-choice
+		{"language", "the owner writes code and commits in English"},
+		{"mobile-stack", "new mobile apps are built with Flutter, not Expo"},
+		{"ci-mobile", "mobile builds run on Codemagic, triggered by v* git tags"},
+		{"containers", "local containers run on Colima, not Docker Desktop"},
+		{"monitoring", "every deployed project is registered in the Gatus status panel"},
+		{"editor-note", "the owner prefers short, concrete replies in chat"},
+	}
+	for i, s := range seed {
+		m := Memory{
+			Scope: scopeUser, Key: s.key, Text: s.text,
+			CreatedAt: time.Now().Add(time.Duration(i) * time.Minute),
+			UpdatedAt: time.Now().Add(time.Duration(i) * time.Minute),
+		}
+		if err := r.db.Create(&m).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	st := memoryScopeStat{Scope: scopeUser, ScopeKey: "", Count: len(seed)}
+	res, err := compactScope(r.db, cfg, r, st, "user memories", time.Now())
+	if err != nil {
+		t.Fatalf("compaction failed: %v", err)
+	}
+	t.Logf("compaction %d: %d → %d", res.CompactionID, res.Before, res.After)
+
+	if res.Before != len(seed) {
+		t.Errorf("compacted %d entries, want the %d seeded", res.Before, len(seed))
+	}
+	if res.After >= res.Before {
+		t.Errorf("the merged list has %d entries, want fewer than %d: the duplicates were not merged",
+			res.After, res.Before)
+	}
+
+	var live []Memory
+	if err := r.db.Where("scope = ?", scopeUser).Order("key").Find(&live).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(live) != res.After {
+		t.Errorf("%d memories in the scope, want the %d the compaction produced", len(live), res.After)
+	}
+	for _, m := range live {
+		if strings.TrimSpace(m.Key) == "" || strings.TrimSpace(m.Text) == "" {
+			t.Errorf("a compacted memory is empty: %+v", m)
+		}
+	}
+
+	var archived []MemoryArchive
+	if err := r.db.Where("compaction_id = ?", res.CompactionID).Order("id").Find(&archived).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(archived) != len(seed) {
+		t.Fatalf("%d rows archived, want every original (%d)", len(archived), len(seed))
+	}
+	for i, a := range archived {
+		if a.Key != seed[i].key || a.Text != seed[i].text {
+			t.Errorf("archive row %d = %s/%q, want %s/%q", i, a.Key, a.Text, seed[i].key, seed[i].text)
+		}
+	}
+
+	// And the undo works against what the real model produced.
+	if _, n, err := restoreCompaction(r.db, res.CompactionID); err != nil || n != len(seed) {
+		t.Errorf("restore put back %d entries (%v), want %d", n, err, len(seed))
+	}
+
+	after := liveAgentCount(t)
+	if before >= 0 && after >= 0 && after != before {
+		t.Errorf("the agents view changed (%d -> %d): a compaction turn must not leave a background session", before, after)
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -51,9 +52,12 @@ const (
 )
 
 // Turn is one `claude -p` invocation: one input, one result.
+//
+// The (bot_id, created_at) index is what makes the maintenance job cheap: turn
+// retention walks one bot's history at a time, newest first (DESIGN §7).
 type Turn struct {
 	ID         int64 `gorm:"primaryKey"`
-	BotID      int64 `gorm:"index;not null"`
+	BotID      int64 `gorm:"index;index:idx_turn_bot_created,priority:1;not null"`
 	SessionID  string
 	Profile    string
 	Source     string `gorm:"not null"` // user|bot|schedule|watch|system
@@ -65,7 +69,7 @@ type Turn struct {
 	StartedAt  *time.Time
 	EndedAt    *time.Time
 	UsageJSON  string
-	CreatedAt  time.Time
+	CreatedAt  time.Time `gorm:"index:idx_turn_bot_created,priority:2"`
 	// TriggerMessageID is the Telegram message that produced this turn, so the
 	// runner can react to it with ✅ when the turn completes. 0 = no message.
 	TriggerMessageID int64
@@ -94,7 +98,7 @@ type InboxMessage struct {
 	Text        string
 	Wake        bool
 	CreatedAt   time.Time
-	DeliveredAt *time.Time
+	DeliveredAt *time.Time `gorm:"index"` // indexed: the maintenance job deletes by it
 	TurnID      *int64
 }
 
@@ -165,8 +169,27 @@ type Question struct {
 	Answer         string
 	AskedMessageID int64 `gorm:"index"`
 	CreatedAt      time.Time
-	AnsweredAt     *time.Time
+	AnsweredAt     *time.Time `gorm:"index"` // indexed: the maintenance job deletes by it
 }
+
+// MemoryArchive holds the memories one compaction replaced, so `/memory
+// restore <compaction_id>` can put them back (DESIGN §7). One compaction is
+// one scope and one CompactionID; the ids are dense integers because the owner
+// types them into Telegram.
+type MemoryArchive struct {
+	ID              int64 `gorm:"primaryKey"`
+	CompactionID    int64 `gorm:"index;not null"`
+	ArchivedAt      time.Time
+	Scope           string `gorm:"not null"`
+	ScopeKey        string `gorm:"not null"`
+	Key             string `gorm:"column:key;not null"`
+	Text            string
+	CreatedByBotID  *int64
+	MemoryCreatedAt time.Time
+	MemoryUpdatedAt time.Time
+}
+
+func (MemoryArchive) TableName() string { return "memories_archive" }
 
 // Access is the pairing/allowlist table (DESIGN §5/§8). Replies is not in
 // DESIGN's column list: it is what implements "at most two replies to a
@@ -194,7 +217,7 @@ type Setting struct {
 // front even where Phase 2a does not use a table yet.
 func allModels() []any {
 	return []any{
-		&Bot{}, &Turn{}, &InboxMessage{}, &Memory{}, &Project{},
+		&Bot{}, &Turn{}, &InboxMessage{}, &Memory{}, &MemoryArchive{}, &Project{},
 		&Watch{}, &Schedule{}, &Question{}, &Access{}, &Setting{},
 	}
 }
@@ -646,6 +669,41 @@ func ftsQuery(s string) string {
 // Settings
 // ---------------------------------------------------------------------------
 
+// Instance settings live in the settings table (DESIGN §5) and are edited from
+// Telegram with /set. Each one has a default that makes ccc behave sensibly
+// when the row has never been written.
+const (
+	// settingDebounceMS is how long an idle bot waits for more messages before
+	// starting a turn, so a burst of chat lines costs one `claude -p` run.
+	settingDebounceMS = "debounce_ms"
+	// settingCompactionModel is the cheap model the memory compaction turn runs
+	// on (DESIGN §7). "haiku" is an alias `claude -p --model` accepts (verified
+	// on 2.1.270); an unknown name falls back to the instance model.
+	settingCompactionModel = "compaction_model"
+	// settingMaintenanceHour is the local hour (0-23) the daily maintenance job
+	// runs at. Quiet by default: nobody is chatting at 04:00.
+	settingMaintenanceHour = "maintenance_hour"
+	// settingLastMaintenance is the date (YYYY-MM-DD) maintenance last ran, so
+	// a restart does not re-run it and a missed day is caught up on.
+	settingLastMaintenance = "last_maintenance"
+)
+
+const (
+	defaultDebounceMS      = 2500
+	defaultCompactionModel = "haiku"
+	defaultMaintenanceHour = 4
+	// maxDebounceMS keeps a typo (debounce_ms = 250000) from parking every bot.
+	maxDebounceMS = 60000
+)
+
+// settableKeys are the settings /set may write, with a one-line description.
+// Anything not listed here is ccc's own bookkeeping and is not user-editable.
+var settableKeys = map[string]string{
+	settingDebounceMS:      "ms an idle bot waits for more messages before starting a turn (default 2500)",
+	settingCompactionModel: "model the memory compaction turn runs on (default haiku)",
+	settingMaintenanceHour: "local hour the daily maintenance job runs at (default 4)",
+}
+
 func getSetting(db *gorm.DB, key, def string) string {
 	var s Setting
 	if err := db.First(&s, "key = ?", key).Error; err != nil {
@@ -655,6 +713,21 @@ func getSetting(db *gorm.DB, key, def string) string {
 		return def
 	}
 	return s.Value
+}
+
+// getSettingInt reads a numeric setting. An unparseable or negative value is
+// not an error worth failing a turn over: the default is used instead.
+func getSettingInt(db *gorm.DB, key string, def int) int {
+	raw := strings.TrimSpace(getSetting(db, key, ""))
+	if raw == "" {
+		return def
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		hookLog("setting %s = %q is not a number; using %d", key, raw, def)
+		return def
+	}
+	return n
 }
 
 func setSetting(db *gorm.DB, key, value string) error {

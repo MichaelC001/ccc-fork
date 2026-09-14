@@ -71,6 +71,7 @@ func (s *scheduler) Run() {
 			if now.Sub(s.doctor.lastRun) >= doctorInterval {
 				s.runDoctor(now)
 			}
+			s.runMaintenanceIfDue(now)
 		}
 	}
 }
@@ -275,6 +276,48 @@ func (s *scheduler) fireDueSchedules(now time.Time) {
 			hookLog("schedule %d: unparseable cron %q, retiring it", sc.ID, sc.RecurringCron)
 		}
 		s.in.db.Model(&Schedule{}).Where("id = ?", sc.ID).Update("fired_at", now)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Maintenance
+// ---------------------------------------------------------------------------
+
+// runMaintenanceIfDue runs the daily growth-control job once a day, at the
+// configured quiet hour (DESIGN §7). It is deliberately a check on the normal
+// tick rather than a timer: a machine that was asleep at 04:00 still gets its
+// maintenance the next time ccc is awake, and the marker being a date means it
+// runs once either way.
+func (s *scheduler) runMaintenanceIfDue(now time.Time) {
+	if !maintenanceDue(s.in.db, now) {
+		return
+	}
+	// Claim the day before doing the work: a slow pass must not be started
+	// twice by the next tick.
+	markMaintenanceRun(s.in.db, now)
+	go s.runMaintenanceNow(now)
+}
+
+// runMaintenanceNow is the job itself, off the scheduler's goroutine: the
+// compaction turn can take minutes and watches must keep running meanwhile.
+func (s *scheduler) runMaintenanceNow(now time.Time) {
+	deps := maintenanceDeps{Notify: s.in.notifyGeneral}
+	if r, ok := s.in.runner.(*Runner); ok {
+		deps.Turner = r
+	}
+	rep := runMaintenance(s.in.db, s.in.config(), deps, now)
+	listenLog("maintenance: %s", strings.ReplaceAll(strings.TrimSpace(rep.String()), "\n", "; "))
+}
+
+// notifyGeneral posts into the group's General topic: maintenance belongs to
+// the instance, not to any one bot, so it is not written into a bot's topic.
+func (in *instance) notifyGeneral(text string) {
+	cfg := in.config()
+	if cfg.BotToken == "" || cfg.GroupID == 0 {
+		return
+	}
+	if _, err := sendMessageHTMLGetID(cfg, cfg.GroupID, 0, htmlEscape(text)); err != nil {
+		hookLog("maintenance notification: %v", err)
 	}
 }
 

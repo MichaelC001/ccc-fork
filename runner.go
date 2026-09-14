@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -112,6 +113,52 @@ func claudeTurnArgs(model, systemPrompt, mcpConfig, sessionID string, resume boo
 	return args
 }
 
+// claudePlainArgs is the flag set for a turn that belongs to no bot: the memory
+// compaction of DESIGN §7. It is deliberately much smaller than a bot's turn —
+// a fresh session nobody resumes, no MCP server, no tools worth reaching for,
+// and plain text instead of an event stream, because the caller wants one
+// string back and there is no progress message to feed.
+//
+//	--session-id <uuid>         a fresh conversation every time; never resumed.
+//	--output-format text        one string on stdout; no stream to consume.
+//	--setting-sources ''        same isolation as a bot's turn: no CLAUDE.md,
+//	                            no settings, no auto-memory (see above).
+//	--disable-slash-commands    no installed skill can steer it.
+//	--strict-mcp-config +
+//	  --mcp-config {mcpServers:{}}   no MCP servers at all, ccc's included: a
+//	                            compaction turn must not touch the database it
+//	                            is being run to compact.
+//	--system-prompt <text>      replaces Claude Code's own (long) prompt with
+//	                            one line, which is all this job needs.
+//	--model <name>              the cheap compaction model (setting), or the
+//	                            instance model when that one is not known.
+//
+// No --permission-mode: this turn is a text transform, so the default (which
+// refuses tools under -p rather than running them) is exactly right.
+func claudePlainArgs(model, sessionID string) []string {
+	args := []string{
+		"-p",
+		"--output-format", "text",
+		"--session-id", sessionID,
+		"--setting-sources", "",
+		"--disable-slash-commands",
+		"--strict-mcp-config",
+		"--mcp-config", `{"mcpServers":{}}`,
+		"--system-prompt", plainTurnSystemPrompt,
+	}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	return args
+}
+
+const plainTurnSystemPrompt = "You are a text-processing tool. Follow the instructions in the message exactly " +
+	"and output only what they ask for, with no preamble and no commentary."
+
+// plainTurnTimeout caps a bot-less turn. Compaction is one pass over a few
+// hundred short lines; anything slower than this is stuck.
+const plainTurnTimeout = 10 * time.Minute
+
 // ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
@@ -221,6 +268,107 @@ func (r *Runner) Stop(botID int64) bool {
 	return true
 }
 
+// PlainTurn runs one model call outside any bot (DESIGN §7's memory
+// compaction): a fresh session, no tools, plain text in and out. It picks a
+// profile the same way a bot's turn does, so a logged-out or rate-limited
+// account is skipped here too, but it does not fail over: maintenance can wait
+// for tomorrow.
+func (r *Runner) PlainTurn(model, prompt string) (string, error) {
+	p, ok := r.pickProfileExcluding(nil)
+	if !ok {
+		return "", errors.New("no healthy Claude profile available")
+	}
+	cfg := r.config()
+	// The transcript of this turn lands in the shared projects/ dir keyed by
+	// the working directory; the data dir keeps it out of any bot's workspace.
+	cwd := dataDir(cfg)
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		return "", fmt.Errorf("create data dir: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), plainTurnTimeout)
+	defer cancel()
+	args := append(claudePlainArgs(model, newUUID()), prompt)
+	cmd := exec.CommandContext(ctx, claudeBin(), args...)
+	cmd.Dir = cwd
+	cmd.Env = botEnv(cfg, p)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if detail == "" {
+			detail = strings.TrimSpace(stdout.String())
+		}
+		return "", fmt.Errorf("%w: %s", err, truncate(detail, 500))
+	}
+	out := strings.TrimSpace(stdout.String())
+	// `claude -p` reports some refusals on stdout with a zero exit code (an
+	// unknown --model is one), so a plausible-looking failure is an error here
+	// rather than a "result" the caller would try to parse.
+	if out == "" {
+		return "", fmt.Errorf("claude returned nothing: %s", truncate(strings.TrimSpace(stderr.String()), 300))
+	}
+	if isUnknownModelError(out) {
+		return "", errors.New(truncate(out, 500))
+	}
+	return out, nil
+}
+
+// ---------------------------------------------------------------------------
+// Input debounce (DESIGN §14.18)
+// ---------------------------------------------------------------------------
+
+// debounceDuration is how long an idle bot waits for more messages before it
+// starts a turn. Chat arrives in bursts — a sentence, then the correction, then
+// the link — and each one becoming its own `claude -p` run is the single most
+// wasteful thing ccc can do with the owner's tokens.
+func (r *Runner) debounceDuration() time.Duration {
+	ms := getSettingInt(r.db, settingDebounceMS, defaultDebounceMS)
+	if ms <= 0 {
+		return 0
+	}
+	if ms > maxDebounceMS {
+		ms = maxDebounceMS
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
+// settleQueue waits until the bot's queue has been quiet for one debounce
+// window, so everything the owner is still typing lands in the same turn.
+//
+// Three things keep it from parking a bot:
+//   - only a queue whose newest input came from the owner waits; a watch, a
+//     schedule or another bot is delivering one thing, not a burst;
+//   - inputs that queued while the previous turn ran are already older than the
+//     window, so the wait is zero and the next turn starts immediately;
+//   - the total wait is capped, so a stream of messages still gets an answer.
+func (r *Runner) settleQueue(botID int64) {
+	window := r.debounceDuration()
+	if window <= 0 {
+		return
+	}
+	deadline := time.Now().Add(4 * window)
+	for {
+		var newest Turn
+		err := r.db.Where("bot_id = ? AND status = ?", botID, turnQueued).
+			Order("id DESC").First(&newest).Error
+		if err != nil || newest.Source != sourceUser {
+			return
+		}
+		wait := window - time.Since(newest.CreatedAt)
+		if wait <= 0 || time.Now().After(deadline) {
+			return
+		}
+		select {
+		case <-r.done:
+			return
+		case <-time.After(wait):
+		}
+	}
+}
+
 // kick starts (once) and wakes the bot's turn loop.
 func (r *Runner) kick(botID int64) {
 	r.mu.Lock()
@@ -265,6 +413,9 @@ func (r *Runner) runNext(botID int64) bool {
 	if b.Status == botWaiting || b.Status == botDisabled || b.ArchivedAt != nil {
 		return false
 	}
+	// Give a burst of chat messages the chance to arrive before the turn that
+	// will carry all of them starts.
+	r.settleQueue(botID)
 	head, input, triggers, ok := foldQueue(r.db, botID)
 	if !ok {
 		return false
@@ -590,7 +741,10 @@ type streamEvent struct {
 	Result  string          `json:"result"`
 	IsError bool            `json:"is_error"`
 	Usage   json.RawMessage `json:"usage"`
-	Message struct {
+	// TotalCostUSD sits beside usage on the result event, not inside it. /usage
+	// wants both, so it is folded into the stored usage object (mergeUsage).
+	TotalCostUSD float64 `json:"total_cost_usd"`
+	Message      struct {
 		Content []struct {
 			Type  string          `json:"type"`
 			Text  string          `json:"text"`
@@ -622,10 +776,34 @@ func (r *Runner) consumeEvent(line []byte, res *streamResult, prog *progress) {
 		res.Text = ev.Result
 		res.Subtype = ev.Subtype
 		res.IsError = ev.IsError
-		if len(ev.Usage) > 0 {
-			res.UsageJSON = string(ev.Usage)
-		}
+		res.UsageJSON = mergeUsage(ev.Usage, ev.TotalCostUSD)
 	}
+}
+
+// mergeUsage stores the result event's usage object with the run's cost folded
+// in under cost_usd. The cost is reported next to usage rather than inside it,
+// and /usage wants one blob per turn: keeping them together means the
+// aggregation reads one column and old rows (which have no cost) still parse.
+func mergeUsage(usage json.RawMessage, costUSD float64) string {
+	if len(usage) == 0 {
+		if costUSD <= 0 {
+			return ""
+		}
+		usage = json.RawMessage("{}")
+	}
+	if costUSD <= 0 {
+		return string(usage)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(usage, &fields); err != nil || fields == nil {
+		return string(usage) // safe-ignore: an unreadable usage blob is stored as-is rather than dropped
+	}
+	fields["cost_usd"] = costUSD
+	merged, err := json.Marshal(fields)
+	if err != nil {
+		return string(usage) // safe-ignore: same
+	}
+	return string(merged)
 }
 
 // summarizeTool turns a tool_use event into the one-line "what is it doing

@@ -325,6 +325,7 @@ COMMANDS:
     setgroup                Record the forum group from your next message in it
     install                 Install the background service (launchd / systemd --user)
     doctor                  Check dependencies and configuration
+    maintain                Run the daily growth-control job once, now
     profile <cmd>           Manage Claude accounts (list/add/remove/default/login)
     mcp --bot <id>          MCP server for one turn (spawned by Claude Code)
     send <file>             Send a file into the topic of the bot owning this directory
@@ -334,8 +335,9 @@ TELEGRAM (in the forum group):
     Text in General         Create a new bot from your message
     Text in a bot's topic   Talk to that bot
     /role /new /stop /cwd /memory /forget /watches /schedules   per bot
-    /bots /status                                               anywhere
-    /account /access /model /setgroup                           owner only
+    /bots /status /usage                                        anywhere
+    /memory stats|restore <id>                                  memory upkeep
+    /account /access /model /set /setgroup                      owner only
 
 FLAGS:
     -h, --help              Show this help

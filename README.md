@@ -196,6 +196,8 @@ what the bot is doing. It is replaced by the answer, and your message gets a ✅
 | `/stop` | Kill the running turn and drop the queue. |
 | `/cwd [path]` | Show or set the bot's working directory. |
 | `/memory [query]` | List or search the memories this bot can see. |
+| `/memory stats` | Per scope: how many entries, how many bytes, whether it is due for compaction, and when it was last compacted. |
+| `/memory restore <id>` | Undo one memory compaction (owner only). The id is in the compaction message and in `/memory stats`. |
 | `/forget <scope> <key>` | Delete one memory. |
 | `/watches` / `/watches cancel <name>` | List or cancel its watches. |
 | `/schedules` / `/schedules cancel <id>` | List or cancel its wakeups. |
@@ -206,6 +208,7 @@ what the bot is doing. It is replaced by the answer, and your message gets a ✅
 |---|---|
 | `/bots` | Every bot, its status and when it last ran. |
 | `/status` | Queue, running turns, accounts, watches, schedules and doctor findings. |
+| `/usage` | Tokens in/out, cache hit ratio, turns, average duration and cost — per bot and in total, for today and the last 7 days. |
 
 **Owner only**
 
@@ -215,6 +218,7 @@ what the bot is doing. It is replaced by the answer, and your message gets a ✅
 | `/account add\|login\|remove\|default <name>` | Manage accounts (see above). |
 | `/access` | Who may talk to ccc (see below). |
 | `/model [name]` | Show or set the model every bot runs on. `/model default` clears it. |
+| `/set [key] [value]` | Show or change an instance setting: `debounce_ms`, `compaction_model`, `maintenance_hour` (see below). |
 | `/setgroup` | Bind ccc to the forum group the command was sent in. |
 
 ### What a bot can do for itself
@@ -237,6 +241,58 @@ Every bot has these tools, and uses them without being told:
   emoji Telegram allows for forum topics; the tool lists them, and an emoji
   outside the set leaves the icon unchanged.
 - `send_file` — send a file into its topic (refuses credential paths).
+
+### What it costs, and what keeps it small
+
+**One turn per burst, not per message.** When you send three lines in a row, an
+idle bot waits `debounce_ms` (default 2500) for you to stop typing and answers
+all of them in ONE `claude -p` run. Messages that arrive while a turn is running
+already queue and are delivered together on the next one. A watch, a schedule or
+another bot is never delayed. `/set debounce_ms 0` turns the wait off.
+
+**Resumed turns are mostly cache reads.** The system prompt of a session is
+byte-stable from turn to turn (the roster and icon list are sorted, nothing that
+changes per turn is in it), so the API's prompt cache covers the conversation
+and only the new message is charged as fresh input. `/usage` reports the cache
+hit ratio per bot — if it drops, something started varying the prompt.
+
+**Bots are told not to wake each other for nothing.** `send_to_bot(wake=true)`
+starts a turn on the recipient; the system prompt tells them to use
+`wake=false` for anything the other bot only needs to know, and to send one
+message instead of five.
+
+### Maintenance (it cleans up after itself)
+
+Once a day at `maintenance_hour` (default 04:00 local) — or on demand with
+`ccc maintain` — ccc keeps its own database small:
+
+- **Turns**: it keeps 30 days OR the last 200 per bot, whichever keeps more, and
+  after a week it replaces a turn's text with the first 500 characters. The
+  status and the token usage are kept, so `/usage` still works on old turns.
+- **Memories**: when one scope (your `user` memories, a project's, a bot's)
+  passes 120 entries or 48 KB, ONE turn on a cheap model (`compaction_model`,
+  default `haiku`) merges the duplicates and drops what a newer entry
+  contradicts. It runs outside every bot, with no tools and no access to
+  anything. You get a message in **General**:
+
+  ```
+  🧹 Compacted user memories: 143 → 61 (/memory restore 4 to undo)
+  ```
+
+  The originals are archived, so `/memory restore 4` puts them back exactly.
+  If the result does not parse, or if it dropped more than 60% of the entries,
+  **nothing is applied** and you are told why instead.
+- **Cleanup**: delivered bot-to-bot messages and answered questions older than
+  30 days, the private notes of bots archived over a month ago, and memory
+  archives older than 90 days.
+
+Settings you can change with `/set`:
+
+| Setting | Default | What it does |
+|---|---|---|
+| `debounce_ms` | 2500 | How long an idle bot waits for more messages before starting a turn. 0 disables it. |
+| `compaction_model` | `haiku` | The cheap model the memory compaction runs on. An unknown name falls back to the instance model. |
+| `maintenance_hour` | 4 | Local hour the daily job runs at. A machine that was off catches up when it wakes. |
 
 ### Access control
 
@@ -294,6 +350,11 @@ profile is marked. Fix it with `/account login <name>`.
 **Every account is rate limited.** The turn reports it and the accounts go on
 cooldown until their cached reset time. `/status` shows the cooldowns.
 
+**A compaction dropped something I wanted.** `/memory stats` shows the last
+compaction id per scope; `/memory restore <id>` puts the originals back and
+undoes it. Raise the thresholds by keeping fewer memories, or set
+`/set compaction_model` to a stronger model if the cheap one consolidates badly.
+
 **`systemctl --user` fails with "Failed to connect to bus".** Export
 `XDG_RUNTIME_DIR=/run/user/$(id -u)` and make sure `loginctl enable-linger
 $USER` is on. See step 5.
@@ -322,6 +383,7 @@ ccc setup <bot_token>         Interactive bootstrap (owner, group, service)
 ccc config [get|set] …        Non-interactive bootstrap
 ccc setgroup                  Record the group from your next message in it
 ccc install                   Install the service (launchd / systemd --user)
+ccc maintain                  Run the daily growth-control job once, now
 ccc doctor                    Check dependencies and configuration
 ccc profile <cmd>             Manage accounts from a shell (list/add/remove/default/login)
 ccc send <file>               Send a file into the topic of the bot owning this directory

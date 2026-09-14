@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 func TestClaudeTurnArgsIsolatesTheBot(t *testing.T) {
@@ -381,5 +383,155 @@ func TestPickProfileExcludingSkipsTriedAndLoggedOutAccounts(t *testing.T) {
 	// With every profile already tried there is nothing left to fail over to.
 	if _, ok := r.pickProfileExcluding(map[string]bool{"alpha": true, "beta": true}); ok {
 		t.Error("expected no profile when every account has already been tried")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Input debounce (DESIGN §14.18)
+// ---------------------------------------------------------------------------
+
+// queue puts one input in a bot's queue WITHOUT starting its loop, so a test
+// can exercise the queue without spawning a real `claude`.
+func queue(t *testing.T, db *gorm.DB, botID int64, source, text string) {
+	t.Helper()
+	if err := db.Create(&Turn{BotID: botID, Source: source, Input: text, Status: turnQueued}).Error; err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+}
+
+// queueAsync is queue for a goroutine, where t.Fatalf is not allowed.
+func queueAsync(db *gorm.DB, botID int64, source, text string) {
+	if err := db.Create(&Turn{BotID: botID, Source: source, Input: text, Status: turnQueued}).Error; err != nil {
+		hookLog("test queue: %v", err)
+	}
+}
+
+// Two messages typed a moment apart become ONE turn: the runner waits out the
+// debounce window before it folds the queue, so a burst of chat costs one
+// `claude -p` run instead of one per line.
+func TestDebounceCoalescesABurstIntoOneTurn(t *testing.T) {
+	in, _, _ := testInstance(t)
+	b, err := in.createBot("typer", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := setSetting(in.db, settingDebounceMS, "400"); err != nil {
+		t.Fatal(err)
+	}
+	// The rows are created directly rather than through Enqueue: Enqueue also
+	// starts the bot's loop, which would spawn a real `claude` process. What is
+	// under test is the wait, and the wait reads the queue.
+	r := newRunner(in.db, in.cfg, nil)
+	t.Cleanup(r.Close)
+
+	queue(t, in.db, b.ID, sourceUser, "first half of the thought")
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		queueAsync(in.db, b.ID, sourceUser, "and the correction")
+	}()
+
+	start := time.Now()
+	r.settleQueue(b.ID)
+	waited := time.Since(start)
+	if waited < 400*time.Millisecond {
+		t.Errorf("settled after %v; the window must be measured from the LAST message", waited)
+	}
+
+	_, input, _, ok := foldQueue(in.db, b.ID)
+	if !ok {
+		t.Fatal("nothing to run after the debounce window")
+	}
+	if input != "first half of the thought\n\nand the correction" {
+		t.Errorf("folded input = %q, want both messages in one turn", input)
+	}
+}
+
+// One message still runs, after the window and no longer.
+func TestDebounceReleasesASingleMessage(t *testing.T) {
+	in, _, _ := testInstance(t)
+	b, err := in.createBot("lonely", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := setSetting(in.db, settingDebounceMS, "300"); err != nil {
+		t.Fatal(err)
+	}
+	r := newRunner(in.db, in.cfg, nil)
+	t.Cleanup(r.Close)
+	queue(t, in.db, b.ID, sourceUser, "just this")
+
+	start := time.Now()
+	r.settleQueue(b.ID)
+	waited := time.Since(start)
+	if waited < 250*time.Millisecond || waited > 2*time.Second {
+		t.Errorf("settled after %v, want roughly the 300ms window", waited)
+	}
+	if _, _, _, ok := foldQueue(in.db, b.ID); !ok {
+		t.Error("the message must run once the window has passed")
+	}
+}
+
+// Machine-made inputs are not a burst of typing: a watch, a schedule or another
+// bot delivers one thing and it runs at once.
+func TestDebounceDoesNotDelayMachineInputs(t *testing.T) {
+	in, _, _ := testInstance(t)
+	b, err := in.createBot("watched", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := setSetting(in.db, settingDebounceMS, "5000"); err != nil {
+		t.Fatal(err)
+	}
+	r := newRunner(in.db, in.cfg, nil)
+	t.Cleanup(r.Close)
+	queue(t, in.db, b.ID, sourceWatch, "the build went red")
+
+	start := time.Now()
+	r.settleQueue(b.ID)
+	if waited := time.Since(start); waited > time.Second {
+		t.Errorf("a watch waited %v for a debounce window it should skip", waited)
+	}
+}
+
+func TestDebounceCanBeTurnedOff(t *testing.T) {
+	in, _, _ := testInstance(t)
+	r := newRunner(in.db, in.cfg, nil)
+	t.Cleanup(r.Close)
+	if got := r.debounceDuration(); got != defaultDebounceMS*time.Millisecond {
+		t.Errorf("default debounce = %v, want %dms", got, defaultDebounceMS)
+	}
+	if err := setSetting(in.db, settingDebounceMS, "0"); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.debounceDuration(); got != 0 {
+		t.Errorf("debounce_ms = 0 must disable the wait, got %v", got)
+	}
+	if err := setSetting(in.db, settingDebounceMS, "999999"); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.debounceDuration(); got != maxDebounceMS*time.Millisecond {
+		t.Errorf("an absurd debounce_ms must be capped, got %v", got)
+	}
+}
+
+// The plain-turn flags (memory compaction) carry the same isolation as a bot's
+// turn, and no MCP server at all.
+func TestClaudePlainArgsCarryNoTools(t *testing.T) {
+	args := strings.Join(claudePlainArgs("haiku", "0d9d9e5a-3d1c-4f1e-8a77-4c2f2b1d9b11"), " ")
+	for _, want := range []string{
+		"-p", "--output-format text", "--session-id 0d9d9e5a", "--setting-sources  ",
+		"--disable-slash-commands", "--strict-mcp-config", `--mcp-config {"mcpServers":{}}`, "--model haiku",
+	} {
+		if !strings.Contains(args, want) {
+			t.Errorf("plain-turn args are missing %q: %s", want, args)
+		}
+	}
+	for _, unwanted := range []string{"--resume", "bypassPermissions", "stream-json", "ccc mcp"} {
+		if strings.Contains(args, unwanted) {
+			t.Errorf("plain-turn args should not carry %q: %s", unwanted, args)
+		}
+	}
+	if strings.Contains(strings.Join(claudePlainArgs("", "x"), " "), "--model") {
+		t.Error("no compaction model means claude's own default, not an empty --model")
 	}
 }

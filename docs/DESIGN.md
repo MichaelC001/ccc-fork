@@ -146,6 +146,8 @@ turns       id, bot_id, session_id, profile, source (user|bot|schedule|watch|sys
 inbox       id, to_bot_id, from_bot_id (nullable = owner/system), text, wake (bool), delivered_at, turn_id
 memories    id, scope (user|project|bot), scope_key (''|project path|bot id), key, text,
             created_by_bot_id, created_at, updated_at        -- unique(scope, scope_key, key)
+memories_archive  id, compaction_id, archived_at, scope, scope_key, key, text, created_by_bot_id,
+            memory_created_at, memory_updated_at            -- what a compaction replaced (§7)
 projects    id, path (unique), name, description, stack, deploy_notes, updated_at
 watches     id, bot_id, name, command, interval_s, last_hash, last_output, last_run_at, enabled
 schedules   id, bot_id, fire_at, note, recurring_cron (nullable), fired_at
@@ -154,6 +156,15 @@ access      telegram_user_id (pk), display, state (pending|approved|blocked), pa
             replies (how many times ccc has answered this stranger, §14.7)
 settings    key (pk), value                                  -- instance settings edited from Telegram
 ```
+
+Indexes beyond the ones the columns above imply: `turns(bot_id, created_at)`
+for turn retention, `inbox(delivered_at)` and `questions(answered_at)` for
+cleanup, `memories_archive(compaction_id)` for restore.
+
+Settings actually used: `debounce_ms` (default 2500, §14.18),
+`compaction_model` (default `haiku`, §7), `maintenance_hour` (default 4),
+`last_maintenance` (ccc's own marker), `topic_icons` (the cached sticker set,
+§14.16). `/set` edits the first three; the rest are bookkeeping.
 
 Existing `config.json` (bot token, group id, profiles) stays as bootstrap
 config; everything runtime lives in SQLite. The v2 `sessions` map and the
@@ -208,6 +219,54 @@ One goroutine in `ccc listen`:
 - **Doctor loop** (every 15 min): `claude auth status --json` per profile
   (exit code 1 = logged out — verified), disclaimer check, usage cache read.
   Transitions to `needs_login` → owner notification with **Relogin** button.
+- **Maintenance** (once a day, at `maintenance_hour`, default 04:00 local; also
+  `ccc maintain`): growth control, below. The marker is a DATE, so a machine
+  that was asleep at 04:00 catches up when it wakes, and runs once either way.
+
+### 7.1 Maintenance: growth control
+
+Three steps, in `maintenance.go`. Nothing here is fatal: a step that fails is
+reported (to the CLI, and to the owner in General when it abandoned a
+compaction) and the rest still runs.
+
+**Turn retention.** A turn is deleted only when it fails BOTH halves of "keep 30
+days OR the last 200 per bot, whichever keeps more": it is older than 30 days
+AND outside its bot's most recent 200. Turns older than 7 days keep their row,
+their status and their `usage_json` — `/usage` reads those long after the text
+is gone — but `input`/`output` are replaced by the first 500 characters plus a
+marker. The cut is plain truncation, not a model call: summarising thousands of
+rows would cost more than the bytes are worth, and the marker is also how the
+next run recognises a body it already trimmed.
+
+**Memory compaction, by threshold and not by calendar.** Per scope (`user`, each
+`project` key, each `bot`): when the scope holds more than 120 entries or more
+than 48 KB of key+text, ONE turn on a cheap model (`compaction_model`, default
+`haiku` — verified accepted by 2.1.270; an unrecognised name falls back to the
+instance model) rewrites it. That turn runs through the runner but **outside any
+bot**: a fresh `--session-id` nobody resumes, `--setting-sources ''`, no MCP
+server at all (so it cannot touch the database it is compacting), plain text in
+and out (`claudePlainArgs`). The prompt is the scope as `key: text` lines,
+oldest first, plus instructions to merge duplicates, drop what a later entry
+contradicts, keep every distinct durable fact, and answer in the same format and
+nothing else.
+
+The result is parsed strictly — every non-blank line must be `key: text`, and a
+bullet, a heading, a fence or a preamble fails the whole parse — because
+guessing which lines were meant to be memories is how facts get lost. On a parse
+failure, or when the result keeps less than 40% of the entries (i.e. more than
+60% disappeared), NOTHING is applied and the owner is told why.
+
+Applying is one transaction: the old rows are copied into `memories_archive`
+under a fresh dense `compaction_id`, the scope's rows are deleted, the new ones
+are inserted. The owner gets `🧹 Compacted user memories: 143 → 61 (/memory
+restore <id> to undo)` in General. `/memory restore <id>` (owner only) puts the
+originals back and consumes the archive rows; `/memory stats` shows count, bytes
+and last compaction per scope.
+
+**Cleanup.** Delivered `inbox` rows and answered `questions` older than 30 days;
+`bot`-scope memories of bots archived more than 30 days ago (nothing can read
+them — bot memories are visible to that bot alone); `memories_archive` rows
+older than 90 days.
 
 ## 8. Telegram UX
 
@@ -237,6 +296,10 @@ One goroutine in `ccc listen`:
 | `/stop` | topic | Kill the running turn (SIGTERM the `claude` process), drop the queue. |
 | `/cwd [path]` | topic | Show or set the bot's working dir. |
 | `/memory [query]` | topic | List/search memories visible to this bot; `/forget <scope> <key>`. |
+| `/memory stats` | topic | Per scope: entries, bytes, whether it is over the compaction threshold, last compaction (§7.1). |
+| `/memory restore <id>` | topic | Undo one compaction. Owner only. |
+| `/usage` | anywhere | Tokens, cache hit ratio, turns, average duration and cost per bot, today and last 7 days (§14.19). |
+| `/set [key] [value]` | anywhere | Show or change an instance setting (`debounce_ms`, `compaction_model`, `maintenance_hour`). Owner only (§14.18). |
 | `/watches`, `/schedules` | topic | List and cancel. |
 | `/bots` | anywhere | Table of bots, status, last activity. |
 | `/account` | anywhere | Status card per profile with buttons; subcommands `status`, `add <name>`, `login <name>`, `remove <name>`, `default <name>`. |
@@ -308,6 +371,26 @@ pending inbox summary (N messages from X)
 ```
 
 Keep the envelope under ~4 KB; `recall` exists for everything else.
+
+### 9.1 Prompt-cache discipline
+
+The API's prompt cache keys on a PREFIX of the request, and the system prompt is
+the first thing in it. One byte that differs between two turns of the same
+conversation invalidates the cache for the whole conversation, and the entire
+history is re-charged as fresh input. So the split above is not only about
+14.5's snapshot: it is what makes a resumed turn cheap.
+
+Audited and enforced (§14.20): the system prompt holds only facts fixed for the
+life of a session — name, role, hostname, cwd, the tool list — plus two lists
+that are SORTED before rendering (the other-bots roster, by name; the topic-icon
+emoji). A bot's live status was removed from the roster because it changes every
+turn; the date was never in the prompt. Everything per-turn (date, memories,
+inbox, onboarding) is in the envelope, which is the TAIL of the request: it
+costs only itself and invalidates nothing.
+
+`/usage` reports the cache hit ratio (`cache_read / (cache_read + input)`) per
+bot, which is how a regression here is noticed: a resumed conversation that
+stops being mostly cache reads means something started varying the prefix.
 
 ## 10. Isolation from Claude Code defaults (implementer verifies each)
 
@@ -492,3 +575,43 @@ with `update_instructions` and pick a name and icon with `set_name`. It lives in
 the envelope because the system prompt is frozen per conversation (14.5): from
 there it could not disappear the moment the role is set, which is exactly when
 it has to.
+
+**14.18 Inputs are debounced before a turn starts.** §2 only said further inputs
+"queue and are delivered together on the next turn", which handles a burst that
+arrives WHILE a turn runs but not the normal case: an idle bot, and an owner who
+types a sentence, then the correction, then the link. Each of those was its own
+`claude -p` run, which is the most wasteful thing ccc can do with a token
+budget. So `runNext` now waits for the queue to be quiet for `debounce_ms`
+(instance setting, default 2500) before folding it. Three guards keep a bot from
+being parked: only a queue whose newest input has `source=user` waits (a watch
+or another bot is delivering one thing, not typing); inputs that queued during
+the previous turn are already older than the window, so the wait is zero; and
+the total wait is capped at four windows. `/set debounce_ms 0` turns it off.
+
+`/set` exists because §5's settings table was described as "edited from
+Telegram" without anything to edit it with. It writes a whitelist of three keys;
+everything else in that table is ccc's own bookkeeping.
+
+**14.19 `/usage` reads `turns.usage_json`, and the cost is folded into it.** The
+`result` event reports `total_cost_usd` NEXT TO `usage`, not inside it, so the
+runner merges it in under `cost_usd` before storing: one column per turn, and
+old rows (which carry `total_cost_usd` or nothing) still parse. Only turns with
+a `started_at` are counted — an input that `foldQueue` merged into another turn
+is bookkeeping, not a run, and counting it would make "turns" disagree with what
+was spent.
+
+**14.20 The system prompt is byte-stable on purpose.** 14.5 established that
+Claude Code snapshots the system prompt per conversation. The prompt cache adds
+a second, sharper reason to keep it identical from turn to turn: it keys on a
+prefix of the request, so one differing byte re-charges the whole conversation
+as fresh input. The audit found two things that could move — the roster carried
+each bot's live status, and the icon list came back from Telegram in whatever
+order it liked. The status is gone (`list_bots` is where live status belongs)
+and both lists are sorted before rendering. The date was already in the
+envelope, and stays there. §9.1 has the rule.
+
+**14.21 `send_to_bot(wake=true)` is now taught as the expensive option.** Every
+waking message starts a turn on the recipient (14.10), so the system prompt
+tells bots to use `wake=false` for anything the other bot only needs to know and
+`wake=true` only when it must act now, and to say everything they have in ONE
+message rather than several.
