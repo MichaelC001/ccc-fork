@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -13,8 +14,25 @@ import (
 
 const progressInterval = 3 * time.Second
 
-// telegramTextLimit is Telegram's hard per-message cap.
+// telegramTextLimit is Telegram's hard per-message cap; ccc sends with the
+// smaller telegramChunkLimit so a split never brushes against it.
 const telegramTextLimit = 4096
+
+// messageDeleter is the optional half of botUI: a surface that can retract one
+// of its own messages. Telegram can; the test doubles need not.
+type messageDeleter interface {
+	Delete(topicID, msgID int64) error
+}
+
+// Delete retracts a message from the bot's topic. It lives next to the only
+// caller rather than with the rest of telegramUI.
+func (t telegramUI) Delete(_ int64, msgID int64) error {
+	cfg := t.in.config()
+	if cfg.BotToken == "" || cfg.GroupID == 0 || msgID == 0 {
+		return nil
+	}
+	return deleteMessage(cfg, cfg.GroupID, msgID)
+}
 
 type progress struct {
 	ui      botUI
@@ -83,6 +101,11 @@ func (p *progress) flush(force bool) {
 
 // finish replaces the progress message with the turn's final text, sending any
 // overflow beyond one Telegram message as follow-ups.
+//
+// The model writes markdown-ish plain text, so it is rendered into Telegram's
+// HTML subset first: handing the raw text to a parse_mode=HTML send is what
+// used to make Telegram reject — and ccc silently drop — every reply that
+// happened to contain a "<".
 func (p *progress) finish(final string) {
 	if p == nil || p.ui == nil {
 		return
@@ -91,7 +114,7 @@ func (p *progress) finish(final string) {
 	if final == "" {
 		final = "(no reply)"
 	}
-	chunks := splitMessage(final, telegramTextLimit-64)
+	chunks := splitTelegramHTML(renderTelegramHTML(final), telegramChunkLimit)
 
 	p.mu.Lock()
 	p.finished = true
@@ -99,15 +122,41 @@ func (p *progress) finish(final string) {
 	created := p.created
 	p.mu.Unlock()
 
+	edited := false
 	if created {
 		if err := p.ui.Edit(p.topicID, msgID, chunks[0]); err != nil {
-			_, _ = p.ui.Post(p.topicID, chunks[0]) // safe-ignore: falling back to a new message; the edit already failed
+			log.Printf("progress: could not edit the final reply into message %d: %v", msgID, err)
+		} else {
+			edited = true
 		}
-	} else {
-		_, _ = p.ui.Post(p.topicID, chunks[0]) // safe-ignore: nothing to do if the topic itself is gone
 	}
-	for _, c := range chunks[1:] {
-		_, _ = p.ui.Post(p.topicID, c) // safe-ignore: same
+	if !edited {
+		if _, err := p.ui.Post(p.topicID, chunks[0]); err != nil {
+			log.Printf("progress: reply chunk 1/%d (%d bytes) could not be delivered: %v", len(chunks), len(chunks[0]), err)
+		}
+	}
+	for i, c := range chunks[1:] {
+		if _, err := p.ui.Post(p.topicID, c); err != nil {
+			log.Printf("progress: reply chunk %d/%d (%d bytes) could not be delivered: %v", i+2, len(chunks), len(c), err)
+		}
+	}
+	if created && !edited {
+		p.retireProgress(msgID)
+	}
+}
+
+// retireProgress clears the stale "⏳ working" message left behind when the
+// final reply had to be posted as a new message instead of edited in.
+func (p *progress) retireProgress(msgID int64) {
+	if d, ok := p.ui.(messageDeleter); ok {
+		err := d.Delete(p.topicID, msgID)
+		if err == nil {
+			return
+		}
+		log.Printf("progress: could not delete the stale progress message %d: %v", msgID, err)
+	}
+	if err := p.ui.Edit(p.topicID, msgID, "✅ replied below"); err != nil {
+		log.Printf("progress: could not retire the stale progress message %d: %v", msgID, err)
 	}
 }
 

@@ -307,7 +307,7 @@ func (s *mcpServer) sendToBot(_ context.Context, _ *mcp.CallToolRequest, in send
 		fromName = self.Name
 	}
 	mirror := fmt.Sprintf("🤝 <b>%s</b> → <b>%s</b>: %s",
-		htmlEscape(fromName), htmlEscape(target.Name), htmlEscape(truncate(body, 1500)))
+		htmlEscape(fromName), htmlEscape(target.Name), renderTelegramHTML(truncate(body, 1500)))
 	s.post(target.TopicID, mirror)
 	if err == nil && self.TopicID != target.TopicID {
 		s.post(self.TopicID, mirror)
@@ -328,11 +328,11 @@ func (s *mcpServer) notifyOwner(_ context.Context, _ *mcp.CallToolRequest, in no
 	if strings.EqualFold(in.Urgency, "urgent") {
 		prefix = "🚨"
 	}
-	msg := fmt.Sprintf("%s %s", prefix, htmlEscape(truncate(body, 3000)))
+	msg := fmt.Sprintf("%s %s", prefix, renderTelegramHTML(truncate(body, 3000)))
 	s.post(b.TopicID, msg)
 	if strings.EqualFold(in.Urgency, "urgent") && s.config.ChatID != 0 && s.config.BotToken != "" {
 		_, _ = sendMessageHTMLGetID(s.config, s.config.ChatID, 0,
-			fmt.Sprintf("%s <b>%s</b>: %s", prefix, htmlEscape(b.Name), htmlEscape(truncate(body, 3000)))) // safe-ignore: the topic message already went out
+			fmt.Sprintf("%s <b>%s</b>: %s", prefix, htmlEscape(b.Name), renderTelegramHTML(truncate(body, 3000)))) // safe-ignore: the topic message already went out
 	}
 	return text("owner notified"), nil, nil
 }
@@ -393,7 +393,7 @@ func (s *mcpServer) updateInstructions(_ context.Context, _ *mcp.CallToolRequest
 	if err := s.db.Model(&Bot{}).Where("id = ?", b.ID).Update("role", role).Error; err != nil {
 		return toolErr("could not update the role: %v", err), nil, nil
 	}
-	s.post(b.TopicID, "📝 <b>New role</b>\n"+htmlEscape(truncate(role, 3000)))
+	s.post(b.TopicID, "📝 <b>New role</b>\n"+renderTelegramHTML(truncate(role, 3000)))
 	return text("role updated; your next message starts a fresh conversation with it"), nil, nil
 }
 
@@ -526,7 +526,7 @@ func (s *mcpServer) postQuestion(topicID, questionID int64, question string, opt
 	if s.config == nil || s.config.BotToken == "" || s.config.GroupID == 0 || topicID == 0 {
 		return 0
 	}
-	body := "❓ " + htmlEscape(question)
+	body := "❓ " + renderTelegramHTML(question)
 	if len(options) == 0 {
 		body += "\n<i>Reply to this message with your answer.</i>"
 		id, _ := sendMessageHTMLGetID(s.config, s.config.GroupID, topicID, body) // safe-ignore: a question with no message id can still be answered by reply

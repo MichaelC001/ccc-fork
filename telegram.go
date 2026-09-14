@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -17,6 +18,10 @@ import (
 )
 
 const maxResponseSize = 10 * 1024 * 1024 // 10MB
+
+// telegramChunkLimit is the per-message budget ccc sends with. Telegram's hard
+// cap is 4096; the slack absorbs the tags splitTelegramHTML has to reopen.
+const telegramChunkLimit = 4000
 
 // telegramBaseURL is the Bot API root. It is a variable so tests can point the
 // whole Telegram surface at an httptest server; production never changes it.
@@ -178,10 +183,7 @@ func sendMessageHTMLGetID(config *Config, chatID int64, threadID int64, text str
 }
 
 func sendMessageWithMode(config *Config, chatID int64, threadID int64, text string, parseMode string) (int64, error) {
-	const maxLen = 4000
-
-	// Split long messages
-	messages := splitMessage(text, maxLen)
+	messages := splitForMode(text, parseMode)
 	var lastMsgID int64
 
 	for _, msg := range messages {
@@ -199,15 +201,18 @@ func sendMessageWithMode(config *Config, chatID int64, threadID int64, text stri
 			return 0, err
 		}
 		if !result.OK {
-			// If Markdown/HTML parsing fails, retry as plain text
-			if strings.Contains(result.Description, "parse entities") && parseMode != "" {
+			// Telegram rejects the whole message when the markup does not
+			// parse, so retry once as plain text rather than lose it.
+			if isParseEntitiesError(result.Description) && parseMode != "" {
+				log.Printf("telegram sendMessage rejected the %s markup (%s); retrying as plain text", parseMode, result.Description)
 				params.Del("parse_mode")
-				params.Set("text", "⚠️\n[this message displayed as plain text, since markdown parse failed]\n\n"+msg)
+				params.Set("text", plainFallbackText(msg, parseMode))
 				result, err = telegramAPI(config, "sendMessage", params)
 				if err != nil {
 					return 0, err
 				}
 				if !result.OK {
+					log.Printf("telegram sendMessage plain-text retry also failed: %s", result.Description)
 					return 0, fmt.Errorf("telegram error: %s", result.Description)
 				}
 			} else {
@@ -244,10 +249,8 @@ func editMessageHTML(config *Config, chatID int64, messageID int64, threadID int
 }
 
 func editMessageWithMode(config *Config, chatID int64, messageID int64, threadID int64, text string, parseMode string) error {
-	const maxLen = 4000
-
 	// Split message - first part goes to edit, rest as new messages
-	messages := splitMessage(text, maxLen)
+	messages := splitForMode(text, parseMode)
 
 	// Edit existing message with first part
 	params := url.Values{
@@ -262,16 +265,74 @@ func editMessageWithMode(config *Config, chatID int64, messageID int64, threadID
 		return err
 	}
 	if !result.OK {
-		// If edit fails (e.g., message not modified), ignore
-		return nil
+		switch {
+		case strings.Contains(result.Description, "message is not modified"):
+			// Nothing changed; the message on screen is already correct.
+		case isParseEntitiesError(result.Description) && parseMode != "":
+			log.Printf("telegram editMessageText rejected the %s markup (%s); retrying as plain text", parseMode, result.Description)
+			params.Del("parse_mode")
+			params.Set("text", plainFallbackText(messages[0], parseMode))
+			result, err = telegramAPI(config, "editMessageText", params)
+			if err != nil {
+				return err
+			}
+			if !result.OK && !strings.Contains(result.Description, "message is not modified") {
+				log.Printf("telegram editMessageText plain-text retry also failed: %s", result.Description)
+				return fmt.Errorf("telegram error: %s", result.Description)
+			}
+		default:
+			return fmt.Errorf("telegram error: %s", result.Description)
+		}
 	}
 
-	// Send remaining parts as new messages
+	// Send remaining parts as new messages, in the same mode the edit used.
 	for i := 1; i < len(messages); i++ {
 		time.Sleep(100 * time.Millisecond)
-		sendMessage(config, chatID, threadID, messages[i])
+		if _, err := sendMessageWithMode(config, chatID, threadID, messages[i], parseMode); err != nil {
+			log.Printf("telegram overflow message %d/%d failed: %v", i+1, len(messages), err)
+		}
 	}
 
+	return nil
+}
+
+// splitForMode chunks a message the way its parse mode needs: HTML is split
+// tag-aware so no chunk is left with a half tag, everything else by text.
+func splitForMode(text, parseMode string) []string {
+	if strings.EqualFold(parseMode, "HTML") {
+		return splitTelegramHTML(text, telegramChunkLimit)
+	}
+	return splitMessage(text, telegramChunkLimit)
+}
+
+// isParseEntitiesError matches the Telegram 400 raised when the markup in a
+// message does not parse ("Bad Request: can't parse entities: ...").
+func isParseEntitiesError(description string) bool {
+	return strings.Contains(description, "parse entities")
+}
+
+// plainFallbackText is what to send when the markup was rejected: the text
+// with its markup removed, so nothing of the reply is lost.
+func plainFallbackText(msg, parseMode string) string {
+	if strings.EqualFold(parseMode, "HTML") {
+		return plainTextFromHTML(msg)
+	}
+	return msg
+}
+
+// deleteMessage removes a message; used to retire a progress message that
+// could not be turned into the final reply.
+func deleteMessage(config *Config, chatID int64, messageID int64) error {
+	result, err := telegramAPI(config, "deleteMessage", url.Values{
+		"chat_id":    {fmt.Sprintf("%d", chatID)},
+		"message_id": {fmt.Sprintf("%d", messageID)},
+	})
+	if err != nil {
+		return err
+	}
+	if !result.OK {
+		return fmt.Errorf("telegram error: %s", result.Description)
+	}
 	return nil
 }
 
