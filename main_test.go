@@ -226,3 +226,35 @@ func TestSplitMessageChunksAtTheLimit(t *testing.T) {
 		t.Errorf("chunks total %d bytes, want %d", total, len(long))
 	}
 }
+
+func TestRenderSystemdUnit(t *testing.T) {
+	t.Setenv("GH_TOKEN", `ghp_secret"with\quotes`)
+	t.Setenv("NOT_SET_ANYWHERE", "")
+	os.Unsetenv("NOT_SET_ANYWHERE")
+
+	unit := renderSystemdUnit("/home/u/bin/ccc", &Config{
+		EnvPassthrough: []string{"GH_TOKEN", "NOT_SET_ANYWHERE", "CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", ""},
+	})
+
+	for _, want := range []string{
+		"ExecStart=/home/u/bin/ccc listen",
+		"Restart=always",
+		"WantedBy=default.target",
+		`Environment="GH_TOKEN=ghp_secret\"with\\quotes"`,
+	} {
+		if !strings.Contains(unit, want) {
+			t.Errorf("the unit is missing %q:\n%s", want, unit)
+		}
+	}
+	// Only what env_passthrough asks for AND is actually set, and never a
+	// CLAUDE*/ANTHROPIC* variable — those are built per profile at spawn time.
+	if strings.Contains(unit, "NOT_SET_ANYWHERE") {
+		t.Error("an unset passthrough name produced an Environment line")
+	}
+	if strings.Contains(unit, "CLAUDE_CONFIG_DIR") || strings.Contains(unit, "ANTHROPIC") {
+		t.Errorf("a CLAUDE/ANTHROPIC variable leaked into the unit:\n%s", unit)
+	}
+	if n := strings.Count(unit, "Environment="); n != 1 {
+		t.Errorf("%d Environment lines, want 1", n)
+	}
+}

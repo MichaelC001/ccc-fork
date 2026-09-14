@@ -1,4 +1,4 @@
-.PHONY: build build-voice install install-voice clean deps
+.PHONY: build build-linux build-voice install install-voice test clean deps
 
 PREFIX := $(CURDIR)/build/whisper
 BUILD_DIR := $(CURDIR)/build/cmake
@@ -11,6 +11,16 @@ build:
 	@if [ "$(UNAME)" = "Darwin" ]; then \
 		codesign -f -s - ccc 2>/dev/null || true; \
 	fi
+
+# Cross-compiled Linux binary for the VPS. Pure Go (glebarez/sqlite +
+# modernc), so CGO_ENABLED=0 works and the result has no libc dependency:
+# scp it straight onto the box, no toolchain needed there.
+build-linux:
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o ccc-linux-amd64
+	@echo "✅ ccc-linux-amd64"
+
+test:
+	go build ./... && go vet ./... && go test ./...
 
 # Build whisper.cpp C library (needed for voice support)
 deps:
@@ -62,5 +72,5 @@ install-voice: build-voice
 	@echo "✅ Installed to ~/bin/ccc (with voice support)"
 
 clean:
-	rm -f ccc
+	rm -f ccc ccc-linux-amd64
 	rm -rf build/
