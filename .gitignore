@@ -17,4 +17,4 @@ build/
 .DS_Store
 ping-telegram
 telegram_*.jpg
-ccc-linux
+ccc-linux*
