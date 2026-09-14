@@ -548,7 +548,8 @@ func collectProfileStats(config *Config, working map[string]int, now time.Time) 
 // per config dir (2.1.259 refuses the launch otherwise, see bypassDisclaimerMsg).
 //
 // Acceptance is recorded as `skipDangerousModePermissionPrompt: true` in the
-// profile's settings.json; older installs recorded
+// profile's settings.json — which is exactly what acceptBypassDisclaimer
+// writes, and what the interactive prompt writes; older installs recorded
 // `bypassPermissionsModeAccepted` in .claude.json and Claude Code migrates that
 // forward on startup, so both are accepted as proof. Returns ok=false when
 // neither file can be read — "unknown", not "not accepted".
@@ -575,18 +576,103 @@ func bypassAccepted(p Profile) (accepted bool, ok bool) {
 	return false, readable
 }
 
+// bypassSettingKey is the settings.json key Claude Code's interactive
+// disclaimer writes when it is accepted. It is the whole of the acceptance:
+// nothing else on disk changes (verified on 2.1.270 — writing this key by hand
+// into a profile's settings.json is enough for
+// `claude -p --permission-mode bypassPermissions` to run under it).
+const bypassSettingKey = "skipDangerousModePermissionPrompt"
+
+// acceptBypassDisclaimer records the bypass-permissions disclaimer for a
+// profile by merging `"skipDangerousModePermissionPrompt": true` into its
+// settings.json, and confirms the result with bypassAccepted().
+//
+// ccc used to drive Claude Code's interactive warning through a pseudo-terminal
+// (DESIGN §14.23). Answering a TUI is fragile — a first-run theme picker, a
+// renderer change or a reordered option is enough to leave a profile logged in
+// but unusable — while the acceptance itself is one boolean in a file ccc
+// already reads. Writing it directly is idempotent, needs no claude process and
+// cannot half-happen.
+//
+// The profile's other settings are preserved (only key order is not, since the
+// file is re-marshalled), the file is 0600, and it is replaced atomically so a
+// concurrently-starting claude never reads a torn one. A profile with an empty
+// config_dir resolves to ~/.claude/settings.json through claudeHome.
+func acceptBypassDisclaimer(p Profile) error {
+	if accepted, _ := bypassAccepted(p); accepted {
+		return nil
+	}
+	path := profileSettings(p)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create the profile's config dir: %w", err)
+	}
+	settings := map[string]any{}
+	switch data, err := os.ReadFile(path); {
+	case err == nil:
+		// An empty (or whitespace-only) file is not an error; it is a config
+		// dir claude has touched but never written settings into.
+		if len(strings.TrimSpace(string(data))) > 0 {
+			if err := json.Unmarshal(data, &settings); err != nil {
+				return fmt.Errorf("parse %s (fix or remove it, then retry): %w", path, err)
+			}
+		}
+	case !os.IsNotExist(err):
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	settings[bypassSettingKey] = true
+	data, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode %s: %w", path, err)
+	}
+	if err := writeFileAtomic(path, append(data, '\n'), 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	if accepted, _ := bypassAccepted(p); !accepted {
+		return fmt.Errorf("%s was written but %s still does not record the acceptance", path, bypassSettingKey)
+	}
+	return nil
+}
+
+// writeFileAtomic writes data to a temp file in the same directory and renames
+// it over path, so a reader never observes a partial file.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()        // safe-ignore: best-effort cleanup on an error path
+		os.Remove(tmpName) // safe-ignore: same
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()        // safe-ignore: same
+		os.Remove(tmpName) // safe-ignore: same
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName) // safe-ignore: same
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		os.Remove(tmpName) // safe-ignore: same
+		return err
+	}
+	return nil
+}
+
 // bypassDisclaimerMsg is the exact refusal Claude Code 2.1.259 prints when a
 // config dir has not accepted the disclaimer yet (extracted from the binary).
 const bypassDisclaimerMsg = "--bg with bypassPermissions requires accepting the disclaimer first. " +
 	"Run `claude --dangerously-skip-permissions` once interactively."
 
 // bypassDisclaimerHint tells the user how to accept the disclaimer for a
-// specific profile.
+// specific profile. It names ccc's own command rather than the interactive
+// `claude --dangerously-skip-permissions`: the acceptance is a settings.json
+// key ccc writes itself (acceptBypassDisclaimer), with no TUI in the way.
 func bypassDisclaimerHint(p Profile) string {
-	if p.Implicit {
-		return "Run `claude --dangerously-skip-permissions` once interactively."
-	}
-	return fmt.Sprintf("Run `CLAUDE_CONFIG_DIR=%s claude --dangerously-skip-permissions` once interactively.", p.ConfigDir)
+	return fmt.Sprintf("Run `ccc profile accept-disclaimer %s`, or `ccc doctor --fix`.", accountDisplay(p))
 }
 
 // isDisclaimerRefusal reports whether a dispatch error is the disclaimer gate,

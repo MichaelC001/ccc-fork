@@ -28,6 +28,16 @@ func truncate(s string, n int) string {
 	return s[:n] + "..."
 }
 
+// hasFlag reports whether args contains a bare flag, e.g. `ccc doctor --fix`.
+func hasFlag(args []string, flag string) bool {
+	for _, a := range args {
+		if a == flag {
+			return true
+		}
+	}
+	return false
+}
+
 func firstNonEmpty(a, b string) string {
 	if strings.TrimSpace(a) != "" {
 		return a

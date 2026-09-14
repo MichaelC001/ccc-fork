@@ -6,13 +6,13 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"time"
 )
 
 // account.go is `/account` (DESIGN §8): the only UI for Claude accounts, so the
 // owner never needs a terminal on the machine ccc runs on. It renders one card
-// per profile, and drives `claude auth login` plus the bypass-permissions
-// disclaimer through the pseudo-terminal in ptyflow.go.
+// per profile, drives `claude auth login` through the pseudo-terminal in
+// ptyflow.go, and records the bypass-permissions disclaimer straight into the
+// profile's settings.json afterwards (acceptBypassDisclaimer).
 
 // accountState is the health of one profile as the card shows it.
 type accountState int
@@ -551,12 +551,18 @@ func (in *instance) startLogin(chatID, topicID int64, name string) {
 		name = in.reconcileLoginEmail(chatID, topicID, name, account)
 		in.post(chatID, topicID, "✅ <b>"+htmlEscape(name)+"</b> is logged in.")
 
-		// The account is only usable once the disclaimer is accepted too.
-		dctx, dcancel := context.WithTimeout(context.Background(), 3*time.Minute)
-		defer dcancel()
-		if err := runDisclaimerFlow(dctx, in.ptyStart(), p); err != nil {
-			in.post(chatID, topicID, "⚠️ Could not accept the bypass disclaimer automatically: "+
-				htmlEscape(truncate(err.Error(), 300))+"\n<code>"+htmlEscape(bypassDisclaimerHint(p))+"</code>")
+		// The account is only usable once the disclaimer is accepted too. That
+		// is one settings.json key, written straight into the profile's config
+		// dir — no second claude process, no TUI to answer (DESIGN §14.23).
+		// The profile is re-read from the config first: the login may have
+		// re-keyed it onto the email `auth status` reported.
+		target := p
+		if fresh, ok := profileByName(in.config(), name); ok {
+			target = fresh
+		}
+		if err := acceptBypassDisclaimer(target); err != nil {
+			in.post(chatID, topicID, "⚠️ Could not accept the bypass disclaimer: "+
+				htmlEscape(truncate(err.Error(), 300))+"\n<code>"+htmlEscape(bypassDisclaimerHint(target))+"</code>")
 		} else {
 			in.post(chatID, topicID, "🛡 Bypass disclaimer accepted for <b>"+htmlEscape(name)+"</b>.")
 		}

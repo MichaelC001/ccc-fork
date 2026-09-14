@@ -42,31 +42,23 @@ import (
 //
 // with <URL> = https://claude.com/cai/oauth/authorize?<query redacted>.
 //
-// The bypass-permissions disclaimer could NOT be captured the same way: it only
-// appears after a config dir is logged in, and completing a login was out of
-// scope. Its strings were read out of the 2.1.270 binary instead (the same
-// technique that produced bypassDisclaimerMsg in profiles.go):
-//
-//	WARNING: Claude Code running in Bypass Permissions mode
-//	In Bypass Permissions mode, Claude Code will not ask for your approval
-//	  before running potentially dangerous commands.
-//	By proceeding, you accept all responsibility for actions taken while
-//	  running in Bypass Permissions mode.
-//	Yes, I accept
-//	No, exit
-//
-// Because the order of "Yes, I accept" / "No, exit" is not pinned by either
-// probe, the driver never assumes a position: it reads the numbered list off
-// the screen and answers with the number next to the label it wants
-// (selectNumberFor). The same code answers the first-run theme picker, which a
-// brand-new config dir shows before anything else — that one WAS captured:
+// A brand-new config dir shows a first-run theme picker before any of that;
+// it was captured the same way:
 //
 //	Choose the text style that looks best with your terminal
 //	❯ 2. Dark mode ✔
 //
+// The driver never assumes an option's position: it reads the numbered list off
+// the screen and answers with the number next to the label it wants
+// (selectNumberFor), which is what keeps it working when Claude Code reorders
+// its menus.
+//
+// The bypass-permissions disclaimer is NOT driven here. It is a settings.json
+// key ccc writes directly (acceptBypassDisclaimer in profiles.go, DESIGN
+// §14.23); only the login needs a terminal.
+//
 // Finally, success is never inferred from the TUI: a login is confirmed with
-// `claude auth status --json` and the disclaimer with bypassAccepted(), both of
-// which read real state on disk.
+// `claude auth status --json`, which reads real state on disk.
 
 // Verified prompt fragments. Matched against the screen after normalizePTY, so
 // they must be written the way they READ, not the way they are drawn.
@@ -80,10 +72,6 @@ const (
 	// ptyThemeAnswer is the option the driver picks: any is fine, ccc never
 	// reads colours back, so the default dark theme is chosen for determinism.
 	ptyThemeAnswer = "Dark mode"
-	// ptyDisclaimerPrompt is the bypass-permissions warning heading.
-	ptyDisclaimerPrompt = "Bypass Permissions mode"
-	// ptyDisclaimerAccept is the option that accepts it.
-	ptyDisclaimerAccept = "Yes, I accept"
 	// ptyLoginSuccess is a best-effort progress hint only; the authority is
 	// `claude auth status --json`.
 	ptyLoginSuccess = "Login successful"
@@ -396,62 +384,6 @@ func runLoginFlow(ctx context.Context, start ptyStarter, p Profile, prompter log
 		case <-ctx.Done():
 			return "", ctx.Err()
 		case <-time.After(2 * time.Second):
-		}
-	}
-}
-
-// runDisclaimerFlow accepts the bypass-permissions disclaimer for a profile by
-// starting `claude --dangerously-skip-permissions` on a pty, answering the
-// warning, and verifying the result with bypassAccepted() — the acceptance is
-// recorded as skipDangerousModePermissionPrompt in the profile's settings.json.
-func runDisclaimerFlow(ctx context.Context, start ptyStarter, p Profile) error {
-	if accepted, _ := bypassAccepted(p); accepted {
-		return nil
-	}
-	env, err := loginEnv(p)
-	if err != nil {
-		return err
-	}
-	s, err := start(claudeHome(p), env, claudeBin(), "--dangerously-skip-permissions")
-	if err != nil {
-		return err
-	}
-	defer s.Close()
-
-	for i := 0; i < 2; i++ { // at most one theme picker, then the disclaimer
-		phrase, err := s.waitFor(ctx, []string{ptyDisclaimerPrompt, ptyThemePrompt}, 60*time.Second)
-		if err != nil {
-			// Claude Code only shows the disclaimer once per config dir, so a
-			// dir that has already accepted it never prints anything to match.
-			if accepted, _ := bypassAccepted(p); accepted {
-				return nil
-			}
-			return fmt.Errorf("no disclaimer prompt appeared: %w", err)
-		}
-		if phrase == ptyThemePrompt {
-			if err := s.answerSelect(ptyThemeAnswer); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := s.answerSelect(ptyDisclaimerAccept); err != nil {
-			return err
-		}
-		break
-	}
-
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		if accepted, _ := bypassAccepted(p); accepted {
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return errors.New("the disclaimer was answered but settings.json still does not record it")
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(time.Second):
 		}
 	}
 }

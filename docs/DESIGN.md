@@ -346,9 +346,10 @@ by a name the owner invents and never by the directory it lives in:
    opens it on the phone with the right account and pastes the code back into
    the chat; ccc writes it to the PTY. Success is confirmed by
    `claude auth status --json`, never by the TUI.
-3. Disclaimer: runs `claude --dangerously-skip-permissions` in the PTY, detects
-   the prompt, answers it, verifies `skipDangerousModePermissionPrompt` in
-   `settings.json` (detector already implemented in `profiles.go`).
+3. Disclaimer: ccc records it **directly** — `acceptBypassDisclaimer` merges
+   `skipDangerousModePermissionPrompt: true` into the profile's `settings.json`
+   (0600, atomic, other keys kept) and re-checks it with `bypassAccepted`. That
+   key is the whole acceptance, so no TUI is driven for it (§14.23).
 4. Times out after 10 min; the partial profile is removed.
 `/account login <email>` runs steps 2–3 only. Every PTY string and pattern lives
 in `ptyflow.go`, each with a note on how it was verified against 2.1.270
@@ -663,3 +664,19 @@ variables that are not already set, which is what makes the same mechanism work
 under launchd on macOS (a plist cannot source a file). `/status` shows the same
 present/missing names. A value containing a newline cannot be written as one
 line, so it is reported as skipped rather than mangled.
+
+**14.23 The disclaimer is written, not answered.** §8 step 3 originally drove
+Claude Code's bypass-permissions warning through the PTY, the same way as the
+login. In production that lost a real login: the driver got as far as the
+first-run theme picker, `settings.json` ended up as `{"theme":"dark"}`, and the
+account came back "the disclaimer was answered but settings.json still does not
+record it" — logged in but unusable. The acceptance is nothing more than
+`skipDangerousModePermissionPrompt: true` in the profile's `settings.json`
+(verified on 2.1.270: writing that key by hand makes `claude -p
+--permission-mode bypassPermissions` run under the profile and `ccc doctor`
+report it accepted), so ccc writes it itself — idempotent, no second claude
+process, no menu to answer. It runs at the end of `/account add` and
+`/account login`, and is exposed as `ccc profile accept-disclaimer <email>` and
+`ccc doctor --fix`. The PTY driver and its fixtures are gone; the login flow,
+which genuinely needs a terminal, is unchanged. 14.9 is now history: only the
+login strings are still matched against the TUI.

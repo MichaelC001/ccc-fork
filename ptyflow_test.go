@@ -63,19 +63,11 @@ func TestSelectNumberFor(t *testing.T) {
 		t.Error("an absent label must not match")
 	}
 
-	// The disclaimer's option order is not pinned by any probe, so the driver
-	// must read it off the screen either way round.
-	for _, screen := range []string{
-		"  1. No, exit\n❯ 2. Yes, I accept\n",
-		"❯ 1. Yes, I accept\n  2. No, exit\n",
-	} {
-		got, ok := selectNumberFor(screen, ptyDisclaimerAccept)
-		if !ok {
-			t.Fatalf("could not find the accept option in %q", screen)
-		}
-		if want := map[bool]string{true: "2", false: "1"}[strings.HasPrefix(screen, "  1. No")]; got != want {
-			t.Errorf("accept option = %q, want %q for %q", got, want, screen)
-		}
+	// An option is found by its label wherever it sits, so a Claude Code
+	// release that reorders a menu does not send the driver to the wrong entry.
+	reordered := "  1. Light mode\n❯ 2. Auto (match terminal)\n  3. Dark mode\n"
+	if got, ok := selectNumberFor(reordered, ptyThemeAnswer); !ok || got != "3" {
+		t.Errorf("reordered theme option = %q (%v), want 3", got, ok)
 	}
 }
 

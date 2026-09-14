@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -236,6 +237,134 @@ func TestBypassAccepted(t *testing.T) {
 		accepted, known := bypassAccepted(p)
 		if accepted || known {
 			t.Errorf("got accepted=%v known=%v, want false false", accepted, known)
+		}
+	})
+}
+
+// TestAcceptBypassDisclaimer pins the direct write that replaced the PTY
+// disclaimer driver (DESIGN §14.23): it must create the file when there is
+// none, keep every other setting, be safe to run twice, and leave the file
+// 0600 — a settings.json is next to the credentials of a real account.
+func TestAcceptBypassDisclaimer(t *testing.T) {
+	// settingsOf reads a profile's settings.json back as a map.
+	settingsOf := func(t *testing.T, p Profile) map[string]any {
+		t.Helper()
+		data, err := os.ReadFile(profileSettings(p))
+		if err != nil {
+			t.Fatalf("read settings.json: %v", err)
+		}
+		var out map[string]any
+		if err := json.Unmarshal(data, &out); err != nil {
+			t.Fatalf("settings.json is not valid JSON (%s): %v", data, err)
+		}
+		return out
+	}
+	mustBe0600 := func(t *testing.T, p Profile) {
+		t.Helper()
+		info, err := os.Stat(profileSettings(p))
+		if err != nil {
+			t.Fatalf("stat settings.json: %v", err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Errorf("settings.json mode = %v, want 0600", perm)
+		}
+	}
+
+	t.Run("fresh config dir", func(t *testing.T) {
+		// The dir does not exist yet either: a profile can be accepted before
+		// claude has ever run under it.
+		p := Profile{Name: "fresh", ConfigDir: filepath.Join(t.TempDir(), "cfg")}
+		if err := acceptBypassDisclaimer(p); err != nil {
+			t.Fatalf("acceptBypassDisclaimer: %v", err)
+		}
+		if got := settingsOf(t, p)[bypassSettingKey]; got != true {
+			t.Errorf("%s = %v, want true", bypassSettingKey, got)
+		}
+		if accepted, known := bypassAccepted(p); !accepted || !known {
+			t.Errorf("detector says accepted=%v known=%v, want true true", accepted, known)
+		}
+		mustBe0600(t, p)
+	})
+
+	t.Run("existing settings are preserved", func(t *testing.T) {
+		p := newFixtureProfile(t, "keep", "", `{"model":"opus","env":{"FOO":"bar"},"skipDangerousModePermissionPrompt":false}`)
+		if err := acceptBypassDisclaimer(p); err != nil {
+			t.Fatalf("acceptBypassDisclaimer: %v", err)
+		}
+		got := settingsOf(t, p)
+		if got["model"] != "opus" {
+			t.Errorf("model = %v, want opus (other keys must survive)", got["model"])
+		}
+		env, ok := got["env"].(map[string]any)
+		if !ok || env["FOO"] != "bar" {
+			t.Errorf("env = %v, want {FOO: bar}", got["env"])
+		}
+		if got[bypassSettingKey] != true {
+			t.Errorf("%s = %v, want true (an explicit false must be overwritten)", bypassSettingKey, got[bypassSettingKey])
+		}
+		mustBe0600(t, p)
+	})
+
+	t.Run("idempotent", func(t *testing.T) {
+		p := Profile{Name: "twice", ConfigDir: t.TempDir()}
+		if err := acceptBypassDisclaimer(p); err != nil {
+			t.Fatalf("first call: %v", err)
+		}
+		first, err := os.ReadFile(profileSettings(p))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := acceptBypassDisclaimer(p); err != nil {
+			t.Fatalf("second call: %v", err)
+		}
+		second, err := os.ReadFile(profileSettings(p))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(first) != string(second) {
+			t.Errorf("a second call rewrote the file:\n%s\nvs\n%s", first, second)
+		}
+	})
+
+	t.Run("empty file is not an error", func(t *testing.T) {
+		p := newFixtureProfile(t, "empty", "", " \n")
+		if err := acceptBypassDisclaimer(p); err != nil {
+			t.Fatalf("acceptBypassDisclaimer: %v", err)
+		}
+		if got := settingsOf(t, p)[bypassSettingKey]; got != true {
+			t.Errorf("%s = %v, want true", bypassSettingKey, got)
+		}
+	})
+
+	t.Run("malformed settings are refused, not overwritten", func(t *testing.T) {
+		p := newFixtureProfile(t, "broken", "", "{not json")
+		if err := acceptBypassDisclaimer(p); err == nil {
+			t.Fatal("a settings.json that cannot be parsed must not be replaced")
+		}
+		data, err := os.ReadFile(profileSettings(p))
+		if err != nil || string(data) != "{not json" {
+			t.Errorf("the file was touched: %q (%v)", data, err)
+		}
+	})
+
+	t.Run("the implicit profile writes into ~/.claude", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("CLAUDE_CONFIG_DIR", "")
+		initProfiles()
+		defer initProfiles()
+
+		// An empty config_dir means "claude's own default dir", so the file must
+		// land in ~/.claude and nowhere else.
+		if err := acceptBypassDisclaimer(Profile{Name: "implicit"}); err != nil {
+			t.Fatalf("acceptBypassDisclaimer: %v", err)
+		}
+		data, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+		if err != nil {
+			t.Fatalf("read ~/.claude/settings.json: %v", err)
+		}
+		if !strings.Contains(string(data), bypassSettingKey) {
+			t.Errorf("~/.claude/settings.json does not record the acceptance: %s", data)
 		}
 	})
 }

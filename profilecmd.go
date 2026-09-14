@@ -49,6 +49,11 @@ func profileCommand(args []string) error {
 			return fmt.Errorf("usage: ccc profile login <name>")
 		}
 		return profileLogin(args[1])
+	case "accept-disclaimer":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: ccc profile accept-disclaimer <name>")
+		}
+		return profileAcceptDisclaimer(args[1])
 	default:
 		printProfileUsage()
 		return fmt.Errorf("unknown profile subcommand: %s", args[0])
@@ -70,7 +75,8 @@ profile was registered under before, for as long as it is still keyed by it.
     ccc profile add <email> <dir> [--label X]     Register a profile (creates dir)
     ccc profile remove <email>                    Unregister an unused profile
     ccc profile default <email>                   Set the profile for new sessions
-    ccc profile login <email>                     Run 'claude auth login' for it (interactive)`)
+    ccc profile login <email>                     Run 'claude auth login' for it (interactive)
+    ccc profile accept-disclaimer <email>         Record the bypass-permissions disclaimer for it`)
 }
 
 // loadConfigOrNil returns the config, or nil when there is none — every profile
@@ -317,9 +323,30 @@ func profileLogin(name string) error {
 	return cmd.Run()
 }
 
+// profileAcceptDisclaimer records the bypass-permissions disclaimer for one
+// profile. It is idempotent, so running it on an already-accepted profile is a
+// no-op that still reports the state.
+func profileAcceptDisclaimer(name string) error {
+	p, ok := profileByName(loadConfigOrNil(), name)
+	if !ok {
+		return fmt.Errorf("no such profile: %s", name)
+	}
+	if accepted, _ := bypassAccepted(p); accepted {
+		fmt.Printf("✅ %s had already accepted the bypass-permissions disclaimer (%s)\n", p.Name, profileSettings(p))
+		return nil
+	}
+	if err := acceptBypassDisclaimer(p); err != nil {
+		return err
+	}
+	fmt.Printf("✅ bypass-permissions disclaimer accepted for %s (%s)\n", p.Name, profileSettings(p))
+	return nil
+}
+
 // doctorProfiles prints the per-profile section of `ccc doctor`. Returns false
-// when any profile has a problem that would stop ccc dispatching under it.
-func doctorProfiles() bool {
+// when any profile has a problem that would stop ccc dispatching under it. With
+// fix set, a missing disclaimer acceptance is written instead of only reported
+// (`ccc doctor --fix`); nothing else is ever changed.
+func doctorProfiles(fix bool) bool {
 	config := loadConfigOrNil()
 	profiles := listProfiles(config)
 	def := defaultProfile(config).Name
@@ -359,20 +386,28 @@ func doctorProfiles() bool {
 			ok = false
 		}
 
-		// The bypass-permissions disclaimer is accepted ONCE PER CONFIG DIR.
-		// `/account login` drives it through a PTY; without it a profile can
-		// still run turns, but the acceptance state is worth reporting.
+		// The bypass-permissions disclaimer is accepted ONCE PER CONFIG DIR,
+		// as one settings.json key ccc writes itself (acceptBypassDisclaimer).
+		// Without it `--permission-mode bypassPermissions` is refused, so an
+		// unaccepted profile is a real finding — and one --fix can close.
 		fmt.Printf("    disclaimer.... ")
 		accepted, known := bypassAccepted(p)
 		switch {
 		case accepted:
 			fmt.Println("✅ bypass-permissions accepted")
+		case fix:
+			if err := acceptBypassDisclaimer(p); err != nil {
+				fmt.Printf("❌ could not accept it: %v\n", err)
+				ok = false
+				break
+			}
+			fmt.Printf("🔧 accepted (written to %s)\n", profileSettings(p))
 		case !known:
 			fmt.Println("⚠️  unknown (no settings.json / .claude.json yet)")
 			fmt.Printf("       %s\n", bypassDisclaimerHint(p))
 		default:
 			fmt.Println("❌ not accepted")
-			fmt.Printf("       %s, or send /account login %s in Telegram\n", bypassDisclaimerHint(p), p.Name)
+			fmt.Printf("       %s\n", bypassDisclaimerHint(p))
 			ok = false
 		}
 

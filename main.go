@@ -153,7 +153,7 @@ func main() {
 		must(setup(os.Args[2]))
 
 	case "doctor":
-		doctor()
+		doctor(hasFlag(os.Args[2:], "--fix"))
 
 	case "maintain":
 		// The growth-control job of DESIGN §7, on demand. It is the same pass

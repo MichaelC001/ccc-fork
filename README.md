@@ -421,7 +421,9 @@ the owner for `/access add <your id>`.
 with `/watches`; the interval floor is 60 s.
 
 **Run the diagnostics.** `ccc doctor` checks the claude binary, every account's
-login and disclaimer state, the configuration and the service.
+login and disclaimer state, the configuration and the service. `ccc doctor
+--fix` also records the bypass-permissions disclaimer for any account missing
+it (the same write as `ccc profile accept-disclaimer <email>`).
 
 ---
 
@@ -436,8 +438,10 @@ ccc install                   Install the service (launchd / systemd --user)
 ccc env sync                  Snapshot env_passthrough secrets into ~/.config/ccc/env
                               (run from a login shell: bash -lc 'ccc env sync')
 ccc maintain                  Run the daily growth-control job once, now
-ccc doctor                    Check dependencies and configuration
-ccc profile <cmd>             Manage accounts from a shell (list/add/remove/default/login)
+ccc doctor [--fix]            Check dependencies and configuration; --fix records
+                              the bypass disclaimer for accounts missing it
+ccc profile <cmd>             Manage accounts from a shell
+                              (list/add/remove/default/login/accept-disclaimer)
 ccc send <file>               Send a file into the topic of the bot owning this directory
 ccc relay [port]              Relay server for files over 50 MB
 ccc mcp --bot <id>            MCP server for one turn (spawned by Claude Code)

@@ -211,7 +211,10 @@ func pollUpdates(client *http.Client, token string, offset, timeout int) ([]tele
 // doctor
 // ---------------------------------------------------------------------------
 
-func doctor() {
+// doctor prints the health report. With fix set (`ccc doctor --fix`) it also
+// repairs what it safely can: today that is the bypass-permissions disclaimer,
+// which is one settings.json key per profile (acceptBypassDisclaimer).
+func doctor(fix bool) {
 	fmt.Println("🩺 ccc doctor")
 	fmt.Println("=============")
 	fmt.Println()
@@ -227,7 +230,7 @@ func doctor() {
 		allGood = false
 	}
 
-	if !doctorProfiles() {
+	if !doctorProfiles(fix) {
 		allGood = false
 	}
 
@@ -296,7 +299,11 @@ func doctor() {
 		fmt.Println("✅ All checks passed!")
 		return
 	}
-	fmt.Println("❌ Some issues found. Fix them and run `ccc doctor` again.")
+	if fix {
+		fmt.Println("❌ Some issues are left. Fix them and run `ccc doctor` again.")
+		return
+	}
+	fmt.Println("❌ Some issues found. Fix them and run `ccc doctor` again (`ccc doctor --fix` repairs what it can).")
 }
 
 // isMacOS distinguishes the launchd host from the systemd one. /Library only
@@ -326,9 +333,11 @@ COMMANDS:
     install                 Install the background service (launchd / systemd --user)
     env sync                Snapshot env_passthrough secrets into <config>/env
                             (run from a login shell: bash -lc 'ccc env sync')
-    doctor                  Check dependencies and configuration
+    doctor [--fix]          Check dependencies and configuration; --fix also
+                            records the bypass disclaimer for every account
     maintain                Run the daily growth-control job once, now
-    profile <cmd>           Manage Claude accounts (list/add/remove/default/login)
+    profile <cmd>           Manage Claude accounts (list/add/remove/default/
+                            login/accept-disclaimer)
     mcp --bot <id>          MCP server for one turn (spawned by Claude Code)
     send <file>             Send a file into the topic of the bot owning this directory
     relay [port]            Relay server for files over 50 MB (default port: 8080)
