@@ -165,14 +165,18 @@ type Question struct {
 	AnsweredAt     *time.Time
 }
 
-// Access is the pairing/allowlist table (Phase 2b; created now so the schema
-// does not change under a live database).
+// Access is the pairing/allowlist table (DESIGN §5/§8). Replies is not in
+// DESIGN's column list: it is what implements "at most two replies to a
+// stranger, then silence", which otherwise has nowhere to live.
 type Access struct {
 	TelegramUserID int64 `gorm:"primaryKey"`
 	Display        string
-	State          string // pending|approved|blocked
-	PairCode       string
+	State          string `gorm:"index"` // pending|approved|blocked
+	PairCode       string `gorm:"index"`
 	CodeExpiresAt  *time.Time
+	Replies        int
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 func (Access) TableName() string { return "access" }
@@ -532,4 +536,47 @@ func botByCwd(db *gorm.DB, path string) (*Bot, error) {
 		return nil, errors.New("no bot owns this directory")
 	}
 	return &bots[best], nil
+}
+
+// ---------------------------------------------------------------------------
+// Bot lifecycle
+// ---------------------------------------------------------------------------
+
+// createBotRow creates a bot end to end: a unique name, a forum topic, a
+// workspace and the database row. Both the Telegram layer and the spawn_bot
+// MCP tool go through it, so a spawned bot is identical to one the owner made.
+// A cwd of "" means the bot gets its own workspace under <data_dir>/bots.
+func createBotRow(db *gorm.DB, config *Config, name, role, cwd string, parentBotID *int64) (*Bot, error) {
+	name = uniqueBotName(db, sanitizeBotName(name))
+	topicID, err := createForumTopic(config, name)
+	if err != nil {
+		return nil, err
+	}
+	if cwd == "" {
+		cwd = botWorkspace(config, name)
+	}
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		return nil, err
+	}
+	b := &Bot{Name: name, TopicID: topicID, Role: role, Cwd: cwd, Status: botIdle, ParentBotID: parentBotID}
+	if err := db.Create(b).Error; err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+// archiveBotRow retires a bot: the row is marked archived, its queue is
+// dropped and its automation stops. Memories are deliberately kept — a bot's
+// notes outliving it is the point of them being in the database.
+func archiveBotRow(db *gorm.DB, botID int64) error {
+	now := time.Now()
+	if err := db.Model(&Bot{}).Where("id = ?", botID).
+		Updates(map[string]any{"archived_at": now, "status": botDisabled}).Error; err != nil {
+		return err
+	}
+	db.Model(&Turn{}).Where("bot_id = ? AND status = ?", botID, turnQueued).
+		Updates(map[string]any{"status": turnFailed, "stop_reason": "bot archived"})
+	db.Model(&Watch{}).Where("bot_id = ?", botID).Update("enabled", false)
+	db.Model(&Schedule{}).Where("bot_id = ? AND fired_at IS NULL", botID).Update("fired_at", now)
+	return nil
 }

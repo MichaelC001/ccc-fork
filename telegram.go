@@ -647,3 +647,22 @@ func sendMessageKeyboardGetID(config *Config, chatID int64, threadID int64, text
 	}
 	return msg.MessageID, nil
 }
+
+// closeForumTopic closes a topic without deleting it, which is what archiving a
+// bot does: the conversation stays readable, but nothing new lands in it.
+func closeForumTopic(config *Config, topicID int64) error {
+	if config == nil || config.BotToken == "" || config.GroupID == 0 || topicID == 0 {
+		return nil
+	}
+	params := url.Values{}
+	params.Set("chat_id", fmt.Sprintf("%d", config.GroupID))
+	params.Set("message_thread_id", fmt.Sprintf("%d", topicID))
+	resp, err := telegramAPI(config, "closeForumTopic", params)
+	if err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf("closeForumTopic: %s", resp.Description)
+	}
+	return nil
+}

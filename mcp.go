@@ -175,6 +175,7 @@ func (s *mcpServer) register(server *mcp.Server) {
 		Name:        "send_file",
 		Description: "Send a file from this machine into your Telegram topic (max 50 MB).",
 	}, s.sendFile)
+	s.registerAutomation(server)
 }
 
 // ---------------------------------------------------------------------------
@@ -519,4 +520,290 @@ func questionOptions(q *Question) []string {
 		return nil
 	}
 	return opts
+}
+
+// ---------------------------------------------------------------------------
+// Automation tools (DESIGN §6/§7): watches, schedules, spawning, projects
+// ---------------------------------------------------------------------------
+
+type watchIn struct {
+	Name      string `json:"name" jsonschema:"short name for this watch, e.g. ci or inbox"`
+	Command   string `json:"command" jsonschema:"shell command run in your working directory; its output is compared run to run"`
+	IntervalS int    `json:"interval_s" jsonschema:"how often to run it, in seconds (minimum 60)"`
+}
+
+type unwatchIn struct {
+	Name string `json:"name" jsonschema:"the watch to remove"`
+}
+
+type scheduleIn struct {
+	InSeconds int    `json:"in_seconds,omitempty" jsonschema:"wake me up this many seconds from now"`
+	At        string `json:"at,omitempty" jsonschema:"wake me up at this RFC3339 time instead"`
+	Note      string `json:"note" jsonschema:"what to do when you wake up"`
+	Cron      string `json:"cron,omitempty" jsonschema:"repeat on this cron expression (5 fields, or @daily/@hourly)"`
+}
+
+type cancelScheduleIn struct {
+	ID int64 `json:"id" jsonschema:"the schedule id from schedule_wakeup or list output"`
+}
+
+type spawnBotIn struct {
+	Name         string `json:"name" jsonschema:"name for the new bot; it becomes its Telegram topic"`
+	Role         string `json:"role" jsonschema:"what the new bot is for, in a sentence or two"`
+	Cwd          string `json:"cwd,omitempty" jsonschema:"absolute working directory (default: its own fresh workspace)"`
+	FirstMessage string `json:"first_message,omitempty" jsonschema:"the first thing to tell it; it replies to you with send_to_bot"`
+}
+
+type archiveBotIn struct {
+	Bot string `json:"bot,omitempty" jsonschema:"name of the bot to archive (default: yourself)"`
+}
+
+type getProjectIn struct {
+	Path string `json:"path" jsonschema:"absolute path of the project"`
+}
+
+type setProjectIn struct {
+	Path        string `json:"path" jsonschema:"absolute path of the project"`
+	Name        string `json:"name,omitempty" jsonschema:"short name"`
+	Description string `json:"description,omitempty" jsonschema:"what it is"`
+	Stack       string `json:"stack,omitempty" jsonschema:"languages, frameworks, database"`
+	DeployNotes string `json:"deploy_notes,omitempty" jsonschema:"how it is deployed"`
+}
+
+// registerAutomation adds the Phase 2b tools. Split from register() only to
+// keep each function readable; every bot gets all of them.
+func (s *mcpServer) registerAutomation(server *mcp.Server) {
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "watch",
+		Description: "Re-run a command on an interval and wake you ONLY when its output changes. Costs nothing while nothing changes.",
+	}, s.watch)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "unwatch",
+		Description: "Remove one of your watches by name.",
+	}, s.unwatch)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "list_watches",
+		Description: "List your watches and when they last ran.",
+	}, s.listWatchesTool)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "schedule_wakeup",
+		Description: "Ask ccc to start a turn for you later, once or on a cron schedule.",
+	}, s.scheduleWakeup)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "cancel_schedule",
+		Description: "Cancel one of your pending wakeups.",
+	}, s.cancelSchedule)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "spawn_bot",
+		Description: "Create a helper bot with its own Telegram topic. Give it a first_message; it reports back to you with send_to_bot.",
+	}, s.spawnBot)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "archive_bot",
+		Description: "Close a bot's topic and retire it. Defaults to yourself; use it when your job is done.",
+	}, s.archiveBot)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "get_project",
+		Description: "Read the team's notes about a code base: what it is, its stack and how it is deployed.",
+	}, s.getProject)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "set_project",
+		Description: "Record or update the team's notes about a code base. Only the fields you pass are changed.",
+	}, s.setProject)
+}
+
+func (s *mcpServer) watch(_ context.Context, _ *mcp.CallToolRequest, in watchIn) (*mcp.CallToolResult, any, error) {
+	w, err := upsertWatch(s.db, s.botID, in.Name, in.Command, in.IntervalS)
+	if err != nil {
+		return toolErr("%v", err), nil, nil
+	}
+	return text("watching %q every %ds; you will be woken when the output changes", w.Name, w.IntervalS), nil, nil
+}
+
+func (s *mcpServer) unwatch(_ context.Context, _ *mcp.CallToolRequest, in unwatchIn) (*mcp.CallToolResult, any, error) {
+	removed, err := deleteWatch(s.db, s.botID, in.Name)
+	if err != nil {
+		return toolErr("could not remove the watch: %v", err), nil, nil
+	}
+	if !removed {
+		return text("you have no watch named %q", in.Name), nil, nil
+	}
+	return text("removed watch %q", in.Name), nil, nil
+}
+
+func (s *mcpServer) listWatchesTool(_ context.Context, _ *mcp.CallToolRequest, _ emptyIn) (*mcp.CallToolResult, any, error) {
+	watches, err := listWatches(s.db, s.botID)
+	if err != nil {
+		return toolErr("could not list watches: %v", err), nil, nil
+	}
+	if len(watches) == 0 {
+		return text("no watches"), nil, nil
+	}
+	var sb strings.Builder
+	for _, w := range watches {
+		last := "never run"
+		if w.LastRunAt != nil {
+			last = "last run " + w.LastRunAt.Format(time.RFC3339)
+		}
+		state := "enabled"
+		if !w.Enabled {
+			state = "disabled"
+		}
+		fmt.Fprintf(&sb, "%s [%s, every %ds, %s]: %s\n", w.Name, state, w.IntervalS, last, w.Command)
+	}
+	return text("%s", strings.TrimRight(sb.String(), "\n")), nil, nil
+}
+
+// maxScheduleHorizon stops a bot scheduling itself past any useful future.
+const maxScheduleHorizon = 365 * 24 * time.Hour
+
+func (s *mcpServer) scheduleWakeup(_ context.Context, _ *mcp.CallToolRequest, in scheduleIn) (*mcp.CallToolResult, any, error) {
+	now := time.Now()
+	var fireAt time.Time
+	switch {
+	case strings.TrimSpace(in.Cron) != "":
+		schedule, err := parseCron(in.Cron)
+		if err != nil {
+			return toolErr("cannot parse the cron expression %q: %v", in.Cron, err), nil, nil
+		}
+		fireAt = schedule.Next(now)
+	case strings.TrimSpace(in.At) != "":
+		t, err := time.Parse(time.RFC3339, strings.TrimSpace(in.At))
+		if err != nil {
+			return toolErr("`at` must be RFC3339 (e.g. 2026-01-02T15:04:05Z): %v", err), nil, nil
+		}
+		fireAt = t
+	case in.InSeconds > 0:
+		fireAt = now.Add(time.Duration(in.InSeconds) * time.Second)
+	default:
+		return toolErr("give in_seconds, at, or cron"), nil, nil
+	}
+	if fireAt.After(now.Add(maxScheduleHorizon)) {
+		return toolErr("that is more than a year away"), nil, nil
+	}
+	row := Schedule{BotID: s.botID, FireAt: fireAt, Note: truncate(strings.TrimSpace(in.Note), 2000), RecurringCron: strings.TrimSpace(in.Cron)}
+	if err := s.db.Create(&row).Error; err != nil {
+		return toolErr("could not record the wakeup: %v", err), nil, nil
+	}
+	if row.RecurringCron != "" {
+		return text("scheduled #%d, next at %s, repeating on %q", row.ID, fireAt.Format(time.RFC3339), row.RecurringCron), nil, nil
+	}
+	return text("scheduled #%d for %s", row.ID, fireAt.Format(time.RFC3339)), nil, nil
+}
+
+func (s *mcpServer) cancelSchedule(_ context.Context, _ *mcp.CallToolRequest, in cancelScheduleIn) (*mcp.CallToolResult, any, error) {
+	// Scoped to the calling bot: a bot can only cancel its own wakeups.
+	res := s.db.Where("id = ? AND bot_id = ?", in.ID, s.botID).Delete(&Schedule{})
+	if res.Error != nil {
+		return toolErr("could not cancel: %v", res.Error), nil, nil
+	}
+	if res.RowsAffected == 0 {
+		return text("you have no schedule #%d", in.ID), nil, nil
+	}
+	return text("cancelled schedule #%d", in.ID), nil, nil
+}
+
+func (s *mcpServer) spawnBot(_ context.Context, _ *mcp.CallToolRequest, in spawnBotIn) (*mcp.CallToolResult, any, error) {
+	parent, err := s.bot()
+	if err != nil {
+		return toolErr("unknown bot"), nil, nil
+	}
+	name := sanitizeBotName(in.Name)
+	if strings.TrimSpace(name) == "" {
+		return toolErr("spawn_bot needs a name"), nil, nil
+	}
+	cwd := strings.TrimSpace(in.Cwd)
+	if cwd != "" {
+		cwd = expandPath(cwd)
+		if !filepath.IsAbs(cwd) {
+			return toolErr("cwd must be an absolute path"), nil, nil
+		}
+		if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
+			return toolErr("%s is not a directory", cwd), nil, nil
+		}
+	}
+	child, err := createBotRow(s.db, s.config, name, strings.TrimSpace(in.Role), cwd, &parent.ID)
+	if err != nil {
+		return toolErr("could not create the bot: %v", err), nil, nil
+	}
+	first := strings.TrimSpace(in.FirstMessage)
+	if first != "" {
+		// Delivered the same way any bot-to-bot message is: as an inbox row the
+		// runner turns into the child's first turn once this turn ends.
+		from := s.botID
+		if err := s.db.Create(&InboxMessage{ToBotID: child.ID, FromBotID: &from, Text: first, Wake: true}).Error; err != nil {
+			return toolErr("the bot was created but its first message could not be queued: %v", err), nil, nil
+		}
+	}
+	s.post(parent.TopicID, fmt.Sprintf("🐣 <b>%s</b> spawned <b>%s</b>.", htmlEscape(parent.Name), htmlEscape(child.Name)))
+	return text("created bot %q (topic %d). It will report back to you with send_to_bot.", child.Name, child.TopicID), nil, nil
+}
+
+func (s *mcpServer) archiveBot(_ context.Context, _ *mcp.CallToolRequest, in archiveBotIn) (*mcp.CallToolResult, any, error) {
+	target, err := s.bot()
+	if err != nil {
+		return toolErr("unknown bot"), nil, nil
+	}
+	if name := strings.TrimSpace(in.Bot); name != "" && name != target.Name {
+		target, err = botByName(s.db, name)
+		if err != nil {
+			return toolErr("no live bot named %q", name), nil, nil
+		}
+	}
+	if err := archiveBotRow(s.db, target.ID); err != nil {
+		return toolErr("could not archive: %v", err), nil, nil
+	}
+	s.post(target.TopicID, "📦 <b>"+htmlEscape(target.Name)+"</b> archived. The topic is closed; its memories are kept.")
+	if s.config != nil && s.config.BotToken != "" && s.config.GroupID != 0 {
+		if err := closeForumTopic(s.config, target.TopicID); err != nil {
+			hookLog("close topic %d: %v", target.TopicID, err)
+		}
+	}
+	return text("archived %s", target.Name), nil, nil
+}
+
+func (s *mcpServer) getProject(_ context.Context, _ *mcp.CallToolRequest, in getProjectIn) (*mcp.CallToolResult, any, error) {
+	path := expandPath(strings.TrimSpace(in.Path))
+	if path == "" {
+		return toolErr("get_project needs a path"), nil, nil
+	}
+	var p Project
+	if err := s.db.Where("path = ?", path).First(&p).Error; err != nil {
+		return text("nothing recorded for %s yet — use set_project when you learn something durable about it", path), nil, nil
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "path: %s\n", p.Path)
+	for _, f := range [][2]string{{"name", p.Name}, {"description", p.Description}, {"stack", p.Stack}, {"deploy", p.DeployNotes}} {
+		if strings.TrimSpace(f[1]) != "" {
+			fmt.Fprintf(&sb, "%s: %s\n", f[0], f[1])
+		}
+	}
+	return text("%s", strings.TrimRight(sb.String(), "\n")), nil, nil
+}
+
+func (s *mcpServer) setProject(_ context.Context, _ *mcp.CallToolRequest, in setProjectIn) (*mcp.CallToolResult, any, error) {
+	path := expandPath(strings.TrimSpace(in.Path))
+	if path == "" {
+		return toolErr("set_project needs a path"), nil, nil
+	}
+	updates := map[string]any{"updated_at": time.Now()}
+	for key, value := range map[string]string{
+		"name": in.Name, "description": in.Description, "stack": in.Stack, "deploy_notes": in.DeployNotes,
+	} {
+		if strings.TrimSpace(value) != "" {
+			updates[key] = truncate(value, 4000)
+		}
+	}
+	var p Project
+	err := s.db.Where("path = ?", path).First(&p).Error
+	if err != nil {
+		p = Project{Path: path, Name: in.Name, Description: in.Description, Stack: in.Stack, DeployNotes: in.DeployNotes, UpdatedAt: time.Now()}
+		if err := s.db.Create(&p).Error; err != nil {
+			return toolErr("could not record the project: %v", err), nil, nil
+		}
+		return text("recorded %s", path), nil, nil
+	}
+	if err := s.db.Model(&Project{}).Where("id = ?", p.ID).Updates(updates).Error; err != nil {
+		return toolErr("could not update the project: %v", err), nil, nil
+	}
+	return text("updated %s", path), nil, nil
 }

@@ -26,6 +26,13 @@ type instance struct {
 	db      *gorm.DB
 	runner  turnRunner
 	dataDir string
+	// login is the at-most-one in-flight /account login (account.go).
+	login loginState
+	// pty overrides how PTY flows start a process; nil means the real one.
+	// Only the tests set it.
+	pty ptyStarter
+	// sched is the watch/schedule/doctor loop (nil in tests that do not need it).
+	sched *scheduler
 
 	mu  sync.Mutex
 	cfg *Config
@@ -115,6 +122,11 @@ func listenV3() error {
 	in.runner = runner
 	defer runner.Close()
 
+	sched := newScheduler(in)
+	in.sched = sched
+	go sched.Run()
+	defer sched.Close()
+
 	linkSharedProjects(cfg)
 	setBotCommandsV3(cfg.BotToken)
 	listenLog("ccc v3 listening (group: %d, db: %s)", cfg.GroupID, dbPath(cfg))
@@ -123,7 +135,9 @@ func listenV3() error {
 	db.Model(&Turn{}).Where("status = ?", turnRunning).
 		Updates(map[string]any{"status": turnFailed, "error_class": errFatal, "stop_reason": "ccc restarted"})
 	db.Model(&Bot{}).Where("status = ?", botRunning).Update("status", botIdle)
-	// Re-arm queues that survived the restart.
+	// Re-arm queues that survived the restart, including bot-to-bot messages
+	// whose sender's turn ended as the process was going down.
+	runner.deliverInbox(0)
 	var bots []Bot
 	db.Where("archived_at IS NULL").Find(&bots)
 	for i := range bots {
@@ -142,8 +156,11 @@ func listenV3() error {
 	offset := 0
 	client := &http.Client{Timeout: 35 * time.Second}
 	for {
+		// edited_message is requested too: an edit is an inbound update from a
+		// user, so the access gate has to see it rather than have it silently
+		// skipped by Telegram's default allowed_updates.
 		reqURL := fmt.Sprintf("%s?offset=%d&timeout=30&allowed_updates=%s",
-			telegramURL(cfg.BotToken, "getUpdates"), offset, `["message","callback_query"]`)
+			telegramURL(cfg.BotToken, "getUpdates"), offset, `["message","edited_message","callback_query"]`)
 		resp, err := telegramClientGet(client, cfg.BotToken, reqURL)
 		if err != nil {
 			listenLog("Network error: %v (retrying...)", err)
@@ -166,12 +183,22 @@ func listenV3() error {
 		}
 		for _, u := range updates.Result {
 			offset = u.UpdateID + 1
-			if u.CallbackQuery != nil {
+			switch {
+			case u.CallbackQuery != nil:
 				in.handleCallback(u.CallbackQuery)
-				continue
+			case u.EditedMessage != nil:
+				// An edit is gated like anything else, but never re-dispatched:
+				// re-running a turn because somebody fixed a typo is worse than
+				// ignoring it. The gate still applies (a stranger's edit must
+				// not slip past), hence the explicit call.
+				if in.gate(u.EditedMessage.From.ID, senderName(u.EditedMessage.From.Username, u.EditedMessage.From.FirstName),
+					u.EditedMessage.Chat.ID, u.EditedMessage.Chat.Type == "private") == roleDenied {
+					continue
+				}
+			default:
+				msg := u.Message
+				in.handleMessage(&msg)
 			}
-			msg := u.Message
-			in.handleMessage(&msg)
 		}
 	}
 }
@@ -223,8 +250,13 @@ func setBotCommandsV3(botToken string) {
 		{"command": "cwd", "description": "Show or set this bot's working directory"},
 		{"command": "memory", "description": "List or search this bot's memories"},
 		{"command": "forget", "description": "Forget a memory: /forget <scope> <key>"},
+		{"command": "watches", "description": "List this bot's watches"},
+		{"command": "schedules", "description": "List this bot's schedules"},
 		{"command": "bots", "description": "List all bots"},
 		{"command": "status", "description": "Instance health: profiles, queue, running turns"},
+		{"command": "account", "description": "Claude accounts (owner only)"},
+		{"command": "access", "description": "Who may talk to ccc (owner only)"},
+		{"command": "model", "description": "Show or set the model (owner only)"},
 	}
 	for _, scope := range []map[string]any{nil, {"type": "all_group_chats"}} {
 		payload := map[string]any{"commands": commands}
@@ -248,10 +280,12 @@ func setBotCommandsV3(botToken string) {
 // ---------------------------------------------------------------------------
 
 // handleMessage routes one inbound Telegram message (DESIGN §8 "Conversation").
+// Nothing happens before the access gate: an update from a user who is neither
+// the owner nor approved is dropped here, group or DM (DESIGN §12).
 func (in *instance) handleMessage(msg *TelegramMessage) {
 	cfg := in.config()
-	// Owner-only for Phase 2a; the pairing/allowlist system is Phase 2b.
-	if cfg.ChatID != 0 && msg.From.ID != cfg.ChatID {
+	role := in.gate(msg.From.ID, senderName(msg.From.Username, msg.From.FirstName), msg.Chat.ID, msg.Chat.Type == "private")
+	if role == roleDenied {
 		return
 	}
 	inGroup := cfg.GroupID != 0 && msg.Chat.ID == cfg.GroupID
@@ -270,8 +304,14 @@ func (in *instance) handleMessage(msg *TelegramMessage) {
 		return
 	}
 
+	// A pending /account login owns the owner's next message in its chat: it
+	// is the OAuth code, not something to hand to a bot.
+	if role == roleOwner && in.takeLoginCode(msg.Chat.ID, msg.MessageThreadID, text) {
+		return
+	}
+
 	if strings.HasPrefix(text, "/") {
-		in.handleCommand(msg, text, inGroup, topicID)
+		in.handleCommand(msg, text, inGroup, topicID, role)
 		return
 	}
 
@@ -326,15 +366,33 @@ func (in *instance) matchQuestion(b *Bot, msg *TelegramMessage) (*Question, bool
 	return nil, false
 }
 
-// handleCallback processes an inline button tap. Only q:<question>:<option> is
-// defined in Phase 2a.
+// handleCallback processes an inline button tap. Callback data is ccc's own
+// (`q:`, `access:`, `account:`), but the TAP is an inbound update like any
+// other, so it goes through the same gate — and the owner-only namespaces are
+// checked again here.
 func (in *instance) handleCallback(cb *CallbackQuery) {
 	cfg := in.config()
-	if cfg.ChatID != 0 && cb.From.ID != cfg.ChatID {
+	role := in.gate(cb.From.ID, senderName(cb.From.Username, cb.From.FirstName), callbackChatID(cb), callbackIsDM(cb))
+	if role == roleDenied {
 		return
 	}
 	answerCallbackQuery(cfg, cb.ID)
 	parts := strings.Split(cb.Data, ":")
+	if len(parts) == 0 {
+		return
+	}
+	switch parts[0] {
+	case "access":
+		if role == roleOwner {
+			in.handleAccessCallback(cb, parts)
+		}
+		return
+	case "account":
+		if role == roleOwner {
+			in.handleAccountCallback(cb, parts)
+		}
+		return
+	}
 	if len(parts) != 3 || parts[0] != "q" {
 		return
 	}
@@ -386,21 +444,7 @@ func (in *instance) createBotFromText(msg *TelegramMessage, text string) {
 
 // createBot creates the forum topic, the workspace and the database row.
 func (in *instance) createBot(name, role string) (*Bot, error) {
-	cfg := in.config()
-	name = uniqueBotName(in.db, sanitizeBotName(name))
-	topicID, err := createForumTopic(cfg, name)
-	if err != nil {
-		return nil, err
-	}
-	ws := botWorkspace(cfg, name)
-	if err := os.MkdirAll(ws, 0o755); err != nil {
-		return nil, err
-	}
-	b := &Bot{Name: name, TopicID: topicID, Role: role, Cwd: ws, Status: botIdle}
-	if err := in.db.Create(b).Error; err != nil {
-		return nil, err
-	}
-	return b, nil
+	return createBotRow(in.db, in.config(), name, role, "", nil)
 }
 
 // botNameFromText derives a topic name from the first line of a message.
@@ -533,9 +577,31 @@ func botCwd(cfg *Config, b *Bot) string {
 // Commands (DESIGN §8)
 // ---------------------------------------------------------------------------
 
-func (in *instance) handleCommand(msg *TelegramMessage, text string, inGroup bool, topicID int64) {
+// ownerOnlyCommands are the ones that change the instance itself, rather than
+// talking to a bot: accounts, access, model and the group binding.
+var ownerOnlyCommands = map[string]bool{
+	"/account": true, "/access": true, "/model": true, "/setgroup": true,
+}
+
+func (in *instance) handleCommand(msg *TelegramMessage, text string, inGroup bool, topicID int64, role accessRole) {
 	cmd, rest := splitCommand(text)
+	if ownerOnlyCommands[cmd] && role != roleOwner {
+		in.reply(msg, "That command is owner-only.")
+		return
+	}
 	switch cmd {
+	case "/access":
+		in.handleAccessCommand(msg, rest)
+		return
+	case "/account":
+		in.handleAccountCommand(msg, rest)
+		return
+	case "/model":
+		in.handleModelCommand(msg, rest)
+		return
+	case "/setgroup":
+		in.handleSetGroupCommand(msg)
+		return
 	case "/bots":
 		in.reply(msg, in.renderBots())
 		return
@@ -636,6 +702,12 @@ func (in *instance) handleCommand(msg *TelegramMessage, text string, inGroup boo
 		}
 		in.reply(msg, sb.String())
 
+	case "/watches":
+		in.handleWatchesCommand(msg, b, rest)
+
+	case "/schedules":
+		in.handleSchedulesCommand(msg, b, rest)
+
 	case "/forget":
 		scope, key := splitFirstWord(rest)
 		if scope == "" || key == "" {
@@ -725,14 +797,30 @@ func (in *instance) renderStatus() string {
 	fmt.Fprintf(&sb, "bots: %d · running: %d · queued: %d\n", nBots, running, queued)
 	fmt.Fprintf(&sb, "model: %s\n", firstNonEmpty(instanceModel(cfg), "claude default"))
 	fmt.Fprintf(&sb, "data: <code>%s</code>\n", htmlEscape(dataDir(cfg)))
+	var watches, schedules int64
+	in.db.Model(&Watch{}).Where("enabled = ?", true).Count(&watches)
+	in.db.Model(&Schedule{}).Where("fired_at IS NULL").Count(&schedules)
+	fmt.Fprintf(&sb, "watches: %d · schedules: %d\n", watches, schedules)
+
 	sb.WriteString("\n<b>Accounts</b>\n")
 	now := time.Now()
-	for _, s := range collectProfileStats(cfg, nil, now) {
+	needsLogin := in.needsLoginSet()
+	for _, s := range collectProfileStats(cfg, runningTurnsByProfileDB(in.db), now) {
 		state := "ok"
-		if !s.CooledUntil.IsZero() && s.CooledUntil.After(now) {
+		switch {
+		case needsLogin[s.Name]:
+			state = "needs login"
+		case !s.CooledUntil.IsZero() && s.CooledUntil.After(now):
 			state = "cooldown until " + s.CooledUntil.Format("15:04")
 		}
-		fmt.Fprintf(&sb, "• %s — 5h %d%%, 7d %d%% (%s)\n", htmlEscape(s.Name), s.FiveHour, s.SevenDay, state)
+		fmt.Fprintf(&sb, "• %s — 5h %d%%, 7d %d%%, %d running (%s)\n",
+			htmlEscape(s.Name), s.FiveHour, s.SevenDay, s.WorkingAgents, state)
+	}
+	if findings := in.sched.findingsSnapshot(); len(findings) > 0 {
+		sb.WriteString("\n<b>Doctor</b>\n")
+		for _, f := range findings {
+			fmt.Fprintf(&sb, "• %s: %s\n", htmlEscape(f.Profile), htmlEscape(f.Problem))
+		}
 	}
 	return sb.String()
 }
@@ -746,4 +834,162 @@ func (in *instance) reply(msg *TelegramMessage, html string) {
 	if _, err := sendMessageHTMLGetID(cfg, msg.Chat.ID, msg.MessageThreadID, html); err != nil {
 		hookLog("reply failed: %v", err)
 	}
+}
+
+// senderName is the human label ccc stores for a Telegram user: @username when
+// there is one, else the first name. Display only — access is always decided on
+// the numeric id, which the user cannot change.
+func senderName(username, firstName string) string {
+	if u := strings.TrimSpace(username); u != "" {
+		return "@" + u
+	}
+	return strings.TrimSpace(firstName)
+}
+
+func callbackChatID(cb *CallbackQuery) int64 {
+	if cb.Message == nil {
+		return 0
+	}
+	return cb.Message.Chat.ID
+}
+
+func callbackIsDM(cb *CallbackQuery) bool {
+	return cb.Message != nil && cb.Message.Chat.Type == "private"
+}
+
+// handleModelCommand shows or sets the model every bot runs on (DESIGN §8).
+// It rotates no sessions: --model is passed on every turn, including resumes.
+func (in *instance) handleModelCommand(msg *TelegramMessage, rest string) {
+	name := strings.TrimSpace(rest)
+	if name == "" {
+		in.reply(msg, "<b>Model</b>\n<code>"+htmlEscape(firstNonEmpty(instanceModel(in.config()), "(claude default)"))+"</code>\nSet it with /model &lt;name&gt; (or /model default).")
+		return
+	}
+	if strings.EqualFold(name, "default") {
+		name = ""
+	}
+	updated := updateConfig(func(c *Config) bool { c.Model = name; return true })
+	if updated == nil {
+		in.reply(msg, "Could not write the configuration.")
+		return
+	}
+	in.setConfig(updated)
+	in.reply(msg, "🧠 Model set to <code>"+htmlEscape(firstNonEmpty(name, "(claude default)"))+"</code>")
+}
+
+// handleSetGroupCommand binds the instance to the forum group the command was
+// sent in, which is the headless alternative to `ccc setgroup` (a VM has no
+// terminal to run that interactive loop in).
+func (in *instance) handleSetGroupCommand(msg *TelegramMessage) {
+	if msg.Chat.Type != "supergroup" {
+		in.reply(msg, "Send /setgroup inside the forum group (Topics enabled, bot as admin).")
+		return
+	}
+	updated := updateConfig(func(c *Config) bool { c.GroupID = msg.Chat.ID; return true })
+	if updated == nil {
+		in.reply(msg, "Could not write the configuration.")
+		return
+	}
+	in.setConfig(updated)
+	in.reply(msg, fmt.Sprintf("📌 This group is now ccc's home (<code>%d</code>).\nSend a message in General to create your first bot.", msg.Chat.ID))
+}
+
+// setConfig swaps the instance's configuration and hands the new one to the
+// runner, so the next turn already uses it.
+func (in *instance) setConfig(cfg *Config) {
+	in.mu.Lock()
+	in.cfg = cfg
+	in.mu.Unlock()
+	if r, ok := in.runner.(*Runner); ok {
+		r.setConfig(cfg)
+	}
+}
+
+// handleWatchesCommand lists or cancels this bot's watches (DESIGN §8).
+func (in *instance) handleWatchesCommand(msg *TelegramMessage, b *Bot, rest string) {
+	action, name := splitFirstWord(rest)
+	if strings.EqualFold(action, "cancel") || strings.EqualFold(action, "remove") {
+		if strings.TrimSpace(name) == "" {
+			in.reply(msg, "Usage: /watches cancel &lt;name&gt;")
+			return
+		}
+		removed, err := deleteWatch(in.db, b.ID, name)
+		if err != nil {
+			in.reply(msg, "Could not remove it: "+htmlEscape(err.Error()))
+			return
+		}
+		if !removed {
+			in.reply(msg, "No watch by that name.")
+			return
+		}
+		in.reply(msg, "🗑 Removed watch <b>"+htmlEscape(name)+"</b>")
+		return
+	}
+
+	watches, err := listWatches(in.db, b.ID)
+	if err != nil {
+		in.reply(msg, "Could not list watches: "+htmlEscape(err.Error()))
+		return
+	}
+	if len(watches) == 0 {
+		in.reply(msg, "No watches. The bot creates them itself with the <code>watch</code> tool.")
+		return
+	}
+	var sb strings.Builder
+	sb.WriteString("<b>Watches</b>\n")
+	for _, w := range watches {
+		last := "never run"
+		if w.LastRunAt != nil {
+			last = humanDuration(time.Since(*w.LastRunAt)) + " ago"
+		}
+		state := ""
+		if !w.Enabled {
+			state = " (disabled)"
+		}
+		fmt.Fprintf(&sb, "• <b>%s</b>%s — every %ds, last %s\n  <code>%s</code>\n",
+			htmlEscape(w.Name), state, w.IntervalS, last, htmlEscape(truncate(w.Command, 200)))
+	}
+	sb.WriteString("\nCancel one with /watches cancel &lt;name&gt;")
+	in.reply(msg, sb.String())
+}
+
+// handleSchedulesCommand lists or cancels this bot's pending wakeups.
+func (in *instance) handleSchedulesCommand(msg *TelegramMessage, b *Bot, rest string) {
+	action, idText := splitFirstWord(rest)
+	if strings.EqualFold(action, "cancel") || strings.EqualFold(action, "remove") {
+		id, err := strconv.ParseInt(strings.TrimSpace(idText), 10, 64)
+		if err != nil {
+			in.reply(msg, "Usage: /schedules cancel &lt;id&gt;")
+			return
+		}
+		res := in.db.Where("id = ? AND bot_id = ?", id, b.ID).Delete(&Schedule{})
+		if res.RowsAffected == 0 {
+			in.reply(msg, "No schedule with that id on this bot.")
+			return
+		}
+		in.reply(msg, fmt.Sprintf("🗑 Cancelled schedule #%d", id))
+		return
+	}
+
+	schedules, err := listSchedules(in.db, b.ID)
+	if err != nil {
+		in.reply(msg, "Could not list schedules: "+htmlEscape(err.Error()))
+		return
+	}
+	if len(schedules) == 0 {
+		in.reply(msg, "No pending wakeups. The bot schedules its own with the <code>schedule_wakeup</code> tool.")
+		return
+	}
+	var sb strings.Builder
+	sb.WriteString("<b>Schedules</b>\n")
+	for _, s := range schedules {
+		repeat := ""
+		if s.RecurringCron != "" {
+			repeat = " (repeats: " + htmlEscape(s.RecurringCron) + ")"
+		}
+		fmt.Fprintf(&sb, "• <b>#%d</b> %s%s\n  %s\n",
+			s.ID, s.FireAt.Format("2006-01-02 15:04"), repeat, htmlEscape(truncate(s.Note, 200)))
+	}
+	sb.WriteString("\nCancel one with /schedules cancel &lt;id&gt;")
+	in.reply(msg, sb.String())
 }

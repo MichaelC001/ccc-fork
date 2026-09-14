@@ -315,9 +315,10 @@ func (r *Runner) execute(b *Bot, t *Turn, input string, triggers []int64) {
 	prog.set("thinking")
 
 	envelope := buildEnvelope(r.db, b, t.Source, input, now)
-	// Inbox rows are consumed by the envelope's summary; mark them delivered so
-	// the next turn does not re-announce them.
-	r.db.Model(&InboxMessage{}).Where("to_bot_id = ? AND delivered_at IS NULL", b.ID).
+	// Quiet inbox rows (wake=false) are consumed by the envelope's summary, so
+	// mark them delivered and stop re-announcing them. Waking ones are NOT
+	// touched here: deliverInbox turns each of those into a turn of its own.
+	r.db.Model(&InboxMessage{}).Where("to_bot_id = ? AND delivered_at IS NULL AND wake = ?", b.ID, false).
 		Updates(map[string]any{"delivered_at": now, "turn_id": t.ID})
 
 	tried := map[string]bool{}
@@ -419,19 +420,49 @@ func (r *Runner) hasPendingQuestion(botID int64) bool {
 	return n > 0
 }
 
-// deliverInbox wakes every bot that received a send_to_bot during this turn
-// (DESIGN §3.3: delivery happens post-turn).
+// deliverInbox turns every waking message produced by a turn into a queued
+// turn on its target bot (DESIGN §3.3: delivery happens post-turn). A
+// fromBotID of 0 means "everything still pending", which is how a restarted
+// listener picks up messages whose sender's turn ended as the process died.
 func (r *Runner) deliverInbox(fromBotID int64) {
+	q := r.db.Where("delivered_at IS NULL AND wake = ?", true)
+	if fromBotID > 0 {
+		q = q.Where("from_bot_id = ?", fromBotID)
+	}
 	var pending []InboxMessage
-	r.db.Where("delivered_at IS NULL AND wake = ? AND from_bot_id = ?", true, fromBotID).Find(&pending)
-	seen := map[int64]bool{}
+	if err := q.Order("id").Find(&pending).Error; err != nil {
+		return
+	}
+	now := time.Now()
 	for _, m := range pending {
-		if seen[m.ToBotID] {
+		turn := &Turn{
+			BotID:  m.ToBotID,
+			Source: sourceBot,
+			Input:  inboxInput(r.db, m),
+			Status: turnQueued,
+		}
+		if err := r.db.Create(turn).Error; err != nil {
+			hookLog("inbox delivery: %v", err)
 			continue
 		}
-		seen[m.ToBotID] = true
+		r.db.Model(&InboxMessage{}).Where("id = ?", m.ID).
+			Updates(map[string]any{"delivered_at": now, "turn_id": turn.ID})
 		r.kick(m.ToBotID)
 	}
+}
+
+// inboxInput labels a delivered message with who sent it, so the receiving bot
+// can tell a teammate's request from the owner's.
+func inboxInput(db *gorm.DB, m InboxMessage) string {
+	sender := "the owner"
+	if m.FromBotID != nil {
+		if from, err := botByID(db, *m.FromBotID); err == nil {
+			sender = from.Name
+		} else {
+			sender = "another bot"
+		}
+	}
+	return fmt.Sprintf("Message from %s:\n%s", sender, m.Text)
 }
 
 // sessionFor returns the session UUID for the next turn and whether it is a
@@ -731,21 +762,14 @@ func (r *Runner) markNeedsLogin(p Profile) {
 	r.needsLogin[p.Name] = true
 	r.mu.Unlock()
 	cfg := r.config()
-	if cfg == nil || cfg.ChatID == 0 {
+	if cfg == nil || cfg.ChatID == 0 || cfg.BotToken == "" {
 		return
 	}
-	// Phase 2b owns the Relogin button (it needs the PTY login flow); for now
-	// the owner gets the exact command to run.
-	msg := fmt.Sprintf("🔑 Claude account <b>%s</b> needs a new login.\n<code>%s</code>",
-		htmlEscape(p.Name), htmlEscape(reloginCommand(p)))
-	_, _ = sendMessageHTMLGetID(cfg, cfg.ChatID, 0, msg) // safe-ignore: a failed notification must not fail the turn
-}
-
-func reloginCommand(p Profile) string {
-	if p.Implicit {
-		return "claude auth login"
-	}
-	return fmt.Sprintf("CLAUDE_CONFIG_DIR=%s claude auth login", p.ConfigDir)
+	// The button runs the PTY login flow in account.go, so the owner never has
+	// to reach the machine to fix an account.
+	msg := fmt.Sprintf("🔑 Claude account <b>%s</b> needs a new login (a turn was refused).", htmlEscape(p.Name))
+	buttons := [][]InlineKeyboardButton{{{Text: "🔑 Relogin " + p.Name, CallbackData: "account:login:" + p.Name}}}
+	_, _ = sendMessageKeyboardGetID(cfg, cfg.ChatID, 0, msg, buttons) // safe-ignore: a failed notification must not fail the turn
 }
 
 // pickProfileExcluding is pickProfile with the profiles this turn already tried
@@ -858,4 +882,37 @@ func newUUID() string {
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// setConfig swaps the configuration used by the next turn (/model, /account).
+func (r *Runner) setConfig(cfg *Config) {
+	r.mu.Lock()
+	r.cfg = cfg
+	r.mu.Unlock()
+}
+
+// needsLoginSnapshot copies the set of profiles a turn found logged out.
+func (r *Runner) needsLoginSnapshot() map[string]bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make(map[string]bool, len(r.needsLogin))
+	for k, v := range r.needsLogin {
+		out[k] = v
+	}
+	return out
+}
+
+// clearNeedsLogin puts a profile back in the running after a successful login.
+func (r *Runner) clearNeedsLogin(name string) {
+	r.mu.Lock()
+	delete(r.needsLogin, name)
+	r.mu.Unlock()
+}
+
+// markProfileNeedsLogin is markNeedsLogin without the notification, for the
+// doctor loop (which does its own, with a Relogin button).
+func (r *Runner) markProfileNeedsLogin(name string) {
+	r.mu.Lock()
+	r.needsLogin[name] = true
+	r.mu.Unlock()
 }
