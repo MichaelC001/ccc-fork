@@ -357,6 +357,12 @@ func runLoginFlow(ctx context.Context, start ptyStarter, p Profile, prompter log
 	if url == "" {
 		return "", errors.New("claude printed no login URL")
 	}
+	// The code prompt follows the URL immediately. Waiting for it is not
+	// required — the child buffers whatever is typed — but it catches a claude
+	// that printed a URL and then died before it could read anything.
+	if _, err := s.waitFor(ctx, []string{ptyCodePrompt}, 20*time.Second); err != nil {
+		return "", fmt.Errorf("claude never asked for the code: %w", err)
+	}
 	prompter.Progress("waiting for the code")
 
 	code, err := prompter.AskForCode(ctx, url)
