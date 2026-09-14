@@ -44,7 +44,10 @@ type TelegramMessage struct {
 		Username  string `json:"username"`
 		FirstName string `json:"first_name"`
 	} `json:"from"`
-	Text           string            `json:"text"`
+	Text string `json:"text"`
+	// EditDate is set on an edited_message: the unix time of THAT edit. It is
+	// what makes an edited command dispatchable exactly once (listenv3.go).
+	EditDate       int64             `json:"edit_date,omitempty"`
 	ReplyToMessage *TelegramMessage  `json:"reply_to_message,omitempty"`
 	Voice          *TelegramVoice    `json:"voice,omitempty"`
 	Photo          []TelegramPhoto   `json:"photo,omitempty"`

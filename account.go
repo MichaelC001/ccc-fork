@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -54,31 +52,120 @@ type accountCard struct {
 
 // collectAccountCards probes every profile. It shells out once per profile
 // (`claude auth status --json`), so it is called on demand, never per turn.
+// Learning what a profile's account actually is re-keys it (accounts are
+// addressed by email, DESIGN §8), so the cards are built from the config as it
+// is AFTER the probes.
 func (in *instance) collectAccountCards() []accountCard {
+	type probe struct {
+		p       Profile
+		state   accountState
+		account string
+	}
+	var probes []probe
+	for _, p := range listProfiles(in.config()) {
+		pr := probe{p: p}
+		loggedIn, account, err := profileLoggedIn(p)
+		switch {
+		case err != nil:
+			pr.state = accountUnknown
+		case !loggedIn:
+			pr.state = accountLoggedOut
+		default:
+			pr.state = accountOK
+		}
+		pr.account = account
+		pr.p.Name = in.rememberProfileEmail(p.Name, account)
+		probes = append(probes, pr)
+	}
+
 	cfg := in.config()
 	def := defaultProfile(cfg).Name
 	needsLogin := in.needsLoginSet()
 	busy := in.busyBotsByProfile()
 
 	var cards []accountCard
-	for _, p := range listProfiles(cfg) {
-		card := accountCard{Profile: p, Usage: readProfileUsage(p), IsDefault: p.Name == def, Bots: busy[p.Name]}
-		card.Disclaimer, _ = bypassAccepted(p)
-		loggedIn, account, err := profileLoggedIn(p)
-		switch {
-		case err != nil:
-			card.State = accountUnknown
-		case !loggedIn:
-			card.State = accountLoggedOut
-		case needsLogin[p.Name]:
-			card.State = accountNeedsLogin
-		default:
-			card.State = accountOK
+	for _, pr := range probes {
+		p, ok := profileByName(cfg, pr.p.Name)
+		if !ok {
+			p = pr.p
 		}
-		card.Account = firstNonEmpty(account, p.Label)
+		card := accountCard{Profile: p, State: pr.state, Usage: readProfileUsage(p),
+			IsDefault: p.Name == def, Bots: busy[p.Name]}
+		card.Disclaimer, _ = bypassAccepted(p)
+		if card.State == accountOK && needsLogin[p.Name] {
+			card.State = accountNeedsLogin
+		}
+		card.Account = firstNonEmpty(pr.account, p.Label)
 		cards = append(cards, card)
 	}
 	return cards
+}
+
+// rememberProfileEmail records the address `claude auth status` reports for a
+// profile and, once it is known, re-keys the profile by it. That is what makes
+// the machine's pre-existing ~/.claude account show up as its email instead of
+// "default", and what migrates a profile that predates emails as keys. The
+// config dir never moves — only the key and the label change — and the turns
+// already recorded against the old key follow it so /usage stays whole.
+// It returns the key the profile is addressable by afterwards.
+func (in *instance) rememberProfileEmail(name, account string) string {
+	email := normalizeEmail(account)
+	if !isAccountEmail(email) {
+		return name
+	}
+	renamed := false
+	updated := updateConfig(func(c *Config) bool {
+		if c.Profiles == nil {
+			c.Profiles = map[string]*Profile{}
+		}
+		current := c.Profiles[name]
+		if current == nil {
+			// The implicit profile has no entry yet. Register it with an EMPTY
+			// config_dir: pinning CLAUDE_CONFIG_DIR at claude's own default
+			// location would make it start a fresh .claude.json (profiles.go).
+			if name != defaultProfileName || c.Profiles[email] != nil {
+				return false
+			}
+			c.Profiles[email] = &Profile{Label: email}
+			if c.DefaultProfile == "" || c.DefaultProfile == name {
+				c.DefaultProfile = email
+			}
+			renamed = true
+			return true
+		}
+		if name == email {
+			if current.Label == email {
+				return false
+			}
+			current.Label = email
+			return true
+		}
+		if c.Profiles[email] != nil {
+			// Two profiles claim the same account; leave the key alone and just
+			// record what this one is, so the owner can see the clash.
+			if current.Label == email {
+				return false
+			}
+			current.Label = email
+			return true
+		}
+		current.Label = email
+		c.Profiles[email] = current
+		delete(c.Profiles, name)
+		if c.DefaultProfile == name {
+			c.DefaultProfile = email
+		}
+		renamed = true
+		return true
+	})
+	if updated == nil {
+		return name
+	}
+	in.setConfig(updated)
+	if renamed && name != email && in.db != nil {
+		in.db.Model(&Turn{}).Where("profile = ?", name).Update("profile", email)
+	}
+	return email
 }
 
 func (in *instance) needsLoginSet() map[string]bool {
@@ -109,18 +196,20 @@ func renderAccounts(cards []accountCard) (string, [][]InlineKeyboardButton) {
 	var sb strings.Builder
 	sb.WriteString("<b>Claude accounts</b>\n")
 	if len(cards) == 0 {
-		sb.WriteString("None configured. <code>/account add &lt;name&gt;</code>")
+		sb.WriteString("None configured. <code>/account add &lt;email&gt;</code>")
 		return sb.String(), nil
 	}
 	var buttons [][]InlineKeyboardButton
 	for _, c := range cards {
-		name := c.Profile.Name
+		// An account is its email here: the config dir behind it is an
+		// implementation detail the owner never has to know (DESIGN §8).
+		name := accountDisplay(c.Profile)
 		marker := ""
 		if c.IsDefault {
 			marker = " ⭐"
 		}
 		fmt.Fprintf(&sb, "\n<b>%s</b>%s — %s\n", htmlEscape(name), marker, c.State.icon())
-		if acct := strings.TrimSpace(c.Account); acct != "" {
+		if acct := normalizeEmail(c.Account); acct != "" && acct != normalizeEmail(name) {
 			fmt.Fprintf(&sb, "  %s\n", htmlEscape(acct))
 		}
 		fmt.Fprintf(&sb, "  usage: 5h %s · 7d %s\n",
@@ -133,9 +222,10 @@ func renderAccounts(cards []accountCard) (string, [][]InlineKeyboardButton) {
 		if !c.Disclaimer {
 			sb.WriteString("  ⚠️ bypass disclaimer not accepted\n")
 		}
-		row := []InlineKeyboardButton{{Text: "🔑 Relogin " + name, CallbackData: "account:login:" + name}}
+		target := accountTarget(c.Profile.Name)
+		row := []InlineKeyboardButton{{Text: "🔑 Relogin " + name, CallbackData: "account:login:" + target}}
 		if !c.IsDefault {
-			row = append(row, InlineKeyboardButton{Text: "⭐ Default", CallbackData: "account:default:" + name})
+			row = append(row, InlineKeyboardButton{Text: "⭐ Default", CallbackData: "account:default:" + target})
 		}
 		buttons = append(buttons, row)
 	}
@@ -156,34 +246,34 @@ func (in *instance) handleAccountCommand(msg *TelegramMessage, rest string) {
 
 	case "add":
 		if arg == "" {
-			in.reply(msg, "Usage: /account add &lt;name&gt;")
+			in.reply(msg, "Usage: /account add &lt;email&gt;")
 			return
 		}
 		in.accountAdd(msg, arg)
 
 	case "login":
 		if arg == "" {
-			in.reply(msg, "Usage: /account login &lt;name&gt;")
+			in.reply(msg, "Usage: /account login &lt;email&gt;")
 			return
 		}
 		in.startLogin(msg.Chat.ID, msg.MessageThreadID, arg)
 
 	case "remove":
 		if arg == "" {
-			in.reply(msg, "Usage: /account remove &lt;name&gt;")
+			in.reply(msg, "Usage: /account remove &lt;email&gt;")
 			return
 		}
 		in.accountAskRemove(msg, arg)
 
 	case "default":
 		if arg == "" {
-			in.reply(msg, "Usage: /account default &lt;name&gt;")
+			in.reply(msg, "Usage: /account default &lt;email&gt;")
 			return
 		}
 		in.accountSetDefault(msg.Chat.ID, msg.MessageThreadID, arg)
 
 	default:
-		in.reply(msg, "Usage: /account [status] · add &lt;name&gt; · login &lt;name&gt; · remove &lt;name&gt; · default &lt;name&gt;")
+		in.reply(msg, "Usage: /account [status] · add &lt;email&gt; · login &lt;email&gt; · remove &lt;email&gt; · default &lt;email&gt;")
 	}
 }
 
@@ -200,23 +290,24 @@ func (in *instance) postAccounts(chatID, topicID int64) {
 	_, _ = sendMessageKeyboardGetID(cfg, chatID, topicID, body, buttons) // safe-ignore: same
 }
 
-// profileNameRe keeps a profile name usable as a directory name: the name is
-// owner input, and it becomes a path under <data_dir>/profiles.
-var profileNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$`)
-
 // accountAdd registers a new profile with its own config dir and starts the
-// login flow for it (DESIGN §8 steps 1-3).
-func (in *instance) accountAdd(msg *TelegramMessage, name string) {
+// login flow for it (DESIGN §8 steps 1-3). The account is named by the email of
+// the Claude account behind it: that is the only identifier the owner ever
+// types, and the config dir is derived from it.
+func (in *instance) accountAdd(msg *TelegramMessage, arg string) {
+	email := normalizeEmail(arg)
+	if !isAccountEmail(email) {
+		in.reply(msg, "Accounts are identified by the email of the Claude account, so I need one: "+
+			"<code>/account add you@example.com</code>")
+		return
+	}
 	cfg := in.config()
-	if !profileNameRe.MatchString(name) {
-		in.reply(msg, "Use a short name of letters, digits, <code>-</code>, <code>_</code> or <code>.</code>")
+	if p, exists := profileByName(cfg, email); exists {
+		in.reply(msg, "That account already exists. Use <code>/account login "+
+			htmlEscape(accountDisplay(p))+"</code>.")
 		return
 	}
-	if _, exists := cfg.Profiles[name]; exists {
-		in.reply(msg, "That account already exists. Use <code>/account login "+htmlEscape(name)+"</code>.")
-		return
-	}
-	dir := filepath.Join(dataDir(cfg), "profiles", name)
+	dir := profileDirFor(cfg, email)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		in.reply(msg, "Could not create the config dir: "+htmlEscape(err.Error()))
 		return
@@ -227,9 +318,9 @@ func (in *instance) accountAdd(msg *TelegramMessage, name string) {
 		}
 		// An explicit config dir per profile is what keeps two accounts'
 		// credentials apart; see profiles.go.
-		c.Profiles[name] = &Profile{ConfigDir: dir}
+		c.Profiles[email] = &Profile{ConfigDir: dir, Label: email}
 		if len(c.Profiles) == 1 && c.DefaultProfile == "" {
-			c.DefaultProfile = name
+			c.DefaultProfile = email
 		}
 		return true
 	})
@@ -241,50 +332,58 @@ func (in *instance) accountAdd(msg *TelegramMessage, name string) {
 	// Share transcripts with the other accounts so failover can resume a
 	// conversation this profile never started (DESIGN §4).
 	linkSharedProjects(updated)
-	in.reply(msg, "➕ Added <b>"+htmlEscape(name)+"</b>. Logging it in now...")
-	in.startLogin(msg.Chat.ID, msg.MessageThreadID, name)
+	in.reply(msg, "➕ Added <b>"+htmlEscape(email)+"</b>. Logging it in now...")
+	in.startLogin(msg.Chat.ID, msg.MessageThreadID, email)
 }
 
 func (in *instance) accountSetDefault(chatID, topicID int64, name string) {
 	cfg := in.config()
-	if _, ok := profileByName(cfg, name); !ok {
-		in.post(chatID, topicID, "No account named <b>"+htmlEscape(name)+"</b>.")
+	p, ok := profileByName(cfg, name)
+	if !ok {
+		in.post(chatID, topicID, "No account <b>"+htmlEscape(name)+"</b>.")
 		return
 	}
-	updated := updateConfig(func(c *Config) bool { c.DefaultProfile = name; return true })
+	key := p.Name
+	updated := updateConfig(func(c *Config) bool { c.DefaultProfile = key; return true })
 	if updated == nil {
 		in.post(chatID, topicID, "Could not write the configuration.")
 		return
 	}
 	in.setConfig(updated)
-	in.post(chatID, topicID, "⭐ Default account: <b>"+htmlEscape(name)+"</b>")
+	in.post(chatID, topicID, "⭐ Default account: <b>"+htmlEscape(accountDisplay(p))+"</b>")
 }
 
 // accountAskRemove refuses outright while the profile is carrying a turn, and
 // otherwise asks for a button confirmation before unregistering it.
 func (in *instance) accountAskRemove(msg *TelegramMessage, name string) {
 	cfg := in.config()
-	if _, ok := cfg.Profiles[name]; !ok {
-		in.reply(msg, "No account named <b>"+htmlEscape(name)+"</b>.")
+	p, ok := profileByName(cfg, name)
+	if !ok || cfg.Profiles[p.Name] == nil {
+		in.reply(msg, "No account <b>"+htmlEscape(name)+"</b>.")
 		return
 	}
-	if busy := in.busyBotsByProfile()[name]; len(busy) > 0 {
-		in.reply(msg, "🚫 <b>"+htmlEscape(name)+"</b> is running a turn for "+
+	shown := accountDisplay(p)
+	if busy := in.busyBotsByProfile()[p.Name]; len(busy) > 0 {
+		in.reply(msg, "🚫 <b>"+htmlEscape(shown)+"</b> is running a turn for "+
 			htmlEscape(strings.Join(busy, ", "))+". Wait, or /stop them first.")
 		return
 	}
-	body := "Remove account <b>" + htmlEscape(name) + "</b>? Its config dir stays on disk."
+	body := "Remove account <b>" + htmlEscape(shown) + "</b>? Its config dir stays on disk."
 	buttons := [][]InlineKeyboardButton{{
-		{Text: "🗑 Remove", CallbackData: "account:removeok:" + name},
+		{Text: "🗑 Remove", CallbackData: "account:removeok:" + accountTarget(p.Name)},
 		{Text: "Cancel", CallbackData: "account:cancel:-"},
 	}}
 	_, _ = sendMessageKeyboardGetID(cfg, msg.Chat.ID, msg.MessageThreadID, body, buttons) // safe-ignore: the command is a no-op if this fails
 }
 
 func (in *instance) accountRemove(name string) string {
+	shown := name
+	if p, ok := profileByName(in.config(), name); ok {
+		name, shown = p.Name, accountDisplay(p)
+	}
 	// Re-check under the confirmation: a turn may have started meanwhile.
 	if busy := in.busyBotsByProfile()[name]; len(busy) > 0 {
-		return "🚫 <b>" + htmlEscape(name) + "</b> started a turn for " + htmlEscape(strings.Join(busy, ", ")) + "; not removed."
+		return "🚫 <b>" + htmlEscape(shown) + "</b> started a turn for " + htmlEscape(strings.Join(busy, ", ")) + "; not removed."
 	}
 	updated := updateConfig(func(c *Config) bool {
 		if c.Profiles == nil || c.Profiles[name] == nil {
@@ -305,7 +404,7 @@ func (in *instance) accountRemove(name string) string {
 		return "Could not write the configuration."
 	}
 	in.setConfig(updated)
-	return "🗑 Removed <b>" + htmlEscape(name) + "</b> (its config dir was left on disk)."
+	return "🗑 Removed <b>" + htmlEscape(shown) + "</b> (its config dir was left on disk)."
 }
 
 // handleAccountCallback answers the buttons on the account cards.
@@ -314,17 +413,28 @@ func (in *instance) handleAccountCallback(cb *CallbackQuery, parts []string) {
 		return
 	}
 	chatID, topicID := cb.Message.Chat.ID, cb.Message.MessageThreadID
-	switch parts[1] {
-	case "refresh":
+	if parts[1] == "refresh" {
 		in.postAccounts(chatID, topicID)
-	case "login":
-		in.startLogin(chatID, topicID, parts[2])
-	case "default":
-		in.accountSetDefault(chatID, topicID, parts[2])
-	case "removeok":
-		in.editCallbackMessage(cb, in.accountRemove(parts[2]))
-	case "cancel":
+		return
+	}
+	if parts[1] == "cancel" {
 		in.editCallbackMessage(cb, "Cancelled.")
+		return
+	}
+	// Every other button carries a profile reference, which is an email or a
+	// digest standing in for one too long for callback_data (profiles.go).
+	p, ok := resolveAccountTarget(in.config(), parts[2])
+	if !ok {
+		in.editCallbackMessage(cb, "That account is gone.")
+		return
+	}
+	switch parts[1] {
+	case "login":
+		in.startLogin(chatID, topicID, p.Name)
+	case "default":
+		in.accountSetDefault(chatID, topicID, p.Name)
+	case "removeok":
+		in.editCallbackMessage(cb, in.accountRemove(p.Name))
 	}
 }
 
@@ -398,7 +508,11 @@ func (in *instance) startLogin(chatID, topicID int64, name string) {
 	cfg := in.config()
 	p, ok := profileByName(cfg, name)
 	if !ok {
-		in.post(chatID, topicID, "No account named <b>"+htmlEscape(name)+"</b>.")
+		hint := ""
+		if isAccountEmail(name) {
+			hint = " Add it with <code>/account add " + htmlEscape(normalizeEmail(name)) + "</code>."
+		}
+		in.post(chatID, topicID, "No account <b>"+htmlEscape(name)+"</b>."+hint)
 		return
 	}
 
@@ -426,13 +540,16 @@ func (in *instance) startLogin(chatID, topicID int64, name string) {
 			in.login.mu.Unlock()
 		}()
 
-		in.post(chatID, topicID, "🔑 Starting <code>claude auth login</code> for <b>"+htmlEscape(name)+"</b>...")
+		in.post(chatID, topicID, "🔑 Starting <code>claude auth login</code> for <b>"+htmlEscape(accountDisplay(p))+"</b>...")
 		account, err := runLoginFlow(ctx, in.ptyStart(), p, telegramPrompter{in: in, chatID: chatID, topicID: topicID, waiter: waiter})
 		if err != nil {
 			in.post(chatID, topicID, "❌ Login failed: "+htmlEscape(truncate(err.Error(), 500)))
 			return
 		}
-		in.post(chatID, topicID, "✅ <b>"+htmlEscape(name)+"</b> is logged in"+accountSuffix(account)+".")
+		// The browser may have been signed in as somebody else: the account is
+		// whatever `claude auth status` reports, not what the owner typed.
+		name = in.reconcileLoginEmail(chatID, topicID, name, account)
+		in.post(chatID, topicID, "✅ <b>"+htmlEscape(name)+"</b> is logged in.")
 
 		// The account is only usable once the disclaimer is accepted too.
 		dctx, dcancel := context.WithTimeout(context.Background(), 3*time.Minute)
@@ -448,11 +565,21 @@ func (in *instance) startLogin(chatID, topicID int64, name string) {
 	}()
 }
 
-func accountSuffix(account string) string {
-	if strings.TrimSpace(account) == "" {
-		return ""
+// reconcileLoginEmail stores the account the login actually produced. The owner
+// types the address they MEANT to log in as; if the device was signed in as
+// somebody else the profile is stored under the real address and the owner is
+// told, because otherwise two accounts would silently be one.
+func (in *instance) reconcileLoginEmail(chatID, topicID int64, typed, reported string) string {
+	email := normalizeEmail(reported)
+	if !isAccountEmail(email) {
+		return typed // nothing usable came back; keep addressing it as it is
 	}
-	return " as " + htmlEscape(account)
+	key := in.rememberProfileEmail(typed, email)
+	if isAccountEmail(typed) && normalizeEmail(typed) != email {
+		in.post(chatID, topicID, "⚠️ You typed <b>"+htmlEscape(normalizeEmail(typed))+
+			"</b> but logged in as <b>"+htmlEscape(email)+"</b>; the account is stored as <b>"+htmlEscape(email)+"</b>.")
+	}
+	return key
 }
 
 // ptyStart is the PTY starter the flows use. It is a method so tests can point

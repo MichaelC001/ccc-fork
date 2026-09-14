@@ -152,21 +152,28 @@ In the forum group, send:
 ccc records the group id. Then, anywhere:
 
 ```
-/account add work
+/account add you@example.com
 ```
 
-ccc creates a config dir for the account, runs `claude auth login` on a
-pseudo-terminal and posts you the login URL. Open it on a device where you are
-signed in to the right Claude account, and send the code it gives you back into
-the same chat. ccc feeds it to the CLI, confirms with `claude auth status`, then
-accepts the bypass-permissions disclaimer for you.
+An account **is** its email: that is what you type and what `/account` shows,
+and ccc derives the config dir behind it from the address (you never see or type
+that). ccc creates the dir, runs `claude auth login` on a pseudo-terminal and
+posts you the login URL. Open it on a device where you are signed in to the
+right Claude account, and send the code it gives you back into the same chat.
+ccc feeds it to the CLI, confirms with `claude auth status`, then accepts the
+bypass-permissions disclaimer for you.
+
+If the device turned out to be signed in as somebody else, ccc says so and
+stores the account under the address it actually logged in as. The account
+already on the machine (`~/.claude`) needs no `add`: it shows up under its own
+email as soon as ccc has asked `claude auth status` once.
 
 > ccc **never opens a browser** on the machine it runs on: the login URL is for
 > Telegram only. The login runs with a directory of no-op `open` / `xdg-open`
 > shims first on `PATH` and `$BROWSER` pointed at one of them.
 
-Add a second account the same way (`/account add personal`) — turns are spread
-across them and fail over when one runs out.
+Add a second account the same way (`/account add other@example.com`) — turns are
+spread across them and fail over when one runs out.
 
 ### 7. Make your first bot
 
@@ -232,7 +239,7 @@ what the bot is doing. It is replaced by the answer, and your message gets a ✅
 | Command | Effect |
 |---|---|
 | `/account` | Status card per Claude account, with buttons. |
-| `/account add\|login\|remove\|default <name>` | Manage accounts (see above). |
+| `/account add\|login\|remove\|default <email>` | Manage accounts by their email (see above). |
 | `/access` | Who may talk to ccc (see below). |
 | `/model [name]` | Show or set the model every bot runs on. `/model default` clears it. |
 | `/setgroup` | Bind ccc to the forum group the command was sent in. |
@@ -361,16 +368,26 @@ another.
 
 ---
 
+## Fixing a command you mistyped
+
+Edit the message. An edited message whose text starts with `/` runs as a
+command, once per edit — so turning `/account add` into
+`/account add you@example.com` does what you meant without sending a second
+message. Editing plain text still does nothing: correcting a typo must not
+re-run a turn.
+
+---
+
 ## Troubleshooting
 
 **A bot says an account needs a new login.** You will also get a DM with a
-**Relogin** button. Tap it, or send `/account login <name>`, and follow the URL
+**Relogin** button. Tap it, or send `/account login <email>`, and follow the URL
 + code flow. The account is skipped for selection until it is fixed.
 
 **`organization has disabled Claude subscription access`.** This reads like an
 administrator blocked you, but in practice it is a stale OAuth token. It is
 classified as `auth_stale`: the turn is retried on another account and the
-profile is marked. Fix it with `/account login <name>`.
+profile is marked. Fix it with `/account login <email>`.
 
 **Every account is rate limited.** The turn reports it and the accounts go on
 cooldown until their cached reset time. `/status` shows the cooldowns.

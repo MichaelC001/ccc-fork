@@ -175,6 +175,47 @@ func ownerMessage(threadID int64, text string) *TelegramMessage {
 	return m
 }
 
+// An edited message is how a mistyped command gets fixed on a phone, so a
+// command edit runs — exactly once per edit, however often Telegram redelivers
+// it — while an edited plain message still does nothing.
+func TestEditedCommandIsDispatchedOnce(t *testing.T) {
+	in, runner, api := testInstance(t)
+	if err := saveConfig(in.config()); err != nil {
+		t.Fatal(err)
+	}
+
+	edit := ownerMessage(0, "/model sonnet")
+	edit.EditDate = 1700000000
+	in.handleEditedMessage(edit)
+	in.handleEditedMessage(edit) // Telegram redelivers the same edit
+
+	if got := in.config().Model; got != "sonnet" {
+		t.Errorf("the edited command did not run: model = %q", got)
+	}
+	if n := strings.Count(strings.Join(api.texts(""), "\n"), "Model set to"); n != 1 {
+		t.Errorf("the edited command ran %d times, want once", n)
+	}
+
+	// Editing the same message again is a new edit, and runs.
+	again := ownerMessage(0, "/model opus")
+	again.EditDate = 1700000060
+	in.handleEditedMessage(again)
+	if got := in.config().Model; got != "opus" {
+		t.Errorf("a second edit of the same message did not run: model = %q", got)
+	}
+
+	// Plain text is still ignored: fixing a typo must not re-run a turn.
+	plain := ownerMessage(0, "watch the deploy")
+	plain.EditDate = 1700000120
+	in.handleEditedMessage(plain)
+	if _, ok := runner.last(); ok {
+		t.Error("an edited plain message enqueued a turn")
+	}
+	if got := len(api.since("createForumTopic")); got != 0 {
+		t.Errorf("an edited plain message created %d bots", got)
+	}
+}
+
 func TestTextInGeneralCreatesBotAndTopic(t *testing.T) {
 	in, runner, api := testInstance(t)
 

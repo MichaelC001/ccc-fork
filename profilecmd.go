@@ -62,11 +62,15 @@ Each profile is one CLAUDE_CONFIG_DIR: its own credentials, .claude.json and
 settings.json. Profiles share <data_dir>/projects, so any account can resume
 any bot's conversation; ccc picks one per turn (DESIGN §4).
 
-    ccc profile list                             Show profiles, usage and login state
-    ccc profile add <name> <dir> [--label X]     Register a profile (creates dir)
-    ccc profile remove <name>                    Unregister an unused profile
-    ccc profile default <name>                   Set the profile for new sessions
-    ccc profile login <name>                     Run 'claude auth login' for it (interactive)`)
+A profile is named by the email of the Claude account behind it — that is what
+/account shows and takes in Telegram. The CLI also accepts the legacy name a
+profile was registered under before, for as long as it is still keyed by it.
+
+    ccc profile list                              Show profiles, usage and login state
+    ccc profile add <email> <dir> [--label X]     Register a profile (creates dir)
+    ccc profile remove <email>                    Unregister an unused profile
+    ccc profile default <email>                   Set the profile for new sessions
+    ccc profile login <email>                     Run 'claude auth login' for it (interactive)`)
 }
 
 // loadConfigOrNil returns the config, or nil when there is none — every profile
@@ -125,7 +129,7 @@ func renderProfileTable(config *Config, probeLogin bool) string {
 	rows := collectProfileRows(config, probeLogin)
 	def := defaultProfile(config).Name
 	var sb strings.Builder
-	header := []string{"NAME", "LABEL", "CONFIG DIR", "5h", "7d", "TURNS", "LOGIN"}
+	header := []string{"ACCOUNT", "LABEL", "CONFIG DIR", "5h", "7d", "TURNS", "LOGIN"}
 	table := [][]string{header}
 	for _, r := range rows {
 		name := r.Profile.Name
@@ -246,6 +250,10 @@ func profileRemove(name string) error {
 	if err != nil {
 		return err
 	}
+	// An email, or the legacy name the profile is still keyed by.
+	if p, ok := profileByName(config, name); ok {
+		name = p.Name
+	}
 	if config.Profiles == nil || config.Profiles[name] == nil {
 		return fmt.Errorf("no such profile: %s", name)
 	}
@@ -277,14 +285,15 @@ func profileSetDefault(name string) error {
 	if err != nil {
 		return err
 	}
-	if _, ok := profileByName(config, name); !ok {
+	p, ok := profileByName(config, name)
+	if !ok {
 		return fmt.Errorf("no such profile: %s", name)
 	}
-	config.DefaultProfile = name
+	config.DefaultProfile = p.Name
 	if err := saveConfig(config); err != nil {
 		return err
 	}
-	fmt.Printf("✅ default profile: %s\n", name)
+	fmt.Printf("✅ default profile: %s\n", p.Name)
 	return nil
 }
 

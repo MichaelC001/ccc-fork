@@ -354,9 +354,9 @@ func (s *scheduler) runDoctor(now time.Time) {
 		loggedIn, account, err := profileLoggedIn(p)
 		switch {
 		case err != nil:
-			findings = append(findings, doctorFinding{p.Name, "could not read auth status: " + truncate(err.Error(), 120)})
+			findings = append(findings, doctorFinding{accountDisplay(p), "could not read auth status: " + truncate(err.Error(), 120)})
 		case !loggedIn:
-			findings = append(findings, doctorFinding{p.Name, "not logged in"})
+			findings = append(findings, doctorFinding{accountDisplay(p), "not logged in"})
 			s.in.markNeedsLogin(p.Name)
 			if !s.doctor.reported[p.Name] {
 				s.doctor.reported[p.Name] = true
@@ -368,10 +368,13 @@ func (s *scheduler) runDoctor(now time.Time) {
 				delete(s.doctor.reported, p.Name)
 			}
 			s.in.clearNeedsLogin(p.Name)
-			_ = account // the account name is shown by /account, not here
+			// The doctor run is where a profile learns (or confirms) which
+			// account it holds: that is the name it is shown and addressed by
+			// everywhere in Telegram (DESIGN §8).
+			p.Name = s.in.rememberProfileEmail(p.Name, account)
 		}
 		if accepted, known := bypassAccepted(p); known && !accepted {
-			findings = append(findings, doctorFinding{p.Name, "bypass disclaimer not accepted"})
+			findings = append(findings, doctorFinding{accountDisplay(p), "bypass disclaimer not accepted"})
 		}
 		// Reading the usage cache is what refreshes the numbers chooseProfile
 		// and /status use; the result is per-call, so this is the refresh.
@@ -394,8 +397,9 @@ func (in *instance) notifyNeedsLogin(p Profile, why string) {
 	if cfg.BotToken == "" || cfg.ChatID == 0 {
 		return
 	}
-	body := fmt.Sprintf("🔑 Claude account <b>%s</b> needs a new login (%s).", htmlEscape(p.Name), htmlEscape(why))
-	buttons := [][]InlineKeyboardButton{{{Text: "🔑 Relogin " + p.Name, CallbackData: "account:login:" + p.Name}}}
+	shown := accountDisplay(p)
+	body := fmt.Sprintf("🔑 Claude account <b>%s</b> needs a new login (%s).", htmlEscape(shown), htmlEscape(why))
+	buttons := [][]InlineKeyboardButton{{{Text: "🔑 Relogin " + shown, CallbackData: "account:login:" + accountTarget(p.Name)}}}
 	if _, err := sendMessageKeyboardGetID(cfg, cfg.ChatID, 0, body, buttons); err != nil {
 		hookLog("needs-login notification failed: %v", err)
 	}

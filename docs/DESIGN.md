@@ -133,7 +133,7 @@ A retried turn reuses the same session UUID: because profiles share
   plain files, so any account resumes any session. `jobs/`, `daemon/` and
   credentials stay per profile.
 - `/account` (§8) is the only UI for profiles; the `ccc profile …` CLI remains
-  as the underlying functions.
+  as the underlying functions, and accepts an address or a legacy name.
 
 ## 5. Data model (SQLite via GORM, `<data_dir>/ccc.db`, WAL, FK on)
 
@@ -289,6 +289,12 @@ older than 90 days.
 - Renaming a topic in Telegram itself renames the bot: the `forum_topic_edited`
   service message is validated like `/name` and, when it passes, `bots.name`
   follows the title (§14.15).
+- An **edited** message is gated like any other update. If its text starts with
+  `/` it goes through the same command dispatcher — editing a mistyped command
+  in place is how a phone corrects one — deduped by
+  `(chat_id, message_id, edit_date)` so a redelivered edit runs once. An edited
+  plain message still does nothing: re-running a turn because somebody fixed a
+  typo is worse than ignoring it.
 
 ### Commands
 | Command | Where | Effect |
@@ -304,7 +310,7 @@ older than 90 days.
 | `/usage` | anywhere | Tokens, cache hit ratio, turns, average duration and cost per bot, today and last 7 days (§14.19). |
 | `/watches`, `/schedules` | topic | List and cancel. |
 | `/bots` | anywhere | Table of bots, status, last activity. |
-| `/account` | anywhere | Status card per profile with buttons; subcommands `status`, `add <name>`, `login <name>`, `remove <name>`, `default <name>`. |
+| `/account` | anywhere | Status card per account with buttons; subcommands `status`, `add <email>`, `login <email>`, `remove <email>`, `default <email>`. |
 | `/model [name]` | anywhere | Show/set the instance model. |
 | `/access` | anywhere | Pairing/allowlist management (below). Owner only. |
 | `/watches`, `/schedules` | topic | List and cancel (also listed above). |
@@ -312,9 +318,27 @@ older than 90 days.
 | `/status` | anywhere | Instance health: profiles, running turns, queue, doctor findings. |
 
 ### Account management from Telegram (login without a terminal)
-`/account add <name>` (or **➕** button):
-1. ccc creates `<data_dir>/profiles/<name>` (config dir), symlinks `projects/`,
-   registers the profile.
+An account is addressed by the **email** of the Claude account behind it, never
+by a name the owner invents and never by the directory it lives in:
+
+- The profile key in `config.json` is the address, lowercased. The config dir is
+  derived from it (`jairo@agentero.com` → `<data_dir>/profiles/jairo_at_agentero.com`)
+  and is an implementation detail: it is never shown in Telegram.
+- The address is learned from `claude auth status --json` and cached in the
+  profile's `label`. Every doctor run (§7) refreshes it, and a profile that is
+  still keyed by a legacy name is re-keyed onto its address then — the config
+  dir does not move, and the legacy name keeps resolving until the migration
+  happens. That is also how the pre-existing `~/.claude` account gets an entry
+  and stops being shown as `default`.
+- After a login, what the owner typed is compared with what `auth status`
+  reports; a mismatch is reported and the account is stored under the address it
+  actually logged in as.
+- An argument that is not a plausible email (`x@y.z`) is answered with a
+  one-line explanation. Only a genuinely empty argument gets a usage line.
+
+`/account add <email>` (or **➕** button):
+1. ccc creates the derived config dir under `<data_dir>/profiles/`, symlinks
+   `projects/`, registers the profile under the address.
 2. Runs `claude auth login` in a **pseudo-terminal** (`github.com/creack/pty`)
    with `claudeEnv(profile)` **plus browser suppression** (§14.8): a directory
    of no-op `open`/`xdg-open` shims first on `PATH` and `$BROWSER` pointed at
@@ -326,7 +350,7 @@ older than 90 days.
    the prompt, answers it, verifies `skipDangerousModePermissionPrompt` in
    `settings.json` (detector already implemented in `profiles.go`).
 4. Times out after 10 min; the partial profile is removed.
-`/account login <name>` runs steps 2–3 only. Every PTY string and pattern lives
+`/account login <email>` runs steps 2–3 only. Every PTY string and pattern lives
 in `ptyflow.go`, each with a note on how it was verified against 2.1.270
 (§14.9). Select lists are answered by reading the option number off the screen,
 never by assuming a position.

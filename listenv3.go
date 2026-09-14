@@ -34,9 +34,45 @@ type instance struct {
 	pty ptyStarter
 	// sched is the watch/schedule/doctor loop (nil in tests that do not need it).
 	sched *scheduler
+	// edits remembers the edited messages already dispatched as commands.
+	edits editLog
 
 	mu  sync.Mutex
 	cfg *Config
+}
+
+// editLog is the dedupe for edited commands: an edit is identified by
+// (chat, message, edit_date), so editing the same message again runs the new
+// text once while Telegram re-delivering the same edit does nothing.
+type editLog struct {
+	mu   sync.Mutex
+	seen map[string]bool
+	fifo []string
+}
+
+// editLogMax bounds the log: a few hundred edits is far more than a redelivery
+// window ever spans, and it keeps a long-running instance from growing.
+const editLogMax = 256
+
+// first reports whether this exact edit has not been dispatched yet, and
+// records it.
+func (e *editLog) first(chatID int64, messageID int, editDate int64) bool {
+	key := fmt.Sprintf("%d:%d:%d", chatID, messageID, editDate)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.seen[key] {
+		return false
+	}
+	if e.seen == nil {
+		e.seen = map[string]bool{}
+	}
+	e.seen[key] = true
+	e.fifo = append(e.fifo, key)
+	if len(e.fifo) > editLogMax {
+		delete(e.seen, e.fifo[0])
+		e.fifo = e.fifo[1:]
+	}
+	return true
 }
 
 func (in *instance) config() *Config {
@@ -198,14 +234,14 @@ func listenV3() error {
 			case u.CallbackQuery != nil:
 				in.handleCallback(u.CallbackQuery)
 			case u.EditedMessage != nil:
-				// An edit is gated like anything else, but never re-dispatched:
-				// re-running a turn because somebody fixed a typo is worse than
-				// ignoring it. The gate still applies (a stranger's edit must
-				// not slip past), hence the explicit call.
+				// The gate applies to an edit like to anything else — a
+				// stranger's edit must not slip past — hence the explicit call
+				// before handleEditedMessage decides what to do with it.
 				if in.gate(u.EditedMessage.From.ID, senderName(u.EditedMessage.From.Username, u.EditedMessage.From.FirstName),
 					u.EditedMessage.Chat.ID, u.EditedMessage.Chat.Type == "private") == roleDenied {
 					continue
 				}
+				in.handleEditedMessage(u.EditedMessage)
 			default:
 				msg := u.Message
 				in.handleMessage(&msg)
@@ -350,6 +386,25 @@ func (in *instance) handleMessage(msg *TelegramMessage) {
 		return
 	}
 	in.deliver(b, msg, text)
+}
+
+// handleEditedMessage decides what an edit does. Plain text still does nothing:
+// re-running a turn because somebody fixed a typo is worse than ignoring it.
+// A COMMAND is dispatched, because correcting a mistyped command in place is
+// how a phone fixes one — an owner who edits `/account add` into
+// `/account add me@example.com` means it to run — and because the edit is the
+// only version of the message that is left.
+func (in *instance) handleEditedMessage(msg *TelegramMessage) {
+	if !strings.HasPrefix(strings.TrimSpace(msg.Text), "/") {
+		return
+	}
+	// Telegram re-delivers an edit as a new update, so the command runs once
+	// per actual edit and not once per delivery. The gate runs again inside
+	// handleMessage, which is free for a sender that already passed it.
+	if !in.edits.first(msg.Chat.ID, msg.MessageID, msg.EditDate) {
+		return
+	}
+	in.handleMessage(msg)
 }
 
 // deliver turns a plain message into an input for a bot: either the answer to a
@@ -984,8 +1039,14 @@ func (in *instance) renderStatus() string {
 		case !s.CooledUntil.IsZero() && s.CooledUntil.After(now):
 			state = "cooldown until " + s.CooledUntil.Format("15:04")
 		}
+		// Accounts are named by their email here too; the key is only what
+		// profile selection works with.
+		shown := s.Name
+		if p, ok := profileByName(cfg, s.Name); ok {
+			shown = accountDisplay(p)
+		}
 		fmt.Fprintf(&sb, "• %s — 5h %d%%, 7d %d%%, %d running (%s)\n",
-			htmlEscape(s.Name), s.FiveHour, s.SevenDay, s.WorkingAgents, state)
+			htmlEscape(shown), s.FiveHour, s.SevenDay, s.WorkingAgents, state)
 	}
 	if findings := in.sched.findingsSnapshot(); len(findings) > 0 {
 		sb.WriteString("\n<b>Doctor</b>\n")

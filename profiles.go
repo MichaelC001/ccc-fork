@@ -1,10 +1,13 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -102,17 +105,137 @@ func listProfiles(config *Config) []Profile {
 	return out
 }
 
-// profileByName resolves a profile by name. An empty name means "the default".
+// profileByName resolves a profile by the way the owner addressed it. Accounts
+// are identified by their email (DESIGN §8), but the lookup also accepts the
+// legacy name a profile was keyed by before its email was known, and matches
+// case-insensitively — an email typed with capitals is the same account.
+// An empty name means "the default".
 func profileByName(config *Config, name string) (Profile, bool) {
 	if name == "" {
 		return defaultProfile(config), true
 	}
-	for _, p := range listProfiles(config) {
+	all := listProfiles(config)
+	for _, p := range all {
 		if p.Name == name {
 			return p, true
 		}
 	}
+	key := normalizeEmail(name)
+	for _, p := range all {
+		if normalizeEmail(p.Name) == key {
+			return p, true
+		}
+	}
+	// The email is known but the profile is still keyed by its legacy name.
+	for _, p := range all {
+		if normalizeEmail(p.Label) == key {
+			return p, true
+		}
+	}
 	return Profile{}, false
+}
+
+// ---------------------------------------------------------------------------
+// Accounts are addressed by email
+// ---------------------------------------------------------------------------
+
+// accountEmailRe is the shape /account accepts. It is deliberately loose (one
+// @, a dotted domain, no spaces): the authority on whether an address is real
+// is `claude auth status`, not a regexp.
+var accountEmailRe = regexp.MustCompile(`^[^\s@]+@[^\s@.]+(?:\.[^\s@.]+)+$`)
+
+// isAccountEmail reports whether s is plausibly an email address.
+func isAccountEmail(s string) bool { return accountEmailRe.MatchString(strings.TrimSpace(s)) }
+
+// normalizeEmail is the canonical form of an account key: addresses are
+// case-insensitive in practice and the config map is not.
+func normalizeEmail(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+
+// profileDirName turns an email into a filesystem-safe directory name
+// ("jairo@agentero.com" -> "jairo_at_agentero.com"). It exists only so a
+// profile has somewhere to live: the owner never sees it, and it is never an
+// identifier — the profile is keyed by the email itself.
+func profileDirName(email string) string {
+	s := strings.ReplaceAll(normalizeEmail(email), "@", "_at_")
+	var sb strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '.', r == '-', r == '_':
+			sb.WriteRune(r)
+		default:
+			sb.WriteByte('_')
+		}
+	}
+	// Leading dots would hide the directory (or spell ".."), so they go too.
+	out := strings.Trim(sb.String(), "._-")
+	if out == "" {
+		out = "account"
+	}
+	if len(out) > 64 {
+		out = out[:64]
+	}
+	return out
+}
+
+// accountDisplay is how a profile is named in Telegram: its email. A profile
+// whose email is not known yet — a legacy name from before accounts were
+// addressed by email, or a config dir that has never logged in — falls back to
+// its key, which is what the owner can still address it by.
+func accountDisplay(p Profile) string {
+	if isAccountEmail(p.Name) {
+		return p.Name
+	}
+	if isAccountEmail(p.Label) {
+		return normalizeEmail(p.Label)
+	}
+	return p.Name
+}
+
+// accountTargetBudget is Telegram's 64-byte callback_data cap minus the longest
+// prefix the account buttons use ("account:default:").
+const accountTargetBudget = 64 - len("account:default:")
+
+// accountTarget is the profile reference an inline button carries. A profile is
+// keyed by an email now, and a long address would overflow callback_data, so an
+// oversized key travels as a short digest instead.
+func accountTarget(name string) string {
+	if len(name) <= accountTargetBudget {
+		return name
+	}
+	sum := sha256.Sum256([]byte(name))
+	return "#" + hex.EncodeToString(sum[:6])
+}
+
+// resolveAccountTarget maps what a button carried back to a profile.
+func resolveAccountTarget(config *Config, target string) (Profile, bool) {
+	if strings.HasPrefix(target, "#") {
+		for _, p := range listProfiles(config) {
+			if accountTarget(p.Name) == target {
+				return p, true
+			}
+		}
+		return Profile{}, false
+	}
+	return profileByName(config, target)
+}
+
+// profileDirFor picks the config dir for a new account. Two different addresses
+// can sanitize to the same directory, so a taken one gets a numeric suffix
+// rather than two accounts sharing credentials.
+func profileDirFor(config *Config, email string) string {
+	root := filepath.Join(dataDir(config), "profiles")
+	base := profileDirName(email)
+	taken := map[string]bool{}
+	for _, p := range listProfiles(config) {
+		if p.ConfigDir != "" {
+			taken[p.ConfigDir] = true
+		}
+	}
+	dir := filepath.Join(root, base)
+	for i := 2; taken[dir]; i++ {
+		dir = filepath.Join(root, fmt.Sprintf("%s-%d", base, i))
+	}
+	return dir
 }
 
 // defaultProfile is the profile new sessions fall back to: config.DefaultProfile
