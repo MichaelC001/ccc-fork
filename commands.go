@@ -598,7 +598,11 @@ func send(message string) error {
 }
 
 // Main listen loop: polls Telegram and mirrors the Claude fleet into topics.
-func listen() error {
+// listenLegacy is the v2 listener: it mirrored Claude Code background agents
+// into Telegram topics. `ccc listen` now runs listenV3 (listenv3.go); this is
+// kept only so the v2 code keeps compiling until Phase 2b deletes it (DESIGN
+// §11) and is no longer reachable from main().
+func listenLegacy() error {
 	// Small random delay to avoid race conditions when multiple instances start
 	time.Sleep(time.Duration(os.Getpid()%500) * time.Millisecond)
 

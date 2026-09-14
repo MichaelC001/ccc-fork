@@ -341,8 +341,15 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "mcp":
+		// Stdio MCP server for one turn; spawned by Claude Code, never by hand.
+		if err := runMCPServer(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
 	case "listen":
-		if err := listen(); err != nil {
+		if err := listenV3(); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}

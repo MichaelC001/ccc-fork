@@ -18,6 +18,15 @@ import (
 
 const maxResponseSize = 10 * 1024 * 1024 // 10MB
 
+// telegramBaseURL is the Bot API root. It is a variable so tests can point the
+// whole Telegram surface at an httptest server; production never changes it.
+var telegramBaseURL = "https://api.telegram.org"
+
+// telegramURL builds a Bot API method URL.
+func telegramURL(token, method string) string {
+	return fmt.Sprintf("%s/bot%s/%s", telegramBaseURL, token, method)
+}
+
 // redactTokenError replaces the bot token in error messages with "***"
 func redactTokenError(err error, token string) error {
 	if err == nil || token == "" {
@@ -132,12 +141,15 @@ func updateCCC(config *Config, chatID, threadID int64, offset int) {
 
 	sendMessage(config, chatID, threadID, "✅ Updated. Restarting...")
 	// Confirm offset so the /update message is not reprocessed after restart
-	http.Get(fmt.Sprintf("https://api.telegram.org/bot%s/getUpdates?offset=%d&timeout=1", config.BotToken, offset))
+	client := &http.Client{Timeout: 10 * time.Second}
+	if resp, err := client.Get(fmt.Sprintf("%s?offset=%d&timeout=1", telegramURL(config.BotToken, "getUpdates"), offset)); err == nil {
+		resp.Body.Close() // safe-ignore: this is the last call before os.Exit
+	}
 	os.Exit(0)
 }
 
 func telegramAPI(config *Config, method string, params url.Values) (*TelegramResponse, error) {
-	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/%s", config.BotToken, method)
+	apiURL := telegramURL(config.BotToken, method)
 	resp, err := http.PostForm(apiURL, params)
 	if err != nil {
 		return nil, redactTokenError(err, config.BotToken)
@@ -410,7 +422,7 @@ func sendFile(config *Config, chatID int64, threadID int64, filePath string, cap
 	writer.Close()
 
 	resp, err := http.Post(
-		fmt.Sprintf("https://api.telegram.org/bot%s/sendDocument", config.BotToken),
+		telegramURL(config.BotToken, "sendDocument"),
 		writer.FormDataContentType(),
 		body,
 	)
@@ -430,7 +442,7 @@ func sendFile(config *Config, chatID int64, threadID int64, filePath string, cap
 // downloadTelegramFile downloads a file from Telegram
 func downloadTelegramFile(config *Config, fileID string, destPath string) error {
 	// Get file path from Telegram
-	resp, err := telegramGet(config.BotToken, fmt.Sprintf("https://api.telegram.org/bot%s/getFile?file_id=%s", config.BotToken, fileID))
+	resp, err := telegramGet(config.BotToken, fmt.Sprintf("%s?file_id=%s", telegramURL(config.BotToken, "getFile"), url.QueryEscape(fileID)))
 	if err != nil {
 		return err
 	}
@@ -450,7 +462,7 @@ func downloadTelegramFile(config *Config, fileID string, destPath string) error 
 	}
 
 	// Download the file
-	fileURL := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", config.BotToken, result.Result.FilePath)
+	fileURL := fmt.Sprintf("%s/file/bot%s/%s", telegramBaseURL, config.BotToken, result.Result.FilePath)
 	fileResp, err := telegramGet(config.BotToken, fileURL)
 	if err != nil {
 		return err
@@ -558,7 +570,7 @@ func setBotCommands(botToken string) {
 		"commands": commands,
 	})
 	resp, err := http.Post(
-		fmt.Sprintf("https://api.telegram.org/bot%s/setMyCommands", botToken),
+		telegramURL(botToken, "setMyCommands"),
 		"application/json",
 		bytes.NewReader(defaultBody),
 	)
@@ -572,11 +584,86 @@ func setBotCommands(botToken string) {
 		"scope":    map[string]string{"type": "all_group_chats"},
 	})
 	resp, err = http.Post(
-		fmt.Sprintf("https://api.telegram.org/bot%s/setMyCommands", botToken),
+		telegramURL(botToken, "setMyCommands"),
 		"application/json",
 		bytes.NewReader(groupBody),
 	)
 	if err == nil {
 		resp.Body.Close()
 	}
+}
+
+// setMessageReaction puts a single emoji reaction on a message. ccc uses it to
+// tick (✅) the message that triggered a turn once the turn completes
+// (DESIGN §3.2). Reactions are cosmetic: failures are logged, never surfaced.
+func setMessageReaction(config *Config, chatID int64, messageID int64, emoji string) error {
+	reaction, err := json.Marshal([]map[string]string{{"type": "emoji", "emoji": emoji}})
+	if err != nil {
+		return err
+	}
+	params := url.Values{
+		"chat_id":    {fmt.Sprintf("%d", chatID)},
+		"message_id": {fmt.Sprintf("%d", messageID)},
+		"reaction":   {string(reaction)},
+	}
+	result, err := telegramAPI(config, "setMessageReaction", params)
+	if err != nil {
+		return err
+	}
+	if !result.OK {
+		return fmt.Errorf("telegram error: %s", result.Description)
+	}
+	return nil
+}
+
+// closeForumTopic closes a topic without deleting it (used when a bot is
+// archived, so the conversation stays readable).
+func closeForumTopic(config *Config, topicID int64) error {
+	if config.GroupID == 0 {
+		return fmt.Errorf("no group configured")
+	}
+	params := url.Values{
+		"chat_id":           {fmt.Sprintf("%d", config.GroupID)},
+		"message_thread_id": {fmt.Sprintf("%d", topicID)},
+	}
+	result, err := telegramAPI(config, "closeForumTopic", params)
+	if err != nil {
+		return err
+	}
+	if !result.OK {
+		return fmt.Errorf("telegram error: %s", result.Description)
+	}
+	return nil
+}
+
+// sendMessageKeyboardGetID sends one HTML message with an inline keyboard and
+// returns its message id, which ask_owner needs to match a tap to a question.
+func sendMessageKeyboardGetID(config *Config, chatID int64, threadID int64, text string, buttons [][]InlineKeyboardButton) (int64, error) {
+	keyboardJSON, err := json.Marshal(map[string]any{"inline_keyboard": buttons})
+	if err != nil {
+		return 0, err
+	}
+	params := url.Values{
+		"chat_id":      {fmt.Sprintf("%d", chatID)},
+		"text":         {truncate(text, 4000)},
+		"parse_mode":   {"HTML"},
+		"reply_markup": {string(keyboardJSON)},
+	}
+	if threadID > 0 {
+		params.Set("message_thread_id", fmt.Sprintf("%d", threadID))
+	}
+	result, err := telegramAPI(config, "sendMessage", params)
+	if err != nil {
+		return 0, err
+	}
+	if !result.OK {
+		return 0, fmt.Errorf("telegram error: %s", result.Description)
+	}
+	var msg struct {
+		MessageID int64 `json:"message_id"`
+	}
+	if err := json.Unmarshal(result.Result, &msg); err != nil {
+		return 0, nil // safe-ignore: the message went out; only its id is unknown
+	}
+	return msg.MessageID, nil
 }

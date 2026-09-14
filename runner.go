@@ -1,0 +1,865 @@
+package main
+
+import (
+	"bufio"
+	"crypto/rand"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"gorm.io/gorm"
+)
+
+// runner.go drives the whole turn lifecycle of DESIGN §3: queue an input,
+// pick a profile, render the envelope, spawn `claude -p`, stream the events
+// into a Telegram progress message, persist the result, and fail over to
+// another account when the first one is out of credit or logged out.
+
+// ---------------------------------------------------------------------------
+// The `claude -p` flag set (DESIGN §3.1 / §10)
+// ---------------------------------------------------------------------------
+//
+// Every flag below was verified empirically against the installed Claude Code
+// (2.1.270, ARM macOS) with a scrubbed environment, because the isolation
+// flags do not behave the way their names suggest. The probe used a workspace
+// holding a CLAUDE.md with the token ZORBLAX and a user memory
+// (~/.claude/CLAUDE.md) holding the token "Litestream", and asked the model
+// which tokens were in its context:
+//
+//	no flags                      -> PROJ=yes USER=yes
+//	--system-prompt only          -> PROJ=yes USER=yes   (!)
+//	--setting-sources ''          -> PROJ=no  USER=no
+//	--setting-sources user        -> PROJ=no  USER=yes
+//
+// So --system-prompt does NOT suppress CLAUDE.md, and the empty
+// --setting-sources is the only combination that loads no CLAUDE.md at all.
+//
+// Flags, one comment per flag with the reason it is there:
+//
+//	-p                          non-interactive; the whole runner model.
+//	--session-id <uuid>         first turn of a session; ccc mints the UUID so
+//	                            it can resume later (verified: minting works).
+//	--resume <uuid>             later turns. Verified: a resumed turn sees the
+//	                            earlier turn's content (NUM=4242 came back).
+//	--output-format stream-json  event stream for the progress message.
+//	--verbose                   stream-json is refused under -p without it.
+//	--permission-mode bypassPermissions
+//	                            DESIGN's decision: all bots bypass. Verified to
+//	                            work together with --setting-sources '' (a Bash
+//	                            call ran unprompted), i.e. the once-per-config-dir
+//	                            disclaimer acceptance is not read from the user
+//	                            settings file that flag suppresses.
+//	--setting-sources ''        loads no user/project/local settings AND no
+//	                            CLAUDE.md at any level (see probe above). This
+//	                            is a deliberate deviation from DESIGN §3.1's
+//	                            `--setting-sources user`, which leaks the
+//	                            owner's personal ~/.claude/CLAUDE.md into every
+//	                            bot. Auth is unaffected (OAuth lives in the
+//	                            keychain/credentials, not in settings.json).
+//	--disable-slash-commands    "Disable all skills": no user/plugin skills, so
+//	                            a bot cannot be steered by whatever the owner
+//	                            has installed. Accepted under -p.
+//	--strict-mcp-config         ignore every MCP server except ours.
+//	--mcp-config <inline json>  the ccc MCP server for this bot+turn (§6).
+//	--system-prompt <text>      replaces Claude Code's own prompt (§9).
+//	--model <name>              instance model; omitted to accept claude's default.
+//
+// Deliberately NOT used:
+//
+//	--bare                      disables OAuth entirely (would need an API key).
+//	--safe-mode                 also disables MCP servers, which kills our tools;
+//	                            and the probe showed it still loaded CLAUDE.md.
+//	--append-system-prompt      the system prompt is snapshotted per conversation
+//	                            (see below), so per-turn text must go in the
+//	                            envelope, not here.
+//	--system-prompt-snapshot off  verified NOT to help: a resumed session whose
+//	                            launch passed a different --system-prompt still
+//	                            answered with the ORIGINAL prompt's secret word
+//	                            with the flag set to off. DESIGN §9's envelope
+//	                            is therefore load-bearing, and /role rotates the
+//	                            session.
+//	--include-partial-messages  per-message granularity is enough for progress.
+//
+// All flags are passed on EVERY turn: --mcp-config, --settings and friends are
+// not restored on resume.
+func claudeTurnArgs(model, systemPrompt, mcpConfig, sessionID string, resume bool) []string {
+	args := []string{
+		"-p",
+		"--output-format", "stream-json",
+		"--verbose",
+		"--permission-mode", "bypassPermissions",
+		"--setting-sources", "",
+		"--disable-slash-commands",
+		"--strict-mcp-config",
+		"--mcp-config", mcpConfig,
+		"--system-prompt", systemPrompt,
+	}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	if resume {
+		args = append(args, "--resume", sessionID)
+	} else {
+		args = append(args, "--session-id", sessionID)
+	}
+	return args
+}
+
+// ---------------------------------------------------------------------------
+// Runner
+// ---------------------------------------------------------------------------
+
+// botUI is the Telegram surface the runner needs. It is an interface so the
+// conversation tests can drive the runner (or replace it) without a network.
+type botUI interface {
+	Post(topicID int64, html string) (int64, error)
+	Edit(topicID, msgID int64, html string) error
+	React(messageID int64, emoji string)
+}
+
+// turnRunner is what the Telegram layer sees of the runner, so the flow tests
+// can inject a fake that records calls instead of spawning claude.
+type turnRunner interface {
+	Enqueue(botID int64, source, text string, triggerMessageID int64) (*Turn, error)
+	Stop(botID int64) bool
+	Running(botID int64) bool
+}
+
+// activeTurn is a turn with a live `claude` process behind it.
+type activeTurn struct {
+	turnID  int64
+	cmd     *exec.Cmd
+	stopped bool
+}
+
+// Runner owns the per-bot turn queues.
+type Runner struct {
+	db      *gorm.DB
+	ui      botUI
+	dataDir string
+
+	mu     sync.Mutex
+	cfg    *Config
+	active map[int64]*activeTurn
+	wake   map[int64]chan struct{}
+	done   chan struct{}
+	// needsLogin holds profiles a turn found logged out; they are skipped until
+	// the owner re-logs in (the doctor loop in Phase 2b clears them).
+	needsLogin map[string]bool
+}
+
+func newRunner(db *gorm.DB, cfg *Config, ui botUI) *Runner {
+	return &Runner{
+		db:         db,
+		ui:         ui,
+		cfg:        cfg,
+		dataDir:    dataDir(cfg),
+		active:     map[int64]*activeTurn{},
+		wake:       map[int64]chan struct{}{},
+		done:       make(chan struct{}),
+		needsLogin: map[string]bool{},
+	}
+}
+
+func (r *Runner) config() *Config {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cfg
+}
+
+func (r *Runner) setConfig(c *Config) {
+	r.mu.Lock()
+	r.cfg = c
+	r.mu.Unlock()
+}
+
+// Close stops the per-bot loops. Running turns are left to finish.
+func (r *Runner) Close() {
+	r.mu.Lock()
+	select {
+	case <-r.done:
+	default:
+		close(r.done)
+	}
+	r.mu.Unlock()
+}
+
+// Enqueue records an input for a bot and wakes its loop.
+func (r *Runner) Enqueue(botID int64, source, text string, triggerMessageID int64) (*Turn, error) {
+	t := &Turn{
+		BotID:            botID,
+		Source:           source,
+		Input:            text,
+		Status:           turnQueued,
+		TriggerMessageID: triggerMessageID,
+	}
+	if err := r.db.Create(t).Error; err != nil {
+		return nil, err
+	}
+	r.kick(botID)
+	return t, nil
+}
+
+// Running reports whether a turn is executing for this bot.
+func (r *Runner) Running(botID int64) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.active[botID] != nil
+}
+
+// Stop SIGTERMs the bot's running turn and drops its queue (/stop, DESIGN §8).
+// The child is started in its own process group, so the signal reaches the
+// tools it spawned (a long `go test`, say) and not just the claude wrapper.
+func (r *Runner) Stop(botID int64) bool {
+	r.mu.Lock()
+	at := r.active[botID]
+	if at != nil {
+		at.stopped = true
+	}
+	r.mu.Unlock()
+
+	r.db.Model(&Turn{}).Where("bot_id = ? AND status = ?", botID, turnQueued).
+		Updates(map[string]any{"status": turnFailed, "stop_reason": "dropped by /stop"})
+
+	if at == nil || at.cmd == nil || at.cmd.Process == nil {
+		return false
+	}
+	pid := at.cmd.Process.Pid
+	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
+		_ = at.cmd.Process.Signal(syscall.SIGTERM) // safe-ignore: best-effort fallback when the group kill fails
+	}
+	return true
+}
+
+// kick starts (once) and wakes the bot's turn loop.
+func (r *Runner) kick(botID int64) {
+	r.mu.Lock()
+	ch, ok := r.wake[botID]
+	if !ok {
+		ch = make(chan struct{}, 1)
+		r.wake[botID] = ch
+		go r.loop(botID, ch)
+	}
+	r.mu.Unlock()
+	select {
+	case ch <- struct{}{}:
+	default: // safe-ignore: a pending wake already covers this input
+	}
+}
+
+func (r *Runner) loop(botID int64, wake chan struct{}) {
+	for {
+		select {
+		case <-r.done:
+			return
+		case <-wake:
+		}
+		for r.runNext(botID) {
+			select {
+			case <-r.done:
+				return
+			default:
+			}
+		}
+	}
+}
+
+// runNext runs at most one turn for a bot and reports whether it did. All
+// inputs queued at this moment are folded into that single turn (DESIGN §2:
+// "further inputs queue (FIFO) and are delivered together on the next turn").
+func (r *Runner) runNext(botID int64) bool {
+	b, err := botByID(r.db, botID)
+	if err != nil {
+		return false
+	}
+	if b.Status == botWaiting || b.Status == botDisabled || b.ArchivedAt != nil {
+		return false
+	}
+	var queued []Turn
+	if err := r.db.Where("bot_id = ? AND status = ?", botID, turnQueued).Order("id").Find(&queued).Error; err != nil {
+		return false
+	}
+	if len(queued) == 0 {
+		return false
+	}
+	head := queued[0]
+	inputs := []string{head.Input}
+	triggers := []int64{}
+	if head.TriggerMessageID != 0 {
+		triggers = append(triggers, head.TriggerMessageID)
+	}
+	for _, extra := range queued[1:] {
+		inputs = append(inputs, extra.Input)
+		if extra.TriggerMessageID != 0 {
+			triggers = append(triggers, extra.TriggerMessageID)
+		}
+		r.db.Model(&Turn{}).Where("id = ?", extra.ID).
+			Updates(map[string]any{"status": turnDone, "stop_reason": "merged into turn " + fmt.Sprint(head.ID)})
+	}
+	r.execute(b, &head, strings.Join(inputs, "\n\n"), triggers)
+	return true
+}
+
+// execute runs one turn end to end, including profile failover (DESIGN §3.4).
+func (r *Runner) execute(b *Bot, t *Turn, input string, triggers []int64) {
+	now := time.Now()
+	roleAtStart := b.Role
+	r.db.Model(&Turn{}).Where("id = ?", t.ID).
+		Updates(map[string]any{"status": turnRunning, "started_at": now, "input": input})
+	setBotStatus(r.db, b.ID, botRunning)
+
+	prog := newProgress(r.ui, b.TopicID, now)
+	prog.set("thinking")
+
+	envelope := buildEnvelope(r.db, b, t.Source, input, now)
+	// Inbox rows are consumed by the envelope's summary; mark them delivered so
+	// the next turn does not re-announce them.
+	r.db.Model(&InboxMessage{}).Where("to_bot_id = ? AND delivered_at IS NULL", b.ID).
+		Updates(map[string]any{"delivered_at": now, "turn_id": t.ID})
+
+	tried := map[string]bool{}
+	var res *streamResult
+	var class string
+	var lastErr string
+
+	for attempt := 0; attempt < 3; attempt++ {
+		p, ok := r.pickProfileExcluding(tried)
+		if !ok {
+			class = errFatal
+			lastErr = "no healthy Claude profile available"
+			break
+		}
+		tried[p.Name] = true
+		r.db.Model(&Turn{}).Where("id = ?", t.ID).Update("profile", p.Name)
+
+		sessionID, resume := r.sessionFor(b)
+		res = r.spawn(p, b, t, sessionID, resume, envelope, prog)
+		if res.ok() {
+			if !resume {
+				r.db.Model(&Bot{}).Where("id = ?", b.ID).Update("session_id", sessionID)
+				b.SessionID = sessionID
+			}
+			class = ""
+			break
+		}
+		if res.stopped {
+			class = "stopped"
+			lastErr = "stopped by /stop"
+			break
+		}
+		lastErr = res.failureText()
+		class = classifyFailure(lastErr, res.exitCode)
+		hookLog("turn %d on profile %s failed (%s): %s", t.ID, p.Name, class, truncate(lastErr, 300))
+
+		switch class {
+		case errSessionLost:
+			// The transcript is not in this profile's projects/ (or was
+			// deleted). Start a fresh conversation rather than losing the turn.
+			r.db.Model(&Bot{}).Where("id = ?", b.ID).Update("session_id", "")
+			b.SessionID = ""
+			delete(tried, p.Name)
+			continue
+		case errAuthStale:
+			r.markNeedsLogin(p)
+			continue
+		case errRateLimited:
+			noteProfileLimit(p, time.Now())
+			continue
+		case errTransient:
+			time.Sleep(10 * time.Second)
+			delete(tried, p.Name)
+			continue
+		default:
+			class = errFatal
+		}
+		break
+	}
+
+	end := time.Now()
+	if class == "" && res != nil {
+		r.db.Model(&Turn{}).Where("id = ?", t.ID).Updates(map[string]any{
+			"status": turnDone, "output": res.Text, "ended_at": end,
+			"stop_reason": res.Subtype, "usage_json": res.UsageJSON, "session_id": b.SessionID,
+		})
+		prog.finish(res.Text)
+		for _, m := range triggers {
+			r.ui.React(m, "✅")
+		}
+	} else {
+		r.db.Model(&Turn{}).Where("id = ?", t.ID).Updates(map[string]any{
+			"status": turnFailed, "ended_at": end, "error_class": class,
+			"stop_reason": truncate(lastErr, 500), "session_id": b.SessionID,
+		})
+		prog.finish(failureMessage(class, lastErr))
+	}
+
+	// update_instructions may have rewritten the role mid-turn. The system
+	// prompt is recorded per conversation, so the new role can only take effect
+	// in a new one — rotate the session now that the turn has written its id.
+	if after, err := botByID(r.db, b.ID); err == nil && after.Role != roleAtStart {
+		r.db.Model(&Bot{}).Where("id = ?", b.ID).Update("session_id", "")
+	}
+
+	// A turn that asked the owner something leaves the bot waiting; otherwise
+	// it goes back to idle and the loop drains whatever queued meanwhile.
+	if r.hasPendingQuestion(b.ID) {
+		setBotStatus(r.db, b.ID, botWaiting)
+	} else {
+		setBotStatus(r.db, b.ID, botIdle)
+	}
+	r.deliverInbox(b.ID)
+}
+
+func (r *Runner) hasPendingQuestion(botID int64) bool {
+	var n int64
+	r.db.Model(&Question{}).Where("bot_id = ? AND answered_at IS NULL", botID).Count(&n)
+	return n > 0
+}
+
+// deliverInbox wakes every bot that received a send_to_bot during this turn
+// (DESIGN §3.3: delivery happens post-turn).
+func (r *Runner) deliverInbox(fromBotID int64) {
+	var pending []InboxMessage
+	r.db.Where("delivered_at IS NULL AND wake = ? AND from_bot_id = ?", true, fromBotID).Find(&pending)
+	seen := map[int64]bool{}
+	for _, m := range pending {
+		if seen[m.ToBotID] {
+			continue
+		}
+		seen[m.ToBotID] = true
+		r.kick(m.ToBotID)
+	}
+}
+
+// sessionFor returns the session UUID for the next turn and whether it is a
+// resume. A bot without a session gets a fresh UUID minted by ccc.
+func (r *Runner) sessionFor(b *Bot) (string, bool) {
+	if strings.TrimSpace(b.SessionID) != "" {
+		return b.SessionID, true
+	}
+	return newUUID(), false
+}
+
+// ---------------------------------------------------------------------------
+// Spawning and stream parsing
+// ---------------------------------------------------------------------------
+
+type streamResult struct {
+	Text      string
+	Subtype   string
+	IsError   bool
+	UsageJSON string
+	exitCode  int
+	stderr    string
+	spawnErr  error
+	stopped   bool
+}
+
+func (s *streamResult) ok() bool {
+	return s != nil && s.spawnErr == nil && !s.IsError && s.exitCode == 0
+}
+
+func (s *streamResult) failureText() string {
+	parts := []string{}
+	if s.spawnErr != nil {
+		parts = append(parts, s.spawnErr.Error())
+	}
+	if s.stderr != "" {
+		parts = append(parts, s.stderr)
+	}
+	if s.IsError && s.Text != "" {
+		parts = append(parts, s.Text)
+	}
+	if len(parts) == 0 {
+		parts = append(parts, fmt.Sprintf("claude exited %d with no output", s.exitCode))
+	}
+	return strings.Join(parts, "\n")
+}
+
+// spawn runs one `claude -p` process and consumes its event stream.
+func (r *Runner) spawn(p Profile, b *Bot, t *Turn, sessionID string, resume bool, envelope string, prog *progress) *streamResult {
+	res := &streamResult{}
+	cfg := r.config()
+	cwd := b.Cwd
+	if cwd == "" {
+		cwd = botWorkspace(cfg, b.Name)
+	}
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		res.spawnErr = fmt.Errorf("create workspace: %w", err)
+		return res
+	}
+	sysPrompt := renderSystemPrompt(
+		promptBot{Name: b.Name, Role: b.Role, Cwd: cwd}, hostnameOrUnknown(), botRoster(r.db, b.ID))
+	mcpCfg := r.mcpConfigJSON(b.ID, t.ID)
+
+	args := claudeTurnArgs(instanceModel(cfg), sysPrompt, mcpCfg, sessionID, resume)
+	args = append(args, envelope)
+
+	cmd := exec.Command(claudeBin(), args...)
+	cmd.Dir = cwd
+	cmd.Env = botEnv(cfg, p)
+	// Own process group: /stop must reach the whole tool tree, not just claude.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		res.spawnErr = err
+		return res
+	}
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		res.spawnErr = err
+		return res
+	}
+
+	r.mu.Lock()
+	r.active[b.ID] = &activeTurn{turnID: t.ID, cmd: cmd}
+	r.mu.Unlock()
+
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	for scanner.Scan() {
+		r.consumeEvent(scanner.Bytes(), res, prog)
+	}
+	waitErr := cmd.Wait()
+
+	r.mu.Lock()
+	at := r.active[b.ID]
+	if at != nil {
+		res.stopped = at.stopped
+	}
+	delete(r.active, b.ID)
+	r.mu.Unlock()
+
+	res.stderr = strings.TrimSpace(stderr.String())
+	if waitErr != nil {
+		var ee *exec.ExitError
+		if errors.As(waitErr, &ee) {
+			res.exitCode = ee.ExitCode()
+		} else {
+			res.spawnErr = waitErr
+		}
+	}
+	return res
+}
+
+// streamEvent is the subset of the stream-json protocol ccc reads.
+type streamEvent struct {
+	Type    string          `json:"type"`
+	Subtype string          `json:"subtype"`
+	Result  string          `json:"result"`
+	IsError bool            `json:"is_error"`
+	Usage   json.RawMessage `json:"usage"`
+	Message struct {
+		Content []struct {
+			Type  string          `json:"type"`
+			Text  string          `json:"text"`
+			Name  string          `json:"name"`
+			Input json.RawMessage `json:"input"`
+		} `json:"content"`
+	} `json:"message"`
+}
+
+func (r *Runner) consumeEvent(line []byte, res *streamResult, prog *progress) {
+	var ev streamEvent
+	if err := json.Unmarshal(line, &ev); err != nil {
+		return // safe-ignore: non-JSON noise on stdout is not fatal to the turn
+	}
+	switch ev.Type {
+	case "assistant":
+		for _, c := range ev.Message.Content {
+			switch c.Type {
+			case "tool_use":
+				prog.set(summarizeTool(c.Name, c.Input))
+			case "text":
+				if strings.TrimSpace(c.Text) != "" {
+					prog.set("writing a reply")
+				}
+			}
+			// "thinking" blocks are deliberately never surfaced (DESIGN §3.2).
+		}
+	case "result":
+		res.Text = ev.Result
+		res.Subtype = ev.Subtype
+		res.IsError = ev.IsError
+		if len(ev.Usage) > 0 {
+			res.UsageJSON = string(ev.Usage)
+		}
+	}
+}
+
+// summarizeTool turns a tool_use event into the one-line "what is it doing
+// right now" string shown in the progress message. Tool payloads are never
+// dumped into the topic (DESIGN §3.2), so only a short, safe label is built.
+func summarizeTool(name string, input json.RawMessage) string {
+	var in struct {
+		Command     string `json:"command"`
+		Description string `json:"description"`
+		FilePath    string `json:"file_path"`
+		Path        string `json:"path"`
+		Pattern     string `json:"pattern"`
+		Query       string `json:"query"`
+		URL         string `json:"url"`
+		Key         string `json:"key"`
+		Bot         string `json:"bot"`
+		Prompt      string `json:"prompt"`
+	}
+	if len(input) > 0 {
+		_ = json.Unmarshal(input, &in) // safe-ignore: a payload we cannot read just yields a generic label
+	}
+	base := func(p string) string {
+		if p == "" {
+			return ""
+		}
+		return filepath.Base(p)
+	}
+	switch name {
+	case "Bash", "BashOutput":
+		if in.Description != "" {
+			return lowerFirst(truncate(in.Description, 60))
+		}
+		return "running " + truncate(collapseWhitespace(in.Command), 60)
+	case "Read", "NotebookRead":
+		return "reading " + base(in.FilePath)
+	case "Edit", "Write", "NotebookEdit":
+		return "editing " + base(in.FilePath)
+	case "Glob":
+		return "looking for " + truncate(in.Pattern, 40)
+	case "Grep":
+		return "searching for " + truncate(in.Pattern, 40)
+	case "WebFetch":
+		return "fetching " + truncate(in.URL, 60)
+	case "WebSearch":
+		return "searching the web for " + truncate(in.Query, 40)
+	case "Task", "Agent":
+		return "delegating to a subagent"
+	case "TodoWrite":
+		return "planning"
+	case "mcp__ccc__remember":
+		return "remembering " + truncate(in.Key, 40)
+	case "mcp__ccc__recall":
+		return "recalling " + truncate(in.Query, 40)
+	case "mcp__ccc__send_to_bot":
+		return "messaging " + truncate(in.Bot, 30)
+	case "mcp__ccc__ask_owner":
+		return "asking you a question"
+	case "mcp__ccc__notify_owner":
+		return "notifying you"
+	case "mcp__ccc__send_file":
+		return "sending a file"
+	}
+	if strings.HasPrefix(name, "mcp__ccc__") {
+		return strings.TrimPrefix(name, "mcp__ccc__")
+	}
+	return "running " + name
+}
+
+func lowerFirst(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToLower(s[:1]) + s[1:]
+}
+
+// ---------------------------------------------------------------------------
+// Failure classification (DESIGN §3.4)
+// ---------------------------------------------------------------------------
+
+const (
+	errAuthStale   = "auth_stale"
+	errRateLimited = "rate_limited"
+	errTransient   = "transient"
+	errSessionLost = "session_lost"
+	errFatal       = "fatal"
+)
+
+func classifyFailure(text string, exitCode int) string {
+	l := strings.ToLower(text)
+	switch {
+	case isStaleTokenError(text) ||
+		strings.Contains(l, "not logged in") ||
+		strings.Contains(l, "please run `claude login`") ||
+		strings.Contains(l, "invalid api key") ||
+		strings.Contains(l, "oauth token has expired") ||
+		strings.Contains(l, "authentication_error"):
+		return errAuthStale
+	case strings.Contains(l, "usage limit") || strings.Contains(l, "rate limit") ||
+		strings.Contains(l, "rate_limit") || strings.Contains(l, "limit reached") ||
+		strings.Contains(l, "429"):
+		return errRateLimited
+	case strings.Contains(l, "no conversation found") || strings.Contains(l, "session not found") ||
+		strings.Contains(l, "no such session") || strings.Contains(l, "could not find session"):
+		return errSessionLost
+	case strings.Contains(l, "econnreset") || strings.Contains(l, "etimedout") ||
+		strings.Contains(l, "enotfound") || strings.Contains(l, "socket hang up") ||
+		strings.Contains(l, "network") || strings.Contains(l, "fetch failed") ||
+		strings.Contains(l, "internal server error") || strings.Contains(l, "502") ||
+		strings.Contains(l, "503") || strings.Contains(l, "overloaded"):
+		return errTransient
+	}
+	if exitCode == 0 {
+		return errFatal
+	}
+	return errFatal
+}
+
+func failureMessage(class, detail string) string {
+	switch class {
+	case "stopped":
+		return "🛑 Stopped."
+	case errAuthStale:
+		return "🔑 That account needs a new login and no other account could take the turn.\n<code>" +
+			htmlEscape(truncate(detail, 400)) + "</code>"
+	case errRateLimited:
+		return "⏳ Every account is rate limited right now. Try again later.\n<code>" +
+			htmlEscape(truncate(detail, 400)) + "</code>"
+	default:
+		return "❌ Turn failed.\n<code>" + htmlEscape(truncate(detail, 800)) + "</code>"
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Profiles
+// ---------------------------------------------------------------------------
+
+func (r *Runner) markNeedsLogin(p Profile) {
+	r.mu.Lock()
+	r.needsLogin[p.Name] = true
+	r.mu.Unlock()
+	cfg := r.config()
+	if cfg == nil || cfg.ChatID == 0 {
+		return
+	}
+	// Phase 2b owns the Relogin button (it needs the PTY login flow); for now
+	// the owner gets the exact command to run.
+	msg := fmt.Sprintf("🔑 Claude account <b>%s</b> needs a new login.\n<code>%s</code>",
+		htmlEscape(p.Name), htmlEscape(reloginCommand(p)))
+	_, _ = sendMessageHTMLGetID(cfg, cfg.ChatID, 0, msg) // safe-ignore: a failed notification must not fail the turn
+}
+
+func reloginCommand(p Profile) string {
+	if p.Implicit {
+		return "claude auth login"
+	}
+	return fmt.Sprintf("CLAUDE_CONFIG_DIR=%s claude auth login", p.ConfigDir)
+}
+
+// pickProfileExcluding is pickProfile with the profiles this turn already tried
+// (and any known to need a login) taken out of the running.
+func (r *Runner) pickProfileExcluding(exclude map[string]bool) (Profile, bool) {
+	cfg := r.config()
+	r.mu.Lock()
+	needs := make(map[string]bool, len(r.needsLogin))
+	for k, v := range r.needsLogin {
+		needs[k] = v
+	}
+	r.mu.Unlock()
+
+	now := time.Now()
+	stats := collectProfileStats(cfg, nil, now)
+	open := stats[:0:0]
+	for _, s := range stats {
+		if exclude[s.Name] || needs[s.Name] {
+			continue
+		}
+		open = append(open, s)
+	}
+	if len(open) == 0 {
+		// Everything is excluded. If the only problem is a stale needs_login
+		// flag and there is literally nothing else, try it anyway rather than
+		// dropping the turn.
+		for _, s := range stats {
+			if !exclude[s.Name] {
+				open = append(open, s)
+			}
+		}
+		if len(open) == 0 {
+			return Profile{}, false
+		}
+	}
+	name := chooseProfile(open, now)
+	p, ok := profileByName(cfg, name)
+	return p, ok
+}
+
+// botEnv is claudeEnv plus the instance's env_passthrough list (DESIGN §3.1):
+// the only channel by which a secret reaches a bot.
+func botEnv(config *Config, p Profile) []string {
+	env := claudeEnv(p)
+	for _, name := range config.EnvPassthrough {
+		name = strings.TrimSpace(name)
+		if name == "" || strings.HasPrefix(name, "CLAUDE") || strings.HasPrefix(name, "ANTHROPIC") {
+			continue
+		}
+		if v, ok := os.LookupEnv(name); ok {
+			env = append(env, name+"="+v)
+		}
+	}
+	return env
+}
+
+func instanceModel(config *Config) string {
+	if config == nil {
+		return ""
+	}
+	return strings.TrimSpace(config.Model)
+}
+
+// mcpConfigJSON is the inline --mcp-config value: one stdio server, this
+// binary, scoped to the calling bot and turn (DESIGN §6).
+func (r *Runner) mcpConfigJSON(botID, turnID int64) string {
+	cfg := r.config()
+	spec := map[string]any{
+		"mcpServers": map[string]any{
+			"ccc": map[string]any{
+				"type":    "stdio",
+				"command": cccPath,
+				"args":    []string{"mcp", "--bot", fmt.Sprint(botID), "--turn", fmt.Sprint(turnID)},
+				"env": map[string]string{
+					"PATH":       os.Getenv("PATH"),
+					"HOME":       os.Getenv("HOME"),
+					"CCC_DB":     dbPath(cfg),
+					"CCC_CONFIG": getConfigPath(),
+				},
+			},
+		},
+	}
+	b, err := json.Marshal(spec)
+	if err != nil {
+		return "{}" // safe-ignore: unreachable for this literal map; an empty config still runs the turn without tools
+	}
+	return string(b)
+}
+
+func hostnameOrUnknown() string {
+	h, err := os.Hostname()
+	if err != nil || h == "" {
+		return "unknown"
+	}
+	return h
+}
+
+// newUUID mints a v4 UUID for a session. crypto/rand via os is not needed here
+// (a collision only means a resume conflict), but the format must be exact:
+// claude validates --session-id.
+func newUUID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// Fall back to time-based bytes; still a syntactically valid UUID.
+		n := time.Now().UnixNano()
+		for i := range b {
+			b[i] = byte(n >> (uint(i%8) * 8))
+		}
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
