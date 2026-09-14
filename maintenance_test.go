@@ -323,9 +323,7 @@ func TestCompactionFallsBackWhenTheModelIsUnknown(t *testing.T) {
 	in, _, _ := testInstance(t)
 	in.cfg.Model = "sonnet"
 	seedMemories(t, in.db, memCompactMaxCount+10)
-	if err := setSetting(in.db, settingCompactionModel, "haiku-from-the-future"); err != nil {
-		t.Fatal(err)
-	}
+	in.cfg.CompactionModel = "haiku-from-the-future"
 	turner := &fakeTurner{reply: func(model, _ string) (string, error) {
 		if model == "haiku-from-the-future" {
 			return "", errors.New(`[claude-code:unrecognized_model] {"model":"haiku-from-the-future"}`)
@@ -476,24 +474,23 @@ func TestMaintenanceRunsOnceADayAfterTheQuietHour(t *testing.T) {
 	in, _, _ := testInstance(t)
 	day := time.Date(2026, 9, 14, 0, 0, 0, 0, time.Local)
 
-	if maintenanceDue(in.db, day.Add(2*time.Hour)) {
+	if maintenanceDue(in.db, in.cfg, day.Add(2*time.Hour)) {
 		t.Error("02:00 is before the default quiet hour; nothing is due yet")
 	}
-	if !maintenanceDue(in.db, day.Add(5*time.Hour)) {
+	if !maintenanceDue(in.db, in.cfg, day.Add(5*time.Hour)) {
 		t.Error("05:00 is past the quiet hour and nothing has run today")
 	}
 	markMaintenanceRun(in.db, day.Add(5*time.Hour))
-	if maintenanceDue(in.db, day.Add(9*time.Hour)) {
+	if maintenanceDue(in.db, in.cfg, day.Add(9*time.Hour)) {
 		t.Error("maintenance must run once a day, not once a tick")
 	}
-	if !maintenanceDue(in.db, day.AddDate(0, 0, 1).Add(5*time.Hour)) {
+	if !maintenanceDue(in.db, in.cfg, day.AddDate(0, 0, 1).Add(5*time.Hour)) {
 		t.Error("the next day is due again")
 	}
 
-	if err := setSetting(in.db, settingMaintenanceHour, "22"); err != nil {
-		t.Fatal(err)
-	}
-	if maintenanceDue(in.db, day.AddDate(0, 0, 1).Add(21*time.Hour)) {
+	hour := 22
+	in.cfg.MaintenanceHour = &hour
+	if maintenanceDue(in.db, in.cfg, day.AddDate(0, 0, 1).Add(21*time.Hour)) {
 		t.Error("the configured hour is not respected")
 	}
 }

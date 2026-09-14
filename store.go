@@ -669,40 +669,14 @@ func ftsQuery(s string) string {
 // Settings
 // ---------------------------------------------------------------------------
 
-// Instance settings live in the settings table (DESIGN §5) and are edited from
-// Telegram with /set. Each one has a default that makes ccc behave sensibly
-// when the row has never been written.
+// The settings table (DESIGN §5) holds ccc's own bookkeeping only. What the
+// owner tunes lives in config.json (`ccc config set debounce_ms 0`); there is
+// deliberately no Telegram command for it.
 const (
-	// settingDebounceMS is how long an idle bot waits for more messages before
-	// starting a turn, so a burst of chat lines costs one `claude -p` run.
-	settingDebounceMS = "debounce_ms"
-	// settingCompactionModel is the cheap model the memory compaction turn runs
-	// on (DESIGN §7). "haiku" is an alias `claude -p --model` accepts (verified
-	// on 2.1.270); an unknown name falls back to the instance model.
-	settingCompactionModel = "compaction_model"
-	// settingMaintenanceHour is the local hour (0-23) the daily maintenance job
-	// runs at. Quiet by default: nobody is chatting at 04:00.
-	settingMaintenanceHour = "maintenance_hour"
 	// settingLastMaintenance is the date (YYYY-MM-DD) maintenance last ran, so
 	// a restart does not re-run it and a missed day is caught up on.
 	settingLastMaintenance = "last_maintenance"
 )
-
-const (
-	defaultDebounceMS      = 2500
-	defaultCompactionModel = "haiku"
-	defaultMaintenanceHour = 4
-	// maxDebounceMS keeps a typo (debounce_ms = 250000) from parking every bot.
-	maxDebounceMS = 60000
-)
-
-// settableKeys are the settings /set may write, with a one-line description.
-// Anything not listed here is ccc's own bookkeeping and is not user-editable.
-var settableKeys = map[string]string{
-	settingDebounceMS:      "ms an idle bot waits for more messages before starting a turn (default 2500)",
-	settingCompactionModel: "model the memory compaction turn runs on (default haiku)",
-	settingMaintenanceHour: "local hour the daily maintenance job runs at (default 4)",
-}
 
 func getSetting(db *gorm.DB, key, def string) string {
 	var s Setting

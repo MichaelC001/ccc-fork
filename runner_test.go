@@ -415,9 +415,7 @@ func TestDebounceCoalescesABurstIntoOneTurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := setSetting(in.db, settingDebounceMS, "400"); err != nil {
-		t.Fatal(err)
-	}
+	setDebounce(t, in, 400)
 	// The rows are created directly rather than through Enqueue: Enqueue also
 	// starts the bot's loop, which would spawn a real `claude` process. What is
 	// under test is the wait, and the wait reads the queue.
@@ -453,9 +451,7 @@ func TestDebounceReleasesASingleMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := setSetting(in.db, settingDebounceMS, "300"); err != nil {
-		t.Fatal(err)
-	}
+	setDebounce(t, in, 300)
 	r := newRunner(in.db, in.cfg, nil)
 	t.Cleanup(r.Close)
 	queue(t, in.db, b.ID, sourceUser, "just this")
@@ -479,9 +475,7 @@ func TestDebounceDoesNotDelayMachineInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := setSetting(in.db, settingDebounceMS, "5000"); err != nil {
-		t.Fatal(err)
-	}
+	setDebounce(t, in, 5000)
 	r := newRunner(in.db, in.cfg, nil)
 	t.Cleanup(r.Close)
 	queue(t, in.db, b.ID, sourceWatch, "the build went red")
@@ -500,15 +494,11 @@ func TestDebounceCanBeTurnedOff(t *testing.T) {
 	if got := r.debounceDuration(); got != defaultDebounceMS*time.Millisecond {
 		t.Errorf("default debounce = %v, want %dms", got, defaultDebounceMS)
 	}
-	if err := setSetting(in.db, settingDebounceMS, "0"); err != nil {
-		t.Fatal(err)
-	}
+	setDebounce(t, in, 0)
 	if got := r.debounceDuration(); got != 0 {
 		t.Errorf("debounce_ms = 0 must disable the wait, got %v", got)
 	}
-	if err := setSetting(in.db, settingDebounceMS, "999999"); err != nil {
-		t.Fatal(err)
-	}
+	setDebounce(t, in, 999999)
 	if got := r.debounceDuration(); got != maxDebounceMS*time.Millisecond {
 		t.Errorf("an absurd debounce_ms must be capped, got %v", got)
 	}
@@ -534,4 +524,13 @@ func TestClaudePlainArgsCarryNoTools(t *testing.T) {
 	if strings.Contains(strings.Join(claudePlainArgs("", "x"), " "), "--model") {
 		t.Error("no compaction model means claude's own default, not an empty --model")
 	}
+}
+
+// setDebounce points the instance's config at a debounce value; the knob is a
+// config.json key, not a settings-table row.
+func setDebounce(t *testing.T, in *instance, ms int) {
+	t.Helper()
+	in.mu.Lock()
+	in.cfg.DebounceMS = &ms
+	in.mu.Unlock()
 }

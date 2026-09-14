@@ -347,7 +347,7 @@ func compactScope(db *gorm.DB, cfg *Config, turner plainTurner, st memoryScopeSt
 // "haiku" is accepted by 2.1.270 (verified), but the catalog moves and a
 // rejected alias must not stop maintenance.
 func compactionTurn(turner plainTurner, db *gorm.DB, cfg *Config, prompt string) (string, error) {
-	model := strings.TrimSpace(getSetting(db, settingCompactionModel, defaultCompactionModel))
+	model := compactionModel(cfg)
 	out, err := turner.PlainTurn(model, prompt)
 	if err == nil {
 		return out, nil
@@ -583,12 +583,8 @@ func runCleanup(db *gorm.DB, now time.Time, rep *maintenanceReport) {
 // hour has passed today and today's run has not happened yet. A day ccc was
 // switched off is caught up on at the next start, which is why the marker is a
 // date and not a timestamp.
-func maintenanceDue(db *gorm.DB, now time.Time) bool {
-	hour := getSettingInt(db, settingMaintenanceHour, defaultMaintenanceHour)
-	if hour > 23 {
-		hour = defaultMaintenanceHour
-	}
-	if now.Hour() < hour {
+func maintenanceDue(db *gorm.DB, cfg *Config, now time.Time) bool {
+	if now.Hour() < maintenanceHour(cfg) {
 		return false
 	}
 	return getSetting(db, settingLastMaintenance, "") != now.Format("2006-01-02")

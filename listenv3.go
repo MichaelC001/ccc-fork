@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -268,7 +267,6 @@ func setBotCommandsV3(botToken string) {
 		{"command": "bots", "description": "List all bots"},
 		{"command": "status", "description": "Instance health: profiles, queue, running turns"},
 		{"command": "usage", "description": "Tokens, cache hit ratio and cost per bot"},
-		{"command": "set", "description": "Show or change an instance setting (owner only)"},
 		{"command": "account", "description": "Claude accounts (owner only)"},
 		{"command": "access", "description": "Who may talk to ccc (owner only)"},
 		{"command": "model", "description": "Show or set the model (owner only)"},
@@ -602,7 +600,7 @@ func botCwd(cfg *Config, b *Bot) string {
 // ownerOnlyCommands are the ones that change the instance itself, rather than
 // talking to a bot: accounts, access, model and the group binding.
 var ownerOnlyCommands = map[string]bool{
-	"/account": true, "/access": true, "/model": true, "/setgroup": true, "/set": true,
+	"/account": true, "/access": true, "/model": true, "/setgroup": true,
 }
 
 func (in *instance) handleCommand(msg *TelegramMessage, text string, inGroup bool, topicID int64, role accessRole) {
@@ -632,9 +630,6 @@ func (in *instance) handleCommand(msg *TelegramMessage, text string, inGroup boo
 		return
 	case "/usage":
 		in.reply(msg, renderUsage(in.db, time.Now()))
-		return
-	case "/set":
-		in.handleSetCommand(msg, rest)
 		return
 	case "/bot":
 		if !inGroup {
@@ -800,65 +795,6 @@ func (in *instance) handleMemoryRestore(msg *TelegramMessage, arg string) {
 	}
 	in.reply(msg, fmt.Sprintf("↩️ Restored %d entries into <b>%s</b>; compaction %d is undone.",
 		n, htmlEscape(label), id))
-}
-
-// handleSetCommand implements `/set [key] [value]`: read and write the instance
-// settings that have no command of their own. Only the keys in settableKeys are
-// writable — everything else in the settings table is ccc's own bookkeeping
-// (the topic-icon cache, the maintenance marker) and a typo there would be a
-// silent misconfiguration.
-func (in *instance) handleSetCommand(msg *TelegramMessage, rest string) {
-	key, value := splitFirstWord(strings.TrimSpace(rest))
-	if key == "" {
-		var sb strings.Builder
-		sb.WriteString("⚙️ <b>Instance settings</b>\n")
-		keys := make([]string, 0, len(settableKeys))
-		for k := range settableKeys {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			fmt.Fprintf(&sb, "• <b>%s</b> = <code>%s</code>\n  <i>%s</i>\n",
-				k, htmlEscape(settingValueOrDefault(in.db, k)), htmlEscape(settableKeys[k]))
-		}
-		sb.WriteString("\nUsage: /set &lt;key&gt; &lt;value&gt;")
-		in.reply(msg, sb.String())
-		return
-	}
-	if _, ok := settableKeys[key]; !ok {
-		in.reply(msg, "Unknown setting. Send /set with no arguments to see the list.")
-		return
-	}
-	value = strings.TrimSpace(value)
-	if value == "" {
-		in.reply(msg, fmt.Sprintf("<b>%s</b> = <code>%s</code>", key, htmlEscape(settingValueOrDefault(in.db, key))))
-		return
-	}
-	if key == settingDebounceMS || key == settingMaintenanceHour {
-		if _, err := strconv.Atoi(value); err != nil {
-			in.reply(msg, "That setting takes a number.")
-			return
-		}
-	}
-	if err := setSetting(in.db, key, value); err != nil {
-		in.reply(msg, "Could not save that: "+htmlEscape(err.Error()))
-		return
-	}
-	in.reply(msg, fmt.Sprintf("⚙️ <b>%s</b> = <code>%s</code>", key, htmlEscape(value)))
-}
-
-// settingValueOrDefault shows what a setting is worth right now, including the
-// default when the row has never been written.
-func settingValueOrDefault(db *gorm.DB, key string) string {
-	switch key {
-	case settingDebounceMS:
-		return fmt.Sprint(getSettingInt(db, key, defaultDebounceMS))
-	case settingMaintenanceHour:
-		return fmt.Sprint(getSettingInt(db, key, defaultMaintenanceHour))
-	case settingCompactionModel:
-		return getSetting(db, key, defaultCompactionModel)
-	}
-	return getSetting(db, key, "")
 }
 
 // handleNameCommand implements `/name [<name>] [emoji]` (DESIGN §8): show or

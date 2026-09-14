@@ -289,7 +289,7 @@ func (s *scheduler) fireDueSchedules(now time.Time) {
 // maintenance the next time ccc is awake, and the marker being a date means it
 // runs once either way.
 func (s *scheduler) runMaintenanceIfDue(now time.Time) {
-	if !maintenanceDue(s.in.db, now) {
+	if !maintenanceDue(s.in.db, s.in.config(), now) {
 		return
 	}
 	// Claim the day before doing the work: a slow pass must not be started

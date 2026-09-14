@@ -24,6 +24,11 @@ type Config struct {
 	DataDir           string              `json:"data_dir,omitempty"`           // runtime root (default ~/.local/share/ccc)
 	Model             string              `json:"model,omitempty"`              // model every bot runs on (default: claude's own)
 	EnvPassthrough    []string            `json:"env_passthrough,omitempty"`    // extra env var names bots inherit (DESIGN §3.1)
+	// Tuning knobs. They are pointers where 0 is a meaningful value, so an
+	// absent key means "use the default" rather than "set it to zero".
+	DebounceMS      *int   `json:"debounce_ms,omitempty"`      // ms an idle bot waits for more messages (default 2500; 0 disables)
+	CompactionModel string `json:"compaction_model,omitempty"` // model the memory compaction turn runs on (default haiku)
+	MaintenanceHour *int   `json:"maintenance_hour,omitempty"` // local hour the daily maintenance job runs at (default 4)
 }
 
 // TelegramMessage represents a Telegram message.
@@ -265,9 +270,32 @@ func configCommand(args []string) error {
 	}
 }
 
+// parseRange reads a bounded integer setting, so a typo cannot park every bot
+// or push maintenance to an hour that never arrives.
+func parseRange(key, value string, lo, hi int) (int, error) {
+	n, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a number, got %q", key, value)
+	}
+	if n < lo || n > hi {
+		return 0, fmt.Errorf("%s must be between %d and %d, got %d", key, lo, hi, n)
+	}
+	return n, nil
+}
+
+// withDefaultNote marks a value the owner has never set, so `ccc config` shows
+// what ccc will actually do instead of an empty line.
+func withDefaultNote(value string, isDefault bool) string {
+	if isDefault {
+		return value + " (default)"
+	}
+	return value
+}
+
 // configKeys are the keys `ccc config` understands. Secrets are never printed
 // back (DESIGN §12): the bot token reads as "configured".
-var configKeys = []string{"bot_token", "chat_id", "group_id", "model", "data_dir", "env_passthrough", "relay_url", "transcription_lang", "default_profile"}
+var configKeys = []string{"bot_token", "chat_id", "group_id", "model", "data_dir", "env_passthrough", "relay_url",
+	"transcription_lang", "default_profile", "debounce_ms", "compaction_model", "maintenance_hour"}
 
 func configGet(config *Config, key string) (string, error) {
 	switch key {
@@ -292,6 +320,12 @@ func configGet(config *Config, key string) (string, error) {
 		return firstNonEmpty(config.TranscriptionLang, "(auto-detect)"), nil
 	case "default_profile":
 		return firstNonEmpty(config.DefaultProfile, "(first by name)"), nil
+	case "debounce_ms":
+		return withDefaultNote(fmt.Sprint(debounceMS(config)), config.DebounceMS == nil), nil
+	case "compaction_model":
+		return withDefaultNote(compactionModel(config), strings.TrimSpace(config.CompactionModel) == ""), nil
+	case "maintenance_hour":
+		return withDefaultNote(fmt.Sprint(maintenanceHour(config)), config.MaintenanceHour == nil), nil
 	}
 	return "", fmt.Errorf("unknown config key %q (known: %s)", key, strings.Join(configKeys, ", "))
 }
@@ -332,6 +366,20 @@ func configSet(config *Config, key, value string) error {
 		config.TranscriptionLang = value
 	case "default_profile":
 		config.DefaultProfile = value
+	case "debounce_ms":
+		n, err := parseRange(key, value, 0, maxDebounceMS)
+		if err != nil {
+			return err
+		}
+		config.DebounceMS = &n
+	case "compaction_model":
+		config.CompactionModel = value
+	case "maintenance_hour":
+		n, err := parseRange(key, value, 0, 23)
+		if err != nil {
+			return err
+		}
+		config.MaintenanceHour = &n
 	default:
 		return fmt.Errorf("unknown config key %q (known: %s)", key, strings.Join(configKeys, ", "))
 	}

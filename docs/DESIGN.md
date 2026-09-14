@@ -161,13 +161,16 @@ Indexes beyond the ones the columns above imply: `turns(bot_id, created_at)`
 for turn retention, `inbox(delivered_at)` and `questions(answered_at)` for
 cleanup, `memories_archive(compaction_id)` for restore.
 
-Settings actually used: `debounce_ms` (default 2500, §14.18),
-`compaction_model` (default `haiku`, §7), `maintenance_hour` (default 4),
-`last_maintenance` (ccc's own marker), `topic_icons` (the cached sticker set,
-§14.16). `/set` edits the first three; the rest are bookkeeping.
+Settings actually used: `last_maintenance` (ccc's own marker) and `topic_icons`
+(the cached sticker set, §14.16). The table is bookkeeping only — nothing in it
+is user-editable.
 
 Existing `config.json` (bot token, group id, profiles) stays as bootstrap
-config; everything runtime lives in SQLite. The v2 `sessions` map and the
+config, and it is also where the three tuning knobs live: `debounce_ms`
+(default 2500, §14.18), `compaction_model` (default `haiku`, §7) and
+`maintenance_hour` (default 4). They are set with `ccc config set <key>
+<value>`, printed by `ccc config`, and have no Telegram command (§14.18).
+Everything else runtime lives in SQLite. The v2 `sessions` map and the
 JSONL ledger are not migrated (v3 is a fresh start; document it).
 
 ## 6. MCP server (`ccc mcp`)
@@ -299,7 +302,6 @@ older than 90 days.
 | `/memory stats` | topic | Per scope: entries, bytes, whether it is over the compaction threshold, last compaction (§7.1). |
 | `/memory restore <id>` | topic | Undo one compaction. Owner only. |
 | `/usage` | anywhere | Tokens, cache hit ratio, turns, average duration and cost per bot, today and last 7 days (§14.19). |
-| `/set [key] [value]` | anywhere | Show or change an instance setting (`debounce_ms`, `compaction_model`, `maintenance_hour`). Owner only (§14.18). |
 | `/watches`, `/schedules` | topic | List and cancel. |
 | `/bots` | anywhere | Table of bots, status, last activity. |
 | `/account` | anywhere | Status card per profile with buttons; subcommands `status`, `add <name>`, `login <name>`, `remove <name>`, `default <name>`. |
@@ -586,11 +588,14 @@ budget. So `runNext` now waits for the queue to be quiet for `debounce_ms`
 being parked: only a queue whose newest input has `source=user` waits (a watch
 or another bot is delivering one thing, not typing); inputs that queued during
 the previous turn are already older than the window, so the wait is zero; and
-the total wait is capped at four windows. `/set debounce_ms 0` turns it off.
+the total wait is capped at four windows. `ccc config set debounce_ms 0` turns
+it off.
 
-`/set` exists because §5's settings table was described as "edited from
-Telegram" without anything to edit it with. It writes a whitelist of three keys;
-everything else in that table is ccc's own bookkeeping.
+`debounce_ms`, `compaction_model` and `maintenance_hour` are **config.json keys,
+not a Telegram command**. An earlier draft added `/set` for them; it was removed
+because a knob nobody remembers is worse than a default that is right, and three
+keys did not justify a command, a whitelist and an owner-only branch. `ccc config`
+prints each one with the default in force; `ccc config set` validates the range.
 
 **14.19 `/usage` reads `turns.usage_json`, and the cost is folded into it.** The
 `result` event reports `total_cost_usd` NEXT TO `usage`, not inside it, so the

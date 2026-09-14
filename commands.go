@@ -339,7 +339,7 @@ TELEGRAM (in the forum group):
     /role /new /stop /cwd /memory /forget /watches /schedules   per bot
     /bots /status /usage                                        anywhere
     /memory stats|restore <id>                                  memory upkeep
-    /account /access /model /set /setgroup                      owner only
+    /account /access /model /setgroup                           owner only
 
 FLAGS:
     -h, --help              Show this help

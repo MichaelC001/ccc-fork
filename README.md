@@ -235,7 +235,6 @@ what the bot is doing. It is replaced by the answer, and your message gets a ✅
 | `/account add\|login\|remove\|default <name>` | Manage accounts (see above). |
 | `/access` | Who may talk to ccc (see below). |
 | `/model [name]` | Show or set the model every bot runs on. `/model default` clears it. |
-| `/set [key] [value]` | Show or change an instance setting: `debounce_ms`, `compaction_model`, `maintenance_hour` (see below). |
 | `/setgroup` | Bind ccc to the forum group the command was sent in. |
 
 ### What a bot can do for itself
@@ -265,7 +264,7 @@ Every bot has these tools, and uses them without being told:
 idle bot waits `debounce_ms` (default 2500) for you to stop typing and answers
 all of them in ONE `claude -p` run. Messages that arrive while a turn is running
 already queue and are delivered together on the next one. A watch, a schedule or
-another bot is never delayed. `/set debounce_ms 0` turns the wait off.
+another bot is never delayed. `ccc config set debounce_ms 0` turns the wait off.
 
 **Resumed turns are mostly cache reads.** The system prompt of a session is
 byte-stable from turn to turn (the roster and icon list are sorted, nothing that
@@ -303,13 +302,21 @@ Once a day at `maintenance_hour` (default 04:00 local) — or on demand with
   30 days, the private notes of bots archived over a month ago, and memory
   archives older than 90 days.
 
-Settings you can change with `/set`:
+Tuning knobs. These live in `config.json` and have no Telegram command: the
+defaults are meant to be right, and `ccc config` prints what is in force.
 
 | Setting | Default | What it does |
 |---|---|---|
 | `debounce_ms` | 2500 | How long an idle bot waits for more messages before starting a turn. 0 disables it. |
 | `compaction_model` | `haiku` | The cheap model the memory compaction runs on. An unknown name falls back to the instance model. |
 | `maintenance_hour` | 4 | Local hour the daily job runs at. A machine that was off catches up when it wakes. |
+
+```bash
+ccc config                              # every key, with the defaults in force
+ccc config set debounce_ms 0
+ccc config set compaction_model sonnet
+ccc config set maintenance_hour 22
+```
 
 ### Access control
 
@@ -378,7 +385,8 @@ systemd unit contains no secrets, only `EnvironmentFile=-%h/.config/ccc/env`.
 **A compaction dropped something I wanted.** `/memory stats` shows the last
 compaction id per scope; `/memory restore <id>` puts the originals back and
 undoes it. Raise the thresholds by keeping fewer memories, or set
-`/set compaction_model` to a stronger model if the cheap one consolidates badly.
+`ccc config set compaction_model` to a stronger model if the cheap one
+consolidates badly.
 
 **`systemctl --user` fails with "Failed to connect to bus".** Export
 `XDG_RUNTIME_DIR=/run/user/$(id -u)` and make sure `loginctl enable-linger

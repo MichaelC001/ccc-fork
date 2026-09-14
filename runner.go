@@ -325,14 +325,7 @@ func (r *Runner) PlainTurn(model, prompt string) (string, error) {
 // the link — and each one becoming its own `claude -p` run is the single most
 // wasteful thing ccc can do with the owner's tokens.
 func (r *Runner) debounceDuration() time.Duration {
-	ms := getSettingInt(r.db, settingDebounceMS, defaultDebounceMS)
-	if ms <= 0 {
-		return 0
-	}
-	if ms > maxDebounceMS {
-		ms = maxDebounceMS
-	}
-	return time.Duration(ms) * time.Millisecond
+	return time.Duration(debounceMS(r.config())) * time.Millisecond
 }
 
 // settleQueue waits until the bot's queue has been quiet for one debounce

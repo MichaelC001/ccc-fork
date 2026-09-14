@@ -109,6 +109,64 @@ func saveConfig(config *Config) error {
 	return os.Rename(tmpName, path)
 }
 
+// ---------------------------------------------------------------------------
+// Tuning knobs
+// ---------------------------------------------------------------------------
+
+// These are config.json keys (`ccc config set debounce_ms 0`), not a Telegram
+// surface: ccc prefers a default that is right for everyone over a command
+// nobody remembers.
+const (
+	defaultDebounceMS      = 2500
+	defaultCompactionModel = "haiku"
+	defaultMaintenanceHour = 4
+	// maxDebounceMS keeps a typo (debounce_ms = 250000) from parking every bot.
+	maxDebounceMS = 60000
+)
+
+// debounceMS is how long an idle bot waits for more messages before it starts a
+// turn. Chat arrives in bursts — a sentence, then the correction, then the link
+// — and each one becoming its own `claude -p` run is the single most wasteful
+// thing ccc can do with the owner's tokens.
+func debounceMS(c *Config) int {
+	if c == nil || c.DebounceMS == nil {
+		return defaultDebounceMS
+	}
+	switch ms := *c.DebounceMS; {
+	case ms < 0:
+		return 0
+	case ms > maxDebounceMS:
+		return maxDebounceMS
+	default:
+		return ms
+	}
+}
+
+// compactionModel is the cheap model the memory compaction turn runs on
+// (DESIGN §7). "haiku" is an alias `claude -p --model` accepts; an unknown name
+// falls back to the instance model.
+func compactionModel(c *Config) string {
+	if c == nil {
+		return defaultCompactionModel
+	}
+	if m := strings.TrimSpace(c.CompactionModel); m != "" {
+		return m
+	}
+	return defaultCompactionModel
+}
+
+// maintenanceHour is the local hour (0-23) the daily maintenance job runs at.
+// Quiet by default: nobody is chatting at 04:00.
+func maintenanceHour(c *Config) int {
+	if c == nil || c.MaintenanceHour == nil {
+		return defaultMaintenanceHour
+	}
+	if h := *c.MaintenanceHour; h >= 0 && h <= 23 {
+		return h
+	}
+	return defaultMaintenanceHour
+}
+
 // expandPath expands ~ to home directory
 func expandPath(path string) string {
 	if strings.HasPrefix(path, "~/") {

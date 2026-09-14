@@ -795,43 +795,22 @@ func TestMemoryStatsAndRestoreCommands(t *testing.T) {
 	}
 }
 
-func TestSetCommandIsOwnerOnlyAndValidates(t *testing.T) {
+// TestSetCommandIsGone locks in that instance tuning has no Telegram surface:
+// debounce_ms, compaction_model and maintenance_hour are config.json keys
+// (`ccc config set …`), and defaults are what everyone else gets.
+func TestSetCommandIsGone(t *testing.T) {
 	in, _, api := testInstance(t)
-	last := func() string {
-		texts := api.texts("")
-		return texts[len(texts)-1]
-	}
 
-	in.handleMessage(ownerMessage(0, "/set"))
-	for _, want := range []string{settingDebounceMS, settingCompactionModel, "2500"} {
-		if !strings.Contains(last(), want) {
-			t.Errorf("/set does not list %q: %q", want, last())
-		}
-	}
-
-	in.handleMessage(ownerMessage(0, "/set debounce_ms not-a-number"))
-	if !strings.Contains(last(), "takes a number") {
-		t.Errorf("a non-numeric debounce was accepted: %q", last())
-	}
-	in.handleMessage(ownerMessage(0, "/set nonsense 1"))
-	if !strings.Contains(last(), "Unknown setting") {
-		t.Errorf("an unknown key was accepted: %q", last())
-	}
 	in.handleMessage(ownerMessage(0, "/set debounce_ms 800"))
-	if getSettingInt(in.db, settingDebounceMS, defaultDebounceMS) != 800 {
-		t.Error("the setting was not stored")
-	}
 
-	approved := ownerMessage(0, "/set debounce_ms 1")
-	approved.From.ID = 4242
-	if err := in.db.Create(&Access{TelegramUserID: 4242, State: accessApproved}).Error; err != nil {
-		t.Fatal(err)
+	texts := api.texts("")
+	if len(texts) == 0 {
+		t.Fatal("/set produced no reply at all")
 	}
-	in.handleMessage(approved)
-	if !strings.Contains(last(), "owner-only") {
-		t.Errorf("/set must be owner-only: %q", last())
+	if last := texts[len(texts)-1]; strings.Contains(last, "debounce_ms") || strings.Contains(last, "Instance settings") {
+		t.Errorf("/set still has a Telegram surface: %q", last)
 	}
-	if getSettingInt(in.db, settingDebounceMS, defaultDebounceMS) != 800 {
-		t.Error("a non-owner changed a setting")
+	if debounceMS(in.config()) != defaultDebounceMS {
+		t.Errorf("debounce is %d, want the default %d", debounceMS(in.config()), defaultDebounceMS)
 	}
 }

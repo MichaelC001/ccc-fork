@@ -145,6 +145,54 @@ func TestConfigCommandSetAndGet(t *testing.T) {
 	}
 }
 
+// The tuning knobs that used to be edited from Telegram with /set are plain
+// config.json keys: `ccc config` reports the default in force until one is set,
+// and out-of-range values are refused rather than parking every bot.
+func TestConfigCommandTuningKnobs(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	fresh := &Config{}
+	for key, want := range map[string]string{
+		"debounce_ms":      "2500 (default)",
+		"compaction_model": "haiku (default)",
+		"maintenance_hour": "4 (default)",
+	} {
+		got, err := configGet(fresh, key)
+		if err != nil {
+			t.Fatalf("config get %s: %v", key, err)
+		}
+		if got != want {
+			t.Errorf("config get %s = %q, want %q", key, got, want)
+		}
+	}
+
+	for _, kv := range [][2]string{{"debounce_ms", "0"}, {"compaction_model", "sonnet"}, {"maintenance_hour", "22"}} {
+		if err := configCommand([]string{"set", kv[0], kv[1]}); err != nil {
+			t.Fatalf("config set %s %s: %v", kv[0], kv[1], err)
+		}
+	}
+	config, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 0 must survive as "the owner turned debouncing off", not as "unset".
+	if debounceMS(config) != 0 {
+		t.Errorf("debounce_ms = %d, want 0", debounceMS(config))
+	}
+	if compactionModel(config) != "sonnet" {
+		t.Errorf("compaction_model = %q, want sonnet", compactionModel(config))
+	}
+	if maintenanceHour(config) != 22 {
+		t.Errorf("maintenance_hour = %d, want 22", maintenanceHour(config))
+	}
+
+	for _, kv := range [][2]string{{"debounce_ms", "-1"}, {"debounce_ms", "600000"}, {"maintenance_hour", "25"}, {"maintenance_hour", "x"}} {
+		if err := configCommand([]string{"set", kv[0], kv[1]}); err == nil {
+			t.Errorf("config set %s %s should have been rejected", kv[0], kv[1])
+		}
+	}
+}
+
 func TestSplitList(t *testing.T) {
 	for _, tt := range []struct {
 		in   string
