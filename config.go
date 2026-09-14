@@ -168,17 +168,17 @@ func saveConfig(config *Config) error {
 	}
 	tmpName := tmp.Name()
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
+		tmp.Close() // safe-ignore: best-effort cleanup on an error path
+		os.Remove(tmpName) // safe-ignore: best-effort cleanup on an error path
 		return err
 	}
 	if err := tmp.Chmod(0600); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
+		tmp.Close() // safe-ignore: best-effort cleanup on an error path
+		os.Remove(tmpName) // safe-ignore: best-effort cleanup on an error path
 		return err
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
+		os.Remove(tmpName) // safe-ignore: best-effort cleanup on an error path
 		return err
 	}
 	return os.Rename(tmpName, path)

@@ -38,6 +38,7 @@ var (
 	lastStatus   = map[int64]string{}    // topicID -> last posted status
 	lastProbe    = map[int64]time.Time{} // topicID -> last deletion probe
 	missingTicks = map[int64]int{}       // topicID -> consecutive polls absent from fleet
+	snapshotFailed = map[string]bool{}   // profile name -> its last snapshot failed (log-once)
 )
 
 // runMirror is the poller loop, launched as a goroutine from listen().
@@ -48,24 +49,53 @@ func runMirror() {
 		if err != nil || config == nil || config.GroupID == 0 {
 			continue
 		}
-		// Full snapshot: includes done/idle-resident sessions (what the agents
-		// view shows), excludes only killed ones — used for both discovery and
-		// mirroring.
-		agents, err := listAgents(true)
-		if err != nil {
+		// One full snapshot PER PROFILE: the fleet is scoped to a config dir,
+		// so a single listing would show only one account's sessions and make
+		// every other account's session look dismissed (and get its topic
+		// reaped in ~9s). Full = includes done/idle-resident sessions (what the
+		// agents view shows), excludes only killed ones.
+		snaps := snapshotAllProfiles(config)
+		if !anySnapshotOK(snaps) {
 			continue
 		}
+		logFailedSnapshots(snaps)
 		if c := dedupSessions(); c != nil {
 			config = c
 		}
-		if c := discoverFleet(agents); c != nil {
+		if c := discoverFleet(config, snaps); c != nil {
 			config = c
 		}
 		for sessName, info := range config.Sessions {
 			if info == nil || info.TopicID == 0 {
 				continue
 			}
-			mirrorSession(config, agents, sessName, info)
+			mirrorSession(config, snaps, sessName, info)
+		}
+	}
+}
+
+func anySnapshotOK(snaps map[string]profileSnapshot) bool {
+	for _, s := range snaps {
+		if s.OK {
+			return true
+		}
+	}
+	return false
+}
+
+// logFailedSnapshots reports a profile whose fleet could not be listed, once
+// per outage rather than every 3s tick.
+func logFailedSnapshots(snaps map[string]profileSnapshot) {
+	mirrorMu.Lock()
+	defer mirrorMu.Unlock()
+	for name, s := range snaps {
+		if s.OK {
+			delete(snapshotFailed, name)
+			continue
+		}
+		if !snapshotFailed[name] {
+			snapshotFailed[name] = true
+			hookLog("profile %s: fleet snapshot failed — skipping discovery/reaping for it", name)
 		}
 	}
 }
@@ -97,7 +127,7 @@ func dedupSessions() *Config {
 					continue
 				}
 				info := config.Sessions[n]
-				deleteForumTopic(config, info.TopicID)
+				_ = deleteForumTopic(config, info.TopicID) // safe-ignore: best-effort topic cleanup; the session entry is dropped regardless
 				mirrorMu.Lock()
 				delete(lastStatus, info.TopicID)
 				delete(lastProbe, info.TopicID)
@@ -117,7 +147,7 @@ func dedupSessions() *Config {
 // view) show up in ccc. Keyed by the conversation UUID; `claude attach` keeps
 // the UUID stable, and ccc updates the mapping on its own resumes. Returns true
 // if it created any topic (config was saved).
-func discoverFleet(live []AgentInfo) *Config {
+func discoverFleet(cfg *Config, snaps map[string]profileSnapshot) *Config {
 	return updateConfig(func(config *Config) bool {
 		mapped := map[string]bool{}      // conversation UUID -> tracked
 		mappedShort := map[string]bool{} // short id -> tracked (short-id handoff)
@@ -143,65 +173,85 @@ func discoverFleet(live []AgentInfo) *Config {
 			}
 		}
 		changed := false
-		for i := range live {
-			a := live[i]
-			if a.SessionID == "" || mapped[a.SessionID] || mappedShort[a.ID] {
+		for _, prof := range listProfiles(config) {
+			snap := snaps[prof.Name]
+			// A profile whose snapshot failed tells us nothing this tick —
+			// discovering off a missing listing would be inventing sessions.
+			if !snap.OK {
 				continue
 			}
-			// A pending /new session in this cwd will claim this agent — don't
-			// race it with a duplicate discovery topic.
-			if pendingCwd[a.Cwd] {
-				continue
-			}
-			// Skip killed sessions (stopped/failed) — the agents view drops them.
-			// Active and done/idle-resident sessions are what we mirror.
-			st := strings.ToLower(a.State)
-			if st == "stopped" || st == "failed" || st == "error" {
-				continue
-			}
-			// A resume (by ccc OR the PC agents view) mints a new UUID/short with no
-			// server-side link to the parent. If this agent's conversation carries a
-			// ccc marker for a topic we already track, it's that session resumed —
-			// adopt it into the existing topic instead of spawning a duplicate.
-			if topicID := transcriptTopicMarker(transcriptPathForUUID(a.SessionID)); topicID != 0 {
-				if name, ok := byTopic[topicID]; ok {
-					info := config.Sessions[name]
-					carrySessionLabel(info.SessionID, a.SessionID)
-					appendOldSessionID(info, info.SessionID)
-					info.SessionID = a.SessionID
-					info.ShortID = a.ID
-					info.Marked = true
-					mapped[a.SessionID] = true
-					mappedShort[a.ID] = true
-					changed = true
-					hookLog("adopted resumed agent %s into session %s (marker t%d)", a.ID, name, topicID)
+			live := snap.Agents
+			for i := range live {
+				a := live[i]
+				if a.SessionID == "" || mapped[a.SessionID] || mappedShort[a.ID] {
 					continue
 				}
+				// A pending /new session in this cwd will claim this agent — don't
+				// race it with a duplicate discovery topic.
+				if pendingCwd[a.Cwd] {
+					continue
+				}
+				// Skip killed sessions (stopped/failed) — the agents view drops them.
+				// Active and done/idle-resident sessions are what we mirror.
+				st := strings.ToLower(a.State)
+				if st == "stopped" || st == "failed" || st == "error" {
+					continue
+				}
+				// A resume (by ccc OR the PC agents view) mints a new UUID/short with no
+				// server-side link to the parent. If this agent's conversation carries a
+				// ccc marker for a topic we already track, it's that session resumed —
+				// adopt it into the existing topic instead of spawning a duplicate.
+				if topicID := transcriptTopicMarker(transcriptPathForUUID(prof, a.SessionID)); topicID != 0 {
+					if name, ok := byTopic[topicID]; ok {
+						info := config.Sessions[name]
+						carrySessionLabel(prof, info.SessionID, a.SessionID)
+						appendOldSessionID(info, info.SessionID)
+						info.SessionID = a.SessionID
+						info.ShortID = a.ID
+						info.Marked = true
+						mapped[a.SessionID] = true
+						mappedShort[a.ID] = true
+						changed = true
+						hookLog("adopted resumed agent %s into session %s (marker t%d)", a.ID, name, topicID)
+						continue
+					}
+				}
+				title := topicTitleFor(prof, &a)
+				topicID, err := createForumTopic(config, title)
+				if err != nil {
+					continue
+				}
+				key := uniqueSessionKey(config, &a)
+				config.Sessions[key] = &SessionInfo{
+					TopicID:   topicID,
+					Path:      a.Cwd,
+					SessionID: a.SessionID,
+					ShortID:   a.ID,
+					Title:     title,
+					Profile:   sessionProfileName(config, prof),
+				}
+				// Mark the session's existing transcript as already delivered so we
+				// don't back-spam its history — only new text after discovery is sent.
+				seedDelivered(prof, key, a.SessionID)
+				mapped[a.SessionID] = true
+				changed = true
+				hookLog("discovered agent %s (%s) on profile %s → topic %d %q", a.ID, a.SessionID, prof.Name, topicID, title)
+				sendMessage(config, config.GroupID, topicID,
+					"🔭 Discovered from the agents view — send a message here to talk to this session.")
 			}
-			title := topicTitleFor(&a)
-			topicID, err := createForumTopic(config, title)
-			if err != nil {
-				continue
-			}
-			key := uniqueSessionKey(config, &a)
-			config.Sessions[key] = &SessionInfo{
-				TopicID:   topicID,
-				Path:      a.Cwd,
-				SessionID: a.SessionID,
-				ShortID:   a.ID,
-				Title:     title,
-			}
-			// Mark the session's existing transcript as already delivered so we
-			// don't back-spam its history — only new text after discovery is sent.
-			seedDelivered(key, a.SessionID)
-			mapped[a.SessionID] = true
-			changed = true
-			hookLog("discovered agent %s (%s) → topic %d %q", a.ID, a.SessionID, topicID, title)
-			sendMessage(config, config.GroupID, topicID,
-				"🔭 Discovered from the agents view — send a message here to talk to this session.")
 		}
 		return changed
 	})
+}
+
+// sessionProfileName is the value to store in SessionInfo.Profile: empty for
+// the default profile, so single-account configs stay byte-identical to what
+// ccc wrote before profiles existed.
+func sessionProfileName(config *Config, p Profile) string {
+	if p.Name == defaultProfile(config).Name {
+		return ""
+	}
+	return p.Name
 }
 
 // reapSession deletes the Telegram topic for a session that has disappeared
@@ -230,7 +280,7 @@ func reapSession(sessName, expectSessionID, expectShortID string, topicID int64)
 	if !removed || config == nil {
 		return
 	}
-	deleteForumTopic(config, topicID)
+	_ = deleteForumTopic(config, topicID) // safe-ignore: best-effort topic cleanup; the session entry is dropped regardless
 	mirrorMu.Lock()
 	delete(lastStatus, topicID)
 	delete(lastProbe, topicID)
@@ -242,8 +292,9 @@ func reapSession(sessName, expectSessionID, expectShortID string, topicID int64)
 // retireSession stops a session's agent and removes it from the map, in
 // response to its Telegram topic being deleted.
 func retireSession(config *Config, sessName string, info *SessionInfo, agents []AgentInfo) {
+	prof := profileFor(config, info)
 	if short := liveShortID(config, sessName, agents); short != "" {
-		stopAgent(short)
+		stopAgent(prof, short) // safe-ignore: best-effort stop; the entry is dropped either way
 	}
 	updateConfig(func(c *Config) bool {
 		if _, ok := c.Sessions[sessName]; !ok {
@@ -262,8 +313,8 @@ func retireSession(config *Config, sessName string, info *SessionInfo, agents []
 // seedDelivered records a session's current assistant text as already
 // delivered, so discovering a long-running session doesn't back-spam its
 // history to Telegram.
-func seedDelivered(sessName, sessionID string) {
-	tp := transcriptPathForUUID(sessionID)
+func seedDelivered(p Profile, sessName, sessionID string) {
+	tp := transcriptPathForUUID(p, sessionID)
 	if tp == "" {
 		return
 	}
@@ -297,8 +348,8 @@ func stripTitlePathPrefix(name string) string {
 // prefers the user's session label (which survives resumes via carrySessionLabel);
 // otherwise the fleet display name with its "<dir>: " prefix stripped; otherwise
 // the cwd's basename; otherwise the short id.
-func topicTitleFor(a *AgentInfo) string {
-	name := sessionLabel(a.SessionID)
+func topicTitleFor(p Profile, a *AgentInfo) string {
+	name := sessionLabel(p, a.SessionID)
 	if name == "" {
 		name = stripTitlePathPrefix(strings.TrimSpace(a.Name))
 	}
@@ -317,8 +368,8 @@ func topicTitleFor(a *AgentInfo) string {
 // syncTopicTitle renames the Telegram topic when the agent renames itself in
 // the fleet view. `/new` topics are born titled after their initial prompt;
 // once Claude picks a proper session name, the topic follows it.
-func syncTopicTitle(config *Config, info *SessionInfo, a *AgentInfo) {
-	name := topicTitleFor(a)
+func syncTopicTitle(config *Config, p Profile, info *SessionInfo, a *AgentInfo) {
+	name := topicTitleFor(p, a)
 	if name == "" || name == info.Title {
 		return
 	}
@@ -354,8 +405,15 @@ func uniqueSessionKey(config *Config, a *AgentInfo) string {
 	return key
 }
 
-func mirrorSession(config *Config, agents []AgentInfo, sessName string, info *SessionInfo) {
+func mirrorSession(config *Config, snaps map[string]profileSnapshot, sessName string, info *SessionInfo) {
 	defer func() { recover() }()
+
+	// Everything below is scoped to the session's own profile: its fleet
+	// listing, its transcript, its job state and its labels all live in that
+	// profile's config dir.
+	prof := profileFor(config, info)
+	snap := snaps[prof.Name]
+	agents := snap.Agents
 
 	// If the topic was deleted from Telegram, retire the session (stop its
 	// agent — like Ctrl+X in the agents view) and drop it from the map.
@@ -367,6 +425,13 @@ func mirrorSession(config *Config, agents []AgentInfo, sessName string, info *Se
 	mirrorMu.Unlock()
 	if due && topicDeleted(config, info.TopicID) {
 		retireSession(config, sessName, info, agents)
+		return
+	}
+
+	// Without a fresh listing for THIS session's profile we know nothing about
+	// it this tick: not whether it is live, not whether it is gone. Do nothing
+	// rather than mistake an unreachable daemon for a dismissed session.
+	if !snap.OK {
 		return
 	}
 
@@ -384,7 +449,7 @@ func mirrorSession(config *Config, agents []AgentInfo, sessName string, info *Se
 		newUUID := a.SessionID
 		newShort := a.ID
 		topicID := info.TopicID
-		carrySessionLabel(info.SessionID, newUUID)
+		carrySessionLabel(prof, info.SessionID, newUUID)
 		updateConfig(func(c *Config) bool {
 			for _, si := range c.Sessions {
 				if si != nil && si.TopicID == topicID {
@@ -428,7 +493,7 @@ func mirrorSession(config *Config, agents []AgentInfo, sessName string, info *Se
 	mirrorMu.Unlock()
 
 	if live {
-		syncTopicTitle(config, info, a)
+		syncTopicTitle(config, prof, info, a)
 	}
 
 	short := info.ShortID
@@ -437,8 +502,8 @@ func mirrorSession(config *Config, agents []AgentInfo, sessName string, info *Se
 	}
 
 	// Deliver any new assistant text from the transcript.
-	transcript := transcriptPathForUUID(info.SessionID)
-	js := readJobState(short)
+	transcript := transcriptPathForUUID(prof, info.SessionID)
+	js := readJobState(prof, short)
 	if transcript == "" && js != nil {
 		transcript = js.LinkScanPath
 	}
@@ -452,6 +517,12 @@ func mirrorSession(config *Config, agents []AgentInfo, sessName string, info *Se
 		status = classifyState(a.State, a.Status)
 	} else if js != nil {
 		status = classifyState(js.State, "")
+	}
+
+	// A usage/rate limit on this profile steers FUTURE dispatches away from it
+	// (this session stays put — its conversation lives in this profile).
+	if isUsageLimitSignal(js) {
+		noteProfileLimit(prof, time.Now())
 	}
 
 	postStatus(config, sessName, info.TopicID, info.SessionID, status, js)

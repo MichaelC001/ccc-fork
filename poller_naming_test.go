@@ -30,10 +30,14 @@ func TestStripTitlePathPrefix(t *testing.T) {
 	}
 }
 
+// testProfile is the implicit profile ($HOME/.claude), which the label tests
+// redirect by setting HOME to a temp dir.
+func testProfile() Profile { return implicitProfile() }
+
 // writeSessionName writes a label file under $HOME/.claude/session-names.
 func writeSessionName(t *testing.T, name, content string) {
 	t.Helper()
-	dir := sessionNamesDir()
+	dir := sessionNamesDir(testProfile())
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatalf("mkdir session-names: %v", err)
 	}
@@ -46,29 +50,29 @@ func writeSessionName(t *testing.T, name, content string) {
 func TestSessionLabel(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
-	if got := sessionLabel(""); got != "" {
+	if got := sessionLabel(testProfile(), ""); got != "" {
 		t.Errorf("sessionLabel(empty) = %q, want empty", got)
 	}
-	if got := sessionLabel("missing-uuid"); got != "" {
+	if got := sessionLabel(testProfile(), "missing-uuid"); got != "" {
 		t.Errorf("sessionLabel(missing) = %q, want empty", got)
 	}
 
 	// autolabel used when the manual file is absent.
 	writeSessionName(t, "uuid-a.autolabel", "  heuristic  label \n")
-	if got := sessionLabel("uuid-a"); got != "heuristic label" {
+	if got := sessionLabel(testProfile(), "uuid-a"); got != "heuristic label" {
 		t.Errorf("sessionLabel(autolabel) = %q, want %q", got, "heuristic label")
 	}
 
 	// manual label wins over autolabel.
 	writeSessionName(t, "uuid-a", "manual\tlabel")
-	if got := sessionLabel("uuid-a"); got != "manual label" {
+	if got := sessionLabel(testProfile(), "uuid-a"); got != "manual label" {
 		t.Errorf("sessionLabel(manual) = %q, want %q", got, "manual label")
 	}
 
 	// blank manual falls back to autolabel.
 	writeSessionName(t, "uuid-b", "   \n")
 	writeSessionName(t, "uuid-b.autolabel", "fallback")
-	if got := sessionLabel("uuid-b"); got != "fallback" {
+	if got := sessionLabel(testProfile(), "uuid-b"); got != "fallback" {
 		t.Errorf("sessionLabel(blank manual) = %q, want %q", got, "fallback")
 	}
 }
@@ -76,21 +80,21 @@ func TestSessionLabel(t *testing.T) {
 // TestCarrySessionLabel checks labels are copied to a new UUID across a resume.
 func TestCarrySessionLabel(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	dir := sessionNamesDir()
+	dir := sessionNamesDir(testProfile())
 
 	writeSessionName(t, "old", "my label")
 	writeSessionName(t, "old.autolabel", "auto")
 	writeSessionName(t, "old.cwd", "/Users/x/proj")
 
 	// No-op cases: none should create a "new" file.
-	carrySessionLabel("", "new")
-	carrySessionLabel("old", "")
-	carrySessionLabel("old", "old")
+	carrySessionLabel(testProfile(), "", "new")
+	carrySessionLabel(testProfile(), "old", "")
+	carrySessionLabel(testProfile(), "old", "old")
 	if _, err := os.Stat(filepath.Join(dir, "new")); err == nil {
 		t.Error("no-op carrySessionLabel created a file")
 	}
 
-	carrySessionLabel("old", "new")
+	carrySessionLabel(testProfile(), "old", "new")
 	for suffix, want := range map[string]string{"": "my label", ".autolabel": "auto", ".cwd": "/Users/x/proj"} {
 		data, err := os.ReadFile(filepath.Join(dir, "new"+suffix))
 		if err != nil {
@@ -104,7 +108,7 @@ func TestCarrySessionLabel(t *testing.T) {
 
 	// A blank source file is not carried.
 	writeSessionName(t, "blank.cwd", "   ")
-	carrySessionLabel("blank", "target")
+	carrySessionLabel(testProfile(), "blank", "target")
 	if _, err := os.Stat(filepath.Join(dir, "target.cwd")); err == nil {
 		t.Error("blank source should not be carried")
 	}
@@ -118,25 +122,25 @@ func TestTopicTitleFor(t *testing.T) {
 	// Session label wins (and survives the "<dir>: " garbage in Name).
 	writeSessionName(t, "uuid-1", "pcb board compaction")
 	a := &AgentInfo{SessionID: "uuid-1", Name: "~: está perfecto", Cwd: "/Users/x/pcb", ID: "abcd1234"}
-	if got := topicTitleFor(a); got != "pcb board compaction" {
+	if got := topicTitleFor(testProfile(), a); got != "pcb board compaction" {
 		t.Errorf("topicTitleFor(label) = %q, want %q", got, "pcb board compaction")
 	}
 
 	// No label → stripped fleet name.
 	b := &AgentInfo{SessionID: "uuid-2", Name: "~/pcb: fix decoder", Cwd: "/Users/x/pcb", ID: "abcd1234"}
-	if got := topicTitleFor(b); got != "fix decoder" {
+	if got := topicTitleFor(testProfile(), b); got != "fix decoder" {
 		t.Errorf("topicTitleFor(stripped name) = %q, want %q", got, "fix decoder")
 	}
 
 	// No label, empty name → cwd base.
 	c := &AgentInfo{SessionID: "uuid-3", Name: "", Cwd: "/Users/x/proj", ID: "abcd1234"}
-	if got := topicTitleFor(c); got != "proj" {
+	if got := topicTitleFor(testProfile(), c); got != "proj" {
 		t.Errorf("topicTitleFor(cwd base) = %q, want %q", got, "proj")
 	}
 
 	// No label, empty name, empty cwd → short id.
 	d := &AgentInfo{SessionID: "uuid-4", Name: "", Cwd: "", ID: "abcd1234"}
-	if got := topicTitleFor(d); got != "abcd1234" {
+	if got := topicTitleFor(testProfile(), d); got != "abcd1234" {
 		t.Errorf("topicTitleFor(id) = %q, want %q", got, "abcd1234")
 	}
 }

@@ -145,7 +145,7 @@ func appendOldSessionID(info *SessionInfo, uuid string) {
 // Recording the new short id up front lets the poller match the session by
 // short id (liveShortID / discovery) and adopt the fresh UUID before either
 // mis-fires.
-func persistAgentIDs(sessName, shortID string) {
+func persistAgentIDs(p Profile, sessName, shortID string) {
 	// Phase 1: persist the fresh short id up front (the short-id handoff).
 	updateConfig(func(config *Config) bool {
 		info := config.Sessions[sessName]
@@ -156,7 +156,7 @@ func persistAgentIDs(sessName, shortID string) {
 		return true
 	})
 
-	uuid := resolveSessionUUID(shortID, 8*time.Second)
+	uuid := resolveSessionUUID(p, shortID, 8*time.Second)
 	if uuid == "" {
 		return
 	}
@@ -178,7 +178,34 @@ func persistAgentIDs(sessName, shortID string) {
 		info.ResumingAt = 0
 		return true
 	})
-	carrySessionLabel(oldUUID, uuid)
+	carrySessionLabel(p, oldUUID, uuid)
+}
+
+// ensureSessionProfile resolves (and, for a brand-new session, chooses and
+// persists) the profile a session runs under. A session that already has a
+// conversation never switches profile: its transcript, job state and daemon all
+// live inside the config dir it was started in, so a cross-profile resume would
+// simply not find the conversation.
+func ensureSessionProfile(config *Config, sessName string, info *SessionInfo) Profile {
+	if info != nil && (info.Profile != "" || info.SessionID != "") {
+		return profileFor(config, info)
+	}
+	p := pickProfile(config)
+	name := sessionProfileName(config, p)
+	if name != "" {
+		updateConfig(func(c *Config) bool {
+			si := c.Sessions[sessName]
+			if si == nil || si.Profile == name {
+				return false
+			}
+			si.Profile = name
+			return true
+		})
+		if info != nil {
+			info.Profile = name
+		}
+	}
+	return p
 }
 
 // markSession records that ccc has embedded its stable marker in a session's
@@ -207,11 +234,12 @@ func launchSessionAgent(config *Config, sessName, prompt string) error {
 	// Embed the stable ccc marker in the opening prompt so the session stays
 	// re-identifiable across resumes (see cccMarker).
 	prompt = tagPrompt(prompt, info.TopicID)
-	shortID, err := dispatchAgent(agentDisplayName(info, sessName), workDir, prompt)
+	prof := ensureSessionProfile(config, sessName, info)
+	shortID, err := dispatchAgent(prof, agentDisplayName(info, sessName), workDir, prompt)
 	if err != nil {
 		return err
 	}
-	persistAgentIDs(sessName, shortID)
+	persistAgentIDs(prof, sessName, shortID)
 	markSession(sessName)
 	return nil
 }
@@ -237,20 +265,24 @@ func sendToSession(config *Config, sessName, text string) error {
 		prompt = tagPrompt(text, info.TopicID)
 	}
 
+	prof := ensureSessionProfile(config, sessName, info)
+
 	// No prior conversation → dispatch a fresh agent with this message.
 	if info.SessionID == "" {
-		short, err := dispatchAgent(agentDisplayName(info, sessName), workDir, prompt)
+		short, err := dispatchAgent(prof, agentDisplayName(info, sessName), workDir, prompt)
 		if err != nil {
 			return err
 		}
-		persistAgentIDs(sessName, short)
+		persistAgentIDs(prof, sessName, short)
 		markSession(sessName)
 		return nil
 	}
 
-	// Resume the existing conversation by its stable UUID. A still-resident bg
-	// agent (even idle) counts as "running", so stop it first before resuming.
-	agents, _ := listAgents(true)
+	// Resume the existing conversation by its stable UUID, under the session's
+	// own profile — the conversation only exists in that config dir. A
+	// still-resident bg agent (even idle) counts as "running", so stop it first
+	// before resuming.
+	agents, _ := listAgents(prof, true) // safe-ignore: attach falls back to plain claude when the fleet cannot be listed
 	stopShort := ""
 	if a, ok := agentBySessionID(agents, info.SessionID); ok {
 		stopShort = a.ID
@@ -265,7 +297,7 @@ func sendToSession(config *Config, sessName, text string) error {
 		}
 		return false
 	})
-	newShort, err := resumeAgent(stopShort, info.SessionID, agentDisplayName(info, sessName), workDir, prompt)
+	newShort, err := resumeAgent(prof, stopShort, info.SessionID, agentDisplayName(info, sessName), workDir, prompt)
 	if err != nil {
 		updateConfig(func(c *Config) bool {
 			if si := c.Sessions[sessName]; si != nil {
@@ -276,7 +308,7 @@ func sendToSession(config *Config, sessName, text string) error {
 		})
 		return err
 	}
-	persistAgentIDs(sessName, newShort)
+	persistAgentIDs(prof, sessName, newShort)
 	markSession(sessName)
 	return nil
 }
@@ -299,19 +331,22 @@ func startSession(continueSession bool) error {
 			}
 		}
 		if sessName != "" {
-			agents, _ := listAgents(true)
+			prof := profileFor(config, config.Sessions[sessName])
+			agents, _ := listAgents(prof, true) // safe-ignore: an unreadable fleet just means no live short id to resolve yet
 			if short := liveShortID(config, sessName, agents); short != "" {
-				fmt.Printf("Attaching to background session '%s' (%s)...\n", sessName, short)
-				return runClaude2("attach", short)
+				fmt.Printf("Attaching to background session '%s' (%s, profile %s)...\n", sessName, short, prof.Name)
+				return runClaude2(prof, "attach", short)
 			}
 		}
 	}
 
-	// No live bg session for this dir → normal interactive claude.
+	// No live bg session for this dir → normal interactive claude under the
+	// default profile.
+	prof := defaultProfile(config)
 	if continueSession {
-		return runClaude2("--continue")
+		return runClaude2(prof, "--continue")
 	}
-	return runClaude2()
+	return runClaude2(prof)
 }
 
 // startDetached creates a Telegram topic + bg agent for a session and sends an
@@ -354,9 +389,12 @@ func ensureTopic(config *Config, name string) (int64, error) {
 	return createForumTopic(config, name)
 }
 
-// runClaude2 execs the claude binary interactively, inheriting stdio.
-func runClaude2(args ...string) error {
+// runClaude2 execs the claude binary interactively, inheriting stdio but NOT
+// the environment: the profile's scrubbed env decides which account (and which
+// fleet) the terminal attaches to. See envWhitelist.
+func runClaude2(p Profile, args ...string) error {
 	cmd := exec.Command(claudeBin(), args...)
+	cmd.Env = claudeEnv(p)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

@@ -545,6 +545,8 @@ func setBotCommands(botToken string) {
 		{"command": "delete", "description": "Delete current session and thread"},
 		{"command": "cleanup", "description": "Delete ALL sessions and threads"},
 		{"command": "list", "description": "List sessions and their status"},
+		{"command": "profiles", "description": "List Claude accounts (profiles) and usage"},
+		{"command": "profile", "description": "Pin this topic to a profile: /profile <name>"},
 		{"command": "c", "description": "Execute shell command: /c <cmd>"},
 		{"command": "update", "description": "Update ccc binary from GitHub"},
 		{"command": "version", "description": "Show ccc version"},

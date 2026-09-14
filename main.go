@@ -21,6 +21,13 @@ type SessionInfo struct {
 	Title     string `json:"title,omitempty"`      // current Telegram topic title (mirrors the agent's name)
 	Marked    bool   `json:"marked,omitempty"`     // ccc has embedded its stable marker (cccMarker) in this conversation
 
+	// Profile is the Claude account (CLAUDE_CONFIG_DIR) this session runs
+	// under. Empty means the default profile, which keeps configs written
+	// before multi-profile support valid with no migration. A session never
+	// changes profile once it has a SessionID: its transcript, job state and
+	// daemon all live inside that profile's config dir.
+	Profile string `json:"profile,omitempty"`
+
 	// OldSessionIDs are the conversation UUIDs this session used before its most
 	// recent resume(s). A resume mints a brand-new UUID with no server-side link
 	// to its parent, which lingers in `claude agents --all` as a pid-less "done"
@@ -42,6 +49,8 @@ type Config struct {
 	ProjectsDir      string                  `json:"projects_dir,omitempty"`      // Base directory for new projects (default: ~)
 	TranscriptionLang string                  `json:"transcription_lang,omitempty"` // Language code for whisper (e.g. "es", "en")
 	RelayURL         string                  `json:"relay_url,omitempty"`         // Relay server URL for large file transfers
+	Profiles         map[string]*Profile     `json:"profiles,omitempty"`         // profile name -> Claude account (CLAUDE_CONFIG_DIR)
+	DefaultProfile   string                  `json:"default_profile,omitempty"`  // profile new sessions use when none is picked
 	Away             bool                    `json:"away"`
 	OAuthToken       string                  `json:"oauth_token,omitempty"`
 	OTPSecret        string                  `json:"otp_secret,omitempty"`        // TOTP secret for safe mode
@@ -175,6 +184,7 @@ type InlineKeyboardButton struct {
 }
 
 func init() {
+	initProfiles()
 	initPaths()
 }
 
@@ -220,6 +230,12 @@ func main() {
 
 	case "doctor":
 		doctor()
+
+	case "profile":
+		if err := profileCommand(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 
 	case "config":
 		config, err := loadConfig()

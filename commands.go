@@ -109,11 +109,17 @@ func getSystemStats() string {
 		}
 	}
 
-	// Background agents (the ccc fleet)
-	if agents, err := listAgents(false); err == nil && len(agents) > 0 {
-		sb.WriteString(fmt.Sprintf("\n🤖 Background agents: %d\n", len(agents)))
-		for _, a := range agents {
-			sb.WriteString(fmt.Sprintf("• %s (%s)\n", topicTitleFor(&a), a.State))
+	// Background agents (the ccc fleet), per profile — the fleet is scoped to a
+	// config dir, so each account has to be asked separately.
+	statsConfig, _ := loadConfig() // safe-ignore: stats degrade to the implicit profile when there is no config
+	for _, prof := range listProfiles(statsConfig) {
+		agents, err := listAgents(prof, false)
+		if err != nil || len(agents) == 0 {
+			continue
+		}
+		sb.WriteString(fmt.Sprintf("\n🤖 Background agents (%s): %d\n", prof.Name, len(agents)))
+		for i := range agents {
+			sb.WriteString(fmt.Sprintf("• %s (%s)\n", topicTitleFor(prof, &agents[i]), agents[i].State))
 		}
 	}
 
@@ -183,6 +189,10 @@ func runClaude(prompt string) (string, error) {
 	}
 	cmd := exec.CommandContext(ctx, claudePath, "--dangerously-skip-permissions", "-p", prompt)
 	cmd.Dir = workDir
+	// Scrubbed env (see envWhitelist): a `claude` inheriting ccc's parent
+	// environment can authenticate as a different account entirely.
+	cfg, _ := loadConfig() // safe-ignore: falls back to the implicit profile when unconfigured
+	cmd.Env = claudeEnv(defaultProfile(cfg))
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -435,13 +445,8 @@ func doctor() {
 		allGood = false
 	}
 
-	// Check background-agent support (claude agents)
-	fmt.Print("claude agents..... ")
-	if _, err := listAgents(true); err == nil {
-		fmt.Println("✅ background agents available")
-	} else {
-		fmt.Printf("❌ %v\n", err)
-		fmt.Println("   Update Claude Code: it must support `claude --bg` / `claude agents`")
+	// Check background-agent support (claude agents) for every profile.
+	if !doctorProfiles() {
 		allGood = false
 	}
 
@@ -834,6 +839,50 @@ func listen() error {
 				continue
 			}
 
+			// /profiles — the same table as `ccc profile list` (without the slow
+			// per-profile login probe).
+			if text == "/profiles" {
+				config, _ = loadConfig()
+				_ = sendMessage(config, chatID, threadID, "```\n"+renderProfileTable(config, false)+"```") // safe-ignore: Telegram reply is best-effort; a delivery failure is already logged by the client
+				continue
+			}
+
+			// /profile <name> — pin THIS topic's session to a profile. Only
+			// possible before the session has a conversation: a session's
+			// transcript, job state and daemon all live in one config dir, so a
+			// live conversation cannot move.
+			if strings.HasPrefix(text, "/profile") && text != "/profiles" && isGroup && threadID > 0 {
+				config, _ = loadConfig()
+				name := strings.TrimSpace(strings.TrimPrefix(text, "/profile"))
+				sessName := getSessionByTopic(config, threadID)
+				if sessName == "" {
+					sendMessage(config, chatID, threadID, "❌ No session mapped to this topic.")
+					continue
+				}
+				if name == "" {
+					_ = sendMessage(config, chatID, threadID, fmt.Sprintf("This session runs on profile *%s*.\nUsage: /profile <name> (only before the first message).", profileFor(config, config.Sessions[sessName]).Name)) // safe-ignore: Telegram reply is best-effort; a delivery failure is already logged by the client
+					continue
+				}
+				if _, ok := profileByName(config, name); !ok {
+					_ = sendMessage(config, chatID, threadID, fmt.Sprintf("❌ No such profile: %s. See /profiles.", name)) // safe-ignore: Telegram reply is best-effort; a delivery failure is already logged by the client
+					continue
+				}
+				if info := config.Sessions[sessName]; info != nil && info.SessionID != "" {
+					_ = sendMessage(config, chatID, threadID, "❌ This session already has a live conversation — it cannot change profile.\nStart a fresh one with /new, or reset this topic with /new (no prompt).") // safe-ignore: Telegram reply is best-effort; a delivery failure is already logged by the client
+					continue
+				}
+				updateConfig(func(c *Config) bool {
+					si := c.Sessions[sessName]
+					if si == nil {
+						return false
+					}
+					si.Profile = name
+					return true
+				})
+				_ = sendMessage(config, chatID, threadID, fmt.Sprintf("✅ Next dispatch for '%s' will run on profile *%s*.", sessName, name)) // safe-ignore: Telegram reply is best-effort; a delivery failure is already logged by the client
+				continue
+			}
+
 			// /new <prompt> — create a topic and start an agent on that prompt
 			// /new (in topic) — reset the conversation (fresh context next message)
 			if strings.HasPrefix(text, "/new") && isGroup {
@@ -888,9 +937,10 @@ func listen() error {
 					sendMessage(config, chatID, threadID, "❌ No session mapped to this topic.")
 					continue
 				}
-				agents, _ := listAgents(true)
+				prof := profileFor(config, config.Sessions[sessName])
+				agents, _ := listAgents(prof, true) // safe-ignore: an unreadable fleet is treated as "nothing running" for this command
 				if short := liveShortID(config, sessName, agents); short != "" {
-					stopAgent(short)
+					stopAgent(prof, short) // safe-ignore: best-effort; the reply below is about intent, and the poller reconciles state
 					sendMessage(config, chatID, threadID, fmt.Sprintf("⏹️ Stopped '%s' (conversation kept — send a message to resume).", sessName))
 				} else {
 					sendMessage(config, chatID, threadID, "Nothing running.")
@@ -903,12 +953,13 @@ func listen() error {
 				config, _ = loadConfig()
 				sessName := getSessionByTopic(config, threadID)
 				if sessName == "" {
-					sendMessage(config, chatID, threadID, "❌ No session mapped to this topic.")
+					_ = sendMessage(config, chatID, threadID, "❌ No session mapped to this topic.") // safe-ignore: Telegram reply is best-effort; a delivery failure is already logged by the client
 					continue
 				}
-				agents, _ := listAgents(true)
+				prof := profileFor(config, config.Sessions[sessName])
+				agents, _ := listAgents(prof, true) // safe-ignore: an unreadable fleet is treated as "nothing running" for this command
 				if short := liveShortID(config, sessName, agents); short != "" {
-					stopAgent(short)
+					stopAgent(prof, short) // safe-ignore: best-effort; the entry and topic are removed regardless
 				}
 				var topicID int64
 				updateConfig(func(c *Config) bool {
@@ -927,16 +978,17 @@ func listen() error {
 
 			// /cleanup — stop all agents, delete all topics, clear config
 			if text == "/cleanup" {
-				config, _ = loadConfig()
+				config, _ = loadConfig() // safe-ignore: a stale in-memory config is acceptable for a read-only reply
 				if len(config.Sessions) == 0 {
 					sendMessage(config, chatID, threadID, "No sessions to clean up.")
 					continue
 				}
-				agents, _ := listAgents(true)
+				snaps := snapshotAllProfiles(config)
 				var cleaned []string
 				for sessName, info := range config.Sessions {
-					if short := liveShortID(config, sessName, agents); short != "" {
-						stopAgent(short)
+					prof := profileFor(config, info)
+					if short := liveShortID(config, sessName, snaps[prof.Name].Agents); short != "" {
+						stopAgent(prof, short) // safe-ignore: best-effort; every entry and topic is removed regardless
 					}
 					if info.TopicID > 0 && config.GroupID > 0 {
 						deleteForumTopic(config, info.TopicID)
@@ -954,7 +1006,7 @@ func listen() error {
 
 			// --- Topic message → deliver to the session's bg agent ---
 			if isGroup && threadID > 0 {
-				config, _ = loadConfig()
+				config, _ = loadConfig() // safe-ignore: a stale in-memory config is acceptable for a read-only reply
 				sessName := getSessionByTopic(config, threadID)
 				if sessName == "" {
 					sendMessage(config, chatID, threadID, "⚠️ No session linked to this topic. Use /new <prompt>.")
@@ -1003,6 +1055,12 @@ func deliverToSession(config *Config, sessName string, chatID, threadID int64, t
 		defer func() { recover() }()
 		if err := sendToSession(config, sessName, text); err != nil {
 			listenLog("deliver to %s failed: %v", sessName, err)
+			// The bypass-permissions disclaimer gate is actionable, not a bug:
+			// show the exact command instead of a generic failure.
+			if isDisclaimerRefusal(err) {
+				_ = sendMessage(config, chatID, threadID, fmt.Sprintf("🚫 %v", err)) // safe-ignore: Telegram reply is best-effort; a delivery failure is already logged by the client
+				return
+			}
 			sendMessage(config, chatID, threadID, fmt.Sprintf("❌ Failed to send: %v", err))
 		}
 	}()
@@ -1011,9 +1069,10 @@ func deliverToSession(config *Config, sessName string, chatID, threadID int64, t
 // resetSession stops the running agent and clears the stored ids so the next
 // message starts a brand-new conversation for this session.
 func resetSession(config *Config, sessName string) {
-	agents, _ := listAgents(true)
+	prof := profileFor(config, config.Sessions[sessName])
+	agents, _ := listAgents(prof, true) // safe-ignore: an unreadable fleet is treated as "nothing running" for this command
 	if short := liveShortID(config, sessName, agents); short != "" {
-		stopAgent(short)
+		stopAgent(prof, short) // safe-ignore: best-effort; the conversation ids are cleared regardless
 	}
 	var topicID int64
 	updateConfig(func(c *Config) bool {
@@ -1025,6 +1084,8 @@ func resetSession(config *Config, sessName string) {
 		info.SessionID = ""
 		info.ShortID = ""
 		info.ResumingAt = 0
+		// The next message picks a profile afresh (the old conversation is gone).
+		info.Profile = ""
 		return true
 	})
 	if topicID != 0 {
@@ -1073,15 +1134,21 @@ func formatSessionList(config *Config) string {
 	if len(config.Sessions) == 0 {
 		return "No sessions. Create one with /new <prompt>."
 	}
-	agents, _ := listAgents(true)
+	snaps := snapshotAllProfiles(config)
+	multi := len(listProfiles(config)) > 1
 	var sb strings.Builder
 	sb.WriteString("*Sessions:*\n")
 	for name, info := range config.Sessions {
+		prof := profileFor(config, info)
 		status := "idle"
-		if a, ok := agentBySessionID(agents, info.SessionID); ok {
+		if a, ok := agentBySessionID(snaps[prof.Name].Agents, info.SessionID); ok {
 			status = classifyState(a.State, a.Status)
 		}
-		sb.WriteString(fmt.Sprintf("• %s — %s\n", name, status))
+		if multi {
+			sb.WriteString(fmt.Sprintf("• %s — %s [%s]\n", name, status, prof.Name))
+		} else {
+			sb.WriteString(fmt.Sprintf("• %s — %s\n", name, status))
+		}
 	}
 	return sb.String()
 }
@@ -1100,6 +1167,7 @@ USAGE:
 COMMANDS:
     setup <token>           Complete setup (bot + skill + service)
     doctor                  Check dependencies and configuration
+    profile <cmd>           Manage Claude accounts (list/add/remove/default/login)
     config                  Show/set configuration values
     setgroup                Configure Telegram group for topics
     listen                  Start the Telegram bot listener manually
@@ -1114,6 +1182,8 @@ TELEGRAM COMMANDS:
     /delete                 Delete this session + topic
     /cleanup                Delete all sessions + topics
     /list                   List sessions and their status
+    /profiles               List Claude profiles (accounts) and their usage
+    /profile <name>         Pin this topic's next dispatch to a profile
     /c <cmd>                Execute a shell command
     /stats                  System stats
     /update                 Update ccc from GitHub

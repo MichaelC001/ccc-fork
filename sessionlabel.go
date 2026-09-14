@@ -13,21 +13,22 @@ import (
 // and <uuid>.cwd (captured project dir). Everything degrades gracefully when
 // the files/dir don't exist.
 
-// sessionNamesDir returns ~/.claude/session-names.
-func sessionNamesDir() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".claude", "session-names")
+// sessionNamesDir returns <config_dir>/session-names for a profile. Like every
+// other on-disk Claude state, the labels live inside the profile that owns the
+// conversation.
+func sessionNamesDir(p Profile) string {
+	return filepath.Join(claudeHome(p), "session-names")
 }
 
 // sessionLabel returns the human label for a conversation UUID: the contents of
 // <uuid> (the manual label) else <uuid>.autolabel (the heuristic fallback), with
 // whitespace collapsed. Returns "" when the uuid is empty or no non-blank label
 // file exists.
-func sessionLabel(uuid string) string {
+func sessionLabel(p Profile, uuid string) string {
 	if uuid == "" {
 		return ""
 	}
-	dir := sessionNamesDir()
+	dir := sessionNamesDir(p)
 	for _, name := range []string{uuid, uuid + ".autolabel"} {
 		data, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
@@ -45,11 +46,11 @@ func sessionLabel(uuid string) string {
 // UUID, orphaning the labels; copying keeps the fleet title and topic title
 // stable across resumes. No-op when either uuid is empty, they're equal, or the
 // old file is missing/blank.
-func carrySessionLabel(oldUUID, newUUID string) {
+func carrySessionLabel(p Profile, oldUUID, newUUID string) {
 	if oldUUID == "" || newUUID == "" || oldUUID == newUUID {
 		return
 	}
-	dir := sessionNamesDir()
+	dir := sessionNamesDir(p)
 	for _, suffix := range []string{"", ".autolabel", ".cwd"} {
 		data, err := os.ReadFile(filepath.Join(dir, oldUUID+suffix))
 		if err != nil || len(strings.TrimSpace(string(data))) == 0 {

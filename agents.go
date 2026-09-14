@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -40,6 +42,7 @@ type AgentInfo struct {
 type jobState struct {
 	State        string `json:"state"`
 	Detail       string `json:"detail"`
+	Needs        string `json:"needs"`
 	Tempo        string `json:"tempo"`
 	SessionID    string `json:"sessionId"`
 	LinkScanPath string `json:"linkScanPath"`
@@ -63,22 +66,84 @@ func claudeBin() string {
 	return "claude"
 }
 
-// listAgents returns the current fleet snapshot. includeDone controls --all.
-func listAgents(includeDone bool) ([]AgentInfo, error) {
+// runClaudeJSON runs a read-only `claude` subcommand under a profile's scrubbed
+// environment and returns its stdout. Every claude exec in ccc goes through
+// claudeEnv — see envWhitelist for why inheriting os.Environ() is unsafe.
+func runClaudeJSON(p Profile, timeout time.Duration, args ...string) ([]byte, error) {
+	out, err := runClaudeOutput(p, timeout, args...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// runClaudeOutput is runClaudeJSON's underlying form: it hands back stdout even
+// when the command exits non-zero, because some claude subcommands report state
+// through the exit code while still printing valid JSON (`auth status --json`
+// exits 1 for a logged-out config dir). Callers that can read the payload
+// should prefer it over the error.
+func runClaudeOutput(p Profile, timeout time.Duration, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, claudeBin(), args...)
+	cmd.Env = claudeEnv(p)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = strings.TrimSpace(stdout.String())
+		}
+		return stdout.Bytes(), fmt.Errorf("claude %s failed: %w (%s)", strings.Join(args, " "), err, truncate(msg, 300))
+	}
+	return stdout.Bytes(), nil
+}
+
+// listAgents returns the fleet snapshot for one profile. includeDone controls
+// --all. The fleet is per config dir: a profile only ever sees its own
+// sessions, and a config dir that has never been used returns [].
+//
+// `claude agents` without a TTY refuses unless --json, which is the documented
+// stable interface (unlike the job state files).
+func listAgents(p Profile, includeDone bool) ([]AgentInfo, error) {
 	args := []string{"agents", "--json"}
 	if includeDone {
 		args = append(args, "--all")
 	}
-	cmd := exec.Command(claudeBin(), args...)
-	out, err := cmd.Output()
+	out, err := runClaudeJSON(p, 30*time.Second, args...)
 	if err != nil {
-		return nil, fmt.Errorf("claude agents --json failed: %w", err)
+		return nil, err
 	}
 	var agents []AgentInfo
 	if err := json.Unmarshal(out, &agents); err != nil {
 		return nil, fmt.Errorf("cannot parse agents json: %w", err)
 	}
 	return agents, nil
+}
+
+// profileSnapshot is one profile's fleet listing for a single poll tick. OK
+// distinguishes "this profile has no sessions" from "we could not ask" — the
+// difference between a session that was dismissed and one whose daemon was
+// briefly unreachable, i.e. between reaping a topic and leaving it alone.
+type profileSnapshot struct {
+	Agents []AgentInfo
+	OK     bool
+}
+
+// snapshotAllProfiles lists every profile's fleet, keyed by profile name. A
+// failure for one profile never hides the others: its entry is simply !OK.
+func snapshotAllProfiles(config *Config) map[string]profileSnapshot {
+	snaps := map[string]profileSnapshot{}
+	for _, p := range listProfiles(config) {
+		agents, err := listAgents(p, true)
+		if err != nil {
+			snaps[p.Name] = profileSnapshot{OK: false}
+			continue
+		}
+		snaps[p.Name] = profileSnapshot{Agents: agents, OK: true}
+	}
+	return snaps
 }
 
 // agentByID finds an agent by its short daemon id.
@@ -160,8 +225,8 @@ func dispatchArgs(name, resumeID, prompt string) []string {
 
 // dispatchAgent starts a new background Claude session in workDir with an
 // initial prompt. Returns the short daemon id.
-func dispatchAgent(name, workDir, prompt string) (string, error) {
-	return runDispatch(name, workDir, "", prompt)
+func dispatchAgent(p Profile, name, workDir, prompt string) (string, error) {
+	return runDispatch(p, name, workDir, "", prompt)
 }
 
 // resumeAgent sends a follow-up message to an existing conversation. Because
@@ -177,21 +242,21 @@ func dispatchAgent(name, workDir, prompt string) (string, error) {
 // It waits for the previous session to fully stop before resuming: dispatching
 // --resume while the old worker is still alive makes claude report "<id> is
 // currently running as a background agent" and the worker crashes/respawns.
-func resumeAgent(stopShortID, resumeID, name, workDir, prompt string) (string, error) {
+func resumeAgent(p Profile, stopShortID, resumeID, name, workDir, prompt string) (string, error) {
 	if stopShortID != "" {
-		stopAgent(stopShortID)
-		waitAgentStopped(stopShortID, 8*time.Second)
+		_ = stopAgent(p, stopShortID) // safe-ignore: best-effort stop before relaunch; a failure surfaces on the resume itself
+		waitAgentStopped(p, stopShortID, 8*time.Second)
 	}
-	return runDispatch(name, workDir, resumeID, prompt)
+	return runDispatch(p, name, workDir, resumeID, prompt)
 }
 
 // waitAgentStopped blocks until the given short id is no longer actively
 // running (gone from the fleet, or settled to a terminal state), so a
 // subsequent --resume does not race the still-alive worker.
-func waitAgentStopped(shortID string, timeout time.Duration) {
+func waitAgentStopped(p Profile, shortID string, timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
 	for {
-		agents, err := listAgents(true)
+		agents, err := listAgents(p, true)
 		if err == nil {
 			a, ok := agentByID(agents, shortID)
 			if !ok {
@@ -209,37 +274,46 @@ func waitAgentStopped(shortID string, timeout time.Duration) {
 	}
 }
 
-func runDispatch(name, workDir, resumeID, prompt string) (string, error) {
+func runDispatch(p Profile, name, workDir, resumeID, prompt string) (string, error) {
 	cmd := exec.Command(claudeBin(), dispatchArgs(name, resumeID, prompt)...)
 	if workDir != "" {
 		cmd.Dir = workDir
 	}
-	cmd.Env = os.Environ()
+	cmd.Env = claudeEnv(p)
 	out, err := cmd.CombinedOutput()
+	clean := strings.TrimSpace(ansiRe.ReplaceAllString(string(out), ""))
+	// The bypass-permissions disclaimer must be accepted once per config dir or
+	// --bg refuses to launch. Surface the actionable instruction: the caller
+	// reports it to the topic instead of failing with an opaque exit code.
+	if strings.Contains(clean, "requires accepting the disclaimer") {
+		return "", fmt.Errorf("profile %q: %s %s", p.Name, bypassDisclaimerMsg, bypassDisclaimerHint(p))
+	}
 	if err != nil {
-		return "", fmt.Errorf("claude --bg failed: %v (%s)", err, strings.TrimSpace(string(out)))
+		return "", fmt.Errorf("claude --bg failed: %w (%s)", err, clean)
 	}
 	shortID := parseBgShortID(string(out))
 	if shortID == "" {
-		return "", fmt.Errorf("could not parse background session id from: %s", strings.TrimSpace(ansiRe.ReplaceAllString(string(out), "")))
+		return "", fmt.Errorf("could not parse background session id from: %s", clean)
 	}
 	return shortID, nil
 }
 
 // stopAgent stops a background session (its conversation is kept).
-func stopAgent(shortID string) error {
+func stopAgent(p Profile, shortID string) error {
 	if shortID == "" {
 		return nil
 	}
-	return exec.Command(claudeBin(), "stop", shortID).Run()
+	cmd := exec.Command(claudeBin(), "stop", shortID)
+	cmd.Env = claudeEnv(p)
+	return cmd.Run()
 }
 
 // resolveSessionUUID resolves the full conversation UUID for a short id by
 // polling the fleet snapshot (the job state file is not populated immediately).
-func resolveSessionUUID(shortID string, timeout time.Duration) string {
+func resolveSessionUUID(p Profile, shortID string, timeout time.Duration) string {
 	deadline := time.Now().Add(timeout)
 	for {
-		if agents, err := listAgents(true); err == nil {
+		if agents, err := listAgents(p, true); err == nil {
 			if a, ok := agentByID(agents, shortID); ok && a.SessionID != "" {
 				return a.SessionID
 			}
@@ -251,13 +325,15 @@ func resolveSessionUUID(shortID string, timeout time.Duration) string {
 	}
 }
 
-// readJobState reads ~/.claude/jobs/<shortID>/state.json (best effort).
-func readJobState(shortID string) *jobState {
+// readJobState reads <config_dir>/jobs/<shortID>/state.json (best effort).
+// This file is explicitly NOT a stable interface — `claude agents --json` is.
+// Keep it as a fallback only, for the detail/needs strings the JSON listing
+// does not carry.
+func readJobState(p Profile, shortID string) *jobState {
 	if shortID == "" {
 		return nil
 	}
-	home, _ := os.UserHomeDir()
-	data, err := os.ReadFile(filepath.Join(home, ".claude", "jobs", shortID, "state.json"))
+	data, err := os.ReadFile(filepath.Join(profileJobsDir(p), shortID, "state.json"))
 	if err != nil {
 		return nil
 	}
@@ -273,13 +349,15 @@ func readJobState(shortID string) *jobState {
 	return &js
 }
 
-// transcriptPathForUUID locates the JSONL transcript for a conversation UUID.
-func transcriptPathForUUID(uuid string) string {
+// transcriptPathForUUID locates the JSONL transcript for a conversation UUID
+// inside a profile: <config_dir>/projects/<cwd-slug>/<uuid>.jsonl. Since
+// 2.1.259 there is also a sidecar DIRECTORY <uuid>/ next to each file, so the
+// glob must stay anchored on the .jsonl suffix.
+func transcriptPathForUUID(p Profile, uuid string) string {
 	if uuid == "" {
 		return ""
 	}
-	home, _ := os.UserHomeDir()
-	matches, _ := filepath.Glob(filepath.Join(home, ".claude", "projects", "*", uuid+".jsonl"))
+	matches, _ := filepath.Glob(filepath.Join(profileProjectsDir(p), "*", uuid+".jsonl")) // safe-ignore: Glob only fails on a malformed pattern; ours is built from a UUID
 	if len(matches) > 0 {
 		return matches[0]
 	}
@@ -307,7 +385,7 @@ func transcriptTopicMarker(transcriptPath string) int64 {
 		return 0
 	}
 	var id int64
-	fmt.Sscanf(string(ms[len(ms)-1][1]), "%d", &id)
+	_, _ = fmt.Sscanf(string(ms[len(ms)-1][1]), "%d", &id) // safe-ignore: the regex already guarantees digits; id stays 0 on failure
 	return id
 }
 
