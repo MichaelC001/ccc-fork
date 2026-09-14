@@ -3,16 +3,17 @@ module github.com/kidandcat/ccc
 go 1.25.0
 
 require (
+	github.com/creack/pty v1.1.24
 	github.com/glebarez/sqlite v1.11.0
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/mutablelogic/go-whisper v0.0.39
+	github.com/robfig/cron/v3 v3.0.1
 	gorm.io/gorm v1.31.2
 )
 
 require (
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/creack/pty v1.1.24 // indirect
 	github.com/djthorpe/go-errors v1.0.3 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/glebarez/go-sqlite v1.21.2 // indirect
@@ -28,7 +29,6 @@ require (
 	github.com/mutablelogic/go-media v1.8.3 // indirect
 	github.com/mutablelogic/go-server v1.5.18 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	github.com/robfig/cron/v3 v3.0.1 // indirect
 	github.com/segmentio/asm v1.1.3 // indirect
 	github.com/segmentio/encoding v0.5.4 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect

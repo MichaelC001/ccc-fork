@@ -144,6 +144,9 @@ func (f *fakeRunner) last() (fakeTurn, bool) {
 // testInstance wires an instance against a temp database and the fake API.
 func testInstance(t *testing.T) (*instance, *fakeRunner, *fakeBotAPI) {
 	t.Helper()
+	// Commands that write the configuration (/model, /setgroup, /account) go
+	// through loadConfig/saveConfig, so the tests get their own HOME.
+	t.Setenv("HOME", t.TempDir())
 	api := newFakeBotAPI(t)
 	dir := t.TempDir()
 	cfg := &Config{BotToken: "TESTTOKEN", ChatID: 42, GroupID: -100777, DataDir: dir}

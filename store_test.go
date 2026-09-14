@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func testDB(t *testing.T) (*instance, *Bot) {
@@ -247,4 +249,15 @@ func TestSanitizeFileNameStripsTraversal(t *testing.T) {
 			t.Errorf("sanitizeFileName(%q) = %q", in, got)
 		}
 	}
+}
+
+// toolText extracts the text of a single-block tool result.
+func toolText(res *mcp.CallToolResult) string {
+	var sb strings.Builder
+	for _, c := range res.Content {
+		if tc, ok := c.(*mcp.TextContent); ok {
+			sb.WriteString(tc.Text)
+		}
+	}
+	return sb.String()
 }
