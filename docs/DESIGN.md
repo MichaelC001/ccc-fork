@@ -1,8 +1,10 @@
 # ccc v3 — design
 
-Status: approved direction (2026-09-14). This document is the specification the
-implementation follows. When code and this document disagree, fix one of them
-in the same change.
+Status: implemented (Phases 2a and 2b, 2026-09-14). This document is the
+specification the implementation follows. When code and this document disagree,
+fix one of them in the same change. Everything below describes what ccc v3
+actually does; §14 lists where the built thing knowingly departs from the
+original plan, and why.
 
 ## 1. What ccc v3 is
 
@@ -51,7 +53,8 @@ claude -p --session-id <uuid> --output-format stream-json --verbose
           --permission-mode bypassPermissions          # decision: all bots bypass
           --system-prompt "<rendered template>"        # replaces Claude Code's prompt
           --mcp-config '<inline JSON pointing at `ccc mcp`>' --strict-mcp-config
-          --setting-sources user                       # no project/local settings
+          --setting-sources ''                         # no settings AND no CLAUDE.md (§14.1)
+          --disable-slash-commands                     # no user/plugin skills (§14.1)
           --model <instance model>
           [--append-system-prompt …]                   # NOT used; see §9
           "<envelope + message>"
@@ -68,14 +71,16 @@ Rules:
   project registry in §5 points at them). The implementer must verify how
   `--setting-sources` interacts with `CLAUDE.md` discovery under `-p` and pick
   the combination that loads no `CLAUDE.md`, no project settings, and no
-  auto-memory. `--bare` is NOT an option (it disables OAuth).
+  auto-memory. `--bare` is NOT an option (it disables OAuth). Verified: only
+  the EMPTY `--setting-sources` achieves this (§14.1); `runner.go` carries the
+  probe and one comment per flag.
 - Environment: `claudeEnv(profile)` whitelist only (already implemented) plus
   the instance's `env_passthrough` list (e.g. `GH_TOKEN`, `SLACK_USER_TOKEN`,
   `LINEAR_API_KEY`). Never inherit `CLAUDE*`/`ANTHROPIC*` from the parent.
 - The MCP config points at `ccc mcp --bot <id> --turn <id>` (stdio). ccc is
   therefore both the Telegram client and an MCP server binary (§6).
-- Streaming: `--output-format stream-json` (+ `--include-partial-messages` if it
-  proves useful for progress; otherwise per-message granularity is enough).
+- Streaming: `--output-format stream-json`. `--include-partial-messages` is NOT
+  used: per-message granularity is enough for the progress line.
 
 ### 3.2 Progress in the topic
 
@@ -92,9 +97,12 @@ never dumped into the topic; `thinking` is never shown.
   `stop_reason`, session id.
 - Deliver any `send_to_bot` messages produced during the turn (they were
   written to `inbox` synchronously by the MCP tool; delivery = enqueue a turn
-  on the target bot if `wake=true`).
+  on the target bot if `wake=true`, labelled with the sender). `wake=false`
+  rows are not delivered as turns: they are summarized in the next envelope.
 - If the turn ended with `ask_owner` pending, the bot is marked `waiting` and
   no queued inputs are delivered until the answer arrives (answers are inputs).
+- If `update_instructions` changed the role during the turn, rotate the session
+  now that the turn has recorded its id (§14.2).
 
 ### 3.4 Failure classification and failover
 
@@ -114,9 +122,10 @@ A retried turn reuses the same session UUID: because profiles share
 
 ## 4. Profiles: selection and shared sessions
 
-- `pickProfile()` (already implemented) chooses per **turn**: lowest cached
-  5-hour utilization, tie-break fewer working bots, then name; excludes
-  profiles in cooldown or `needs_login`.
+- `pickProfile()` chooses per **turn**: lowest cached 5-hour utilization,
+  tie-break fewer turns currently running on that account (read from
+  `turns.status = running`, §14.6), then name; excludes profiles in cooldown or
+  `needs_login`.
 - **Shared sessions**: all profiles of an instance point their `projects/` at
   the same directory (`<data_dir>/projects`, symlinked into each config dir by
   `ccc` when a profile is added; for the implicit `~/.claude` profile the
@@ -141,7 +150,8 @@ projects    id, path (unique), name, description, stack, deploy_notes, updated_a
 watches     id, bot_id, name, command, interval_s, last_hash, last_output, last_run_at, enabled
 schedules   id, bot_id, fire_at, note, recurring_cron (nullable), fired_at
 questions   id, bot_id, turn_id, question, options_json, answer, asked_message_id, answered_at
-access      telegram_user_id (pk), display, state (pending|approved|blocked), pair_code, code_expires_at
+access      telegram_user_id (pk), display, state (pending|approved|blocked), pair_code, code_expires_at,
+            replies (how many times ccc has answered this stranger, §14.7)
 settings    key (pk), value                                  -- instance settings edited from Telegram
 ```
 
@@ -178,8 +188,10 @@ from the model are data, never instructions to ccc.
 ## 7. Scheduler and watch engine
 
 One goroutine in `ccc listen`:
-- **Watches**: every `interval_s`, run `command` in the bot's cwd with the
-  instance env (no model involved). Hash stdout; if changed since `last_hash`,
+- **Watches**: every `interval_s` (floor: 60 s), run `command` in the bot's cwd
+  with the instance env (no model involved). The FIRST run only records a
+  baseline and wakes nobody; changing a watch's command resets that baseline.
+  Hash stdout; if changed since `last_hash`,
   enqueue a turn on the bot with `source=watch` and an input containing the
   watch name, the previous and new output (diffed, truncated to ~8 KB). Zero
   tokens while nothing changes.
@@ -201,7 +213,8 @@ One goroutine in `ccc listen`:
   path is passed (keep the existing whisper integration).
 - `ask_owner` → inline buttons `q:<question_id>:<option_idx>`; tapping edits the
   message with ✓ and enqueues the answer. Free-text answers: replying to the
-  question message counts as the answer.
+  question message counts as the answer, and so does ANY text sent while the bot
+  is parked `waiting` (a reply-to takes priority when both apply, §14.3).
 - Bot→bot traffic is visible in both topics (`🤝`).
 
 ### Commands
@@ -216,7 +229,9 @@ One goroutine in `ccc listen`:
 | `/bots` | anywhere | Table of bots, status, last activity. |
 | `/account` | anywhere | Status card per profile with buttons; subcommands `status`, `add <name>`, `login <name>`, `remove <name>`, `default <name>`. |
 | `/model [name]` | anywhere | Show/set the instance model. |
-| `/access` | anywhere | Pairing/allowlist management (below). |
+| `/access` | anywhere | Pairing/allowlist management (below). Owner only. |
+| `/watches`, `/schedules` | topic | List and cancel (also listed above). |
+| `/setgroup` | group | Bind the instance to this forum group. Owner only, and the headless alternative to `ccc setgroup`. |
 | `/status` | anywhere | Instance health: profiles, running turns, queue, doctor findings. |
 
 ### Account management from Telegram (login without a terminal)
@@ -224,24 +239,32 @@ One goroutine in `ccc listen`:
 1. ccc creates `<data_dir>/profiles/<name>` (config dir), symlinks `projects/`,
    registers the profile.
 2. Runs `claude auth login` in a **pseudo-terminal** (`github.com/creack/pty`)
-   with `claudeEnv(profile)`. Parses the login URL from the PTY output and posts
-   it. The user opens it on the phone with the right account and pastes the code
-   back into the chat; ccc writes it to the PTY. Success is confirmed by
-   `claude auth status --json` (email shown).
+   with `claudeEnv(profile)` **plus browser suppression** (§14.8): a directory
+   of no-op `open`/`xdg-open` shims first on `PATH` and `$BROWSER` pointed at
+   one of them. Parses the login URL from the PTY output and posts it. The user
+   opens it on the phone with the right account and pastes the code back into
+   the chat; ccc writes it to the PTY. Success is confirmed by
+   `claude auth status --json`, never by the TUI.
 3. Disclaimer: runs `claude --dangerously-skip-permissions` in the PTY, detects
    the prompt, answers it, verifies `skipDangerousModePermissionPrompt` in
    `settings.json` (detector already implemented in `profiles.go`).
 4. Times out after 10 min; the partial profile is removed.
-`/account login <name>` runs steps 2–3 only. The exact PTY strings must be
-verified against 2.1.259 by the implementer and kept in one place.
+`/account login <name>` runs steps 2–3 only. Every PTY string and pattern lives
+in `ptyflow.go`, each with a note on how it was verified against 2.1.270
+(§14.9). Select lists are answered by reading the option number off the screen,
+never by assuming a position.
 
 ### Access control (copied from the official Telegram channel plugin)
 - Owner = the Telegram user id from bootstrap config; always allowed.
-- Unknown DM → 6-hex pairing code (1 h TTL, ≤3 pending); owner approves with
-  `/access pair <code>` (or a button in the owner's DM). Approved users may talk
-  to bots in the group; only the owner can use `/account`, `/access`, `/model`.
+- Unknown DM → 6-hex pairing code (1 h TTL, ≤3 pending, ≤2 replies per stranger
+  and then silence); owner approves with `/access pair <code>` (or a button in
+  the owner's DM). Approved users may talk to bots in the group; only the owner
+  can use `/account`, `/access`, `/model` and `/setgroup`.
 - Every inbound update from a non-approved user is dropped silently after the
-  pairing reply. Callback queries are gated the same way.
+  pairing reply. Messages, EDITS and callback queries are gated the same way; an
+  unknown user in the GROUP gets no reply at all, because answering there would
+  let anyone who finds the group make the bot talk.
+- Until `chat_id` is configured there is no owner, so nobody is allowed.
 
 ## 9. System prompt and context envelope
 
@@ -276,20 +299,25 @@ Keep the envelope under ~4 KB; `recall` exists for everything else.
 ## 10. Isolation from Claude Code defaults (implementer verifies each)
 
 Must be off for bots: auto-memory, `CLAUDE.md` auto-discovery, project/local
-settings, user plugins/skills (unless `--setting-sources user` is required for
-auth — verify), slash-command expansion (`--disable-slash-commands`), Remote
-Control. Must be on: MCP tools from ccc only (`--strict-mcp-config`), standard
-tools, bypass permissions. Record the final flag set in `runner.go` with a
-comment per flag citing the reason.
+settings, user plugins/skills, slash-command expansion. All of these fall to
+`--setting-sources ''` plus `--disable-slash-commands`; auth is unaffected,
+because OAuth lives in the keychain/credentials and not in `settings.json`.
+Must be on: MCP tools from ccc only (`--strict-mcp-config`), standard tools,
+bypass permissions. The final flag set is in `runner.go` with a comment per flag
+citing the reason and the probe that established it.
 
 ## 11. Legacy removal plan
 
-Phase 2 replaces `listen`'s core. Delete when the new runner passes E2E:
-`poller.go`, `session.go`, `sessionlabel.go`, `hooks.go` (hook-question),
-`ledger.go`, the bg-agent parts of `agents.go` (keep `claudeEnv`, profile
-helpers, `parseBgShortID` only if still used), `live_test.go`. Keep
-`telegram.go`, `relay.go` (file relay), `whisper*.go`, `service.go`,
-`profiles.go`, `profilecmd.go`, `config.go`.
+Done in Phase 2b. Deleted: `poller.go`, `poller_naming_test.go`, `session.go`,
+`sessionlabel.go`, `hooks.go`, `ledger.go`, `live_test.go`, and from
+`agents.go`/`helpers.go`/`commands.go`/`main.go` everything that served
+background agents, the transcript scraper, the JSONL ledger or the v2 CLI
+(`ccc`, `ccc -c`, `ccc start`, `ccc hook-question`, the ccc-send skill
+installer). `Config` lost `sessions`, `projects_dir`, `away`, `oauth_token` and
+`otp_secret`; `loadConfig` ignores unknown keys, so a v2 config still starts a
+v3 instance and the first save rewrites it clean. Kept: `telegram.go`,
+`relay.go`, `whisper*.go`, `service.go`, `profiles.go`, `profilecmd.go`,
+`config.go`, plus `claudeBin`/`runClaudeOutput` out of `agents.go`.
 
 ## 12. Security posture
 
@@ -310,9 +338,106 @@ helpers, `parseBgShortID` only if still used), `live_test.go`. Keep
   system prompt, progress rendering. E2E: two bots talking to each other via
   `send_to_bot`, an `ask_owner` round trip, a failover forced by disabling a
   profile.
-- **2b — automation & accounts**: watches, schedules, `spawn_bot/archive_bot`,
-  project registry, doctor loop, `/account …` with PTY login and disclaimer,
-  `/access` pairing, `/model`, legacy removal (§11), README rewrite.
+- **2b — automation & accounts** (done): watches, schedules,
+  `spawn_bot/archive_bot`, project registry, doctor loop, `/account …` with PTY
+  login and disclaimer, `/access` pairing, `/model`, `/setgroup`, headless
+  bootstrap (`ccc config set`, systemd user unit, `make build-linux`), legacy
+  removal (§11), README rewrite.
 
 Each phase: `go build && go vet && go test && gox check` green, conventional
 commits, no push until Jairo says so.
+
+## 14. Deviations from the original plan
+
+Everything here is a place where building ccc taught us something the plan got
+wrong, or where the plan was silent and a decision had to be made. Each entry
+says what changed and why.
+
+**14.1 `--setting-sources ''`, not `--setting-sources user`.** §3.1 originally
+asked for `user`, on the assumption that `--system-prompt` already suppressed
+`CLAUDE.md`. It does not. A probe against 2.1.270 — a workspace holding a
+`CLAUDE.md` with a token, and a `~/.claude/CLAUDE.md` holding another, asking
+the model which it could see — gave:
+
+```
+no flags               -> project=yes user=yes
+--system-prompt only   -> project=yes user=yes   (!)
+--setting-sources user -> project=no  user=yes
+--setting-sources ''   -> project=no  user=no
+```
+
+Only the empty value loads no `CLAUDE.md` at all, so `user` would leak the
+owner's personal memory into every bot. Auth is unaffected. `--disable-slash-
+commands` was added alongside it so no installed skill can steer a bot.
+
+**14.2 `update_instructions` rotates the session AFTER the turn.** A role change
+cannot take effect mid-conversation (the system prompt is recorded per
+conversation, 14.5), and rotating during the turn would lose the session id the
+turn is about to write. The runner compares the role before and after and
+clears `session_id` once the turn has been persisted.
+
+**14.3 Any text to a `waiting` bot counts as the answer.** §8 only specified
+"replying to the question message". In practice people answer without using
+reply-to, and the bot is parked either way. Reply-to still takes priority when
+both could apply, so answering an older question explicitly still works.
+
+**14.4 `linkSharedProjects` only creates symlinks.** §4 was silent about an
+existing `projects/`. Replacing one would destroy real transcript history, so
+ccc creates the link when the path is free and otherwise leaves it exactly as
+it is — including the reverse link for the implicit `~/.claude` profile.
+
+**14.5 The system prompt is snapshotted per conversation, and
+`--system-prompt-snapshot off` does not change that.** Verified: a resumed
+session whose launch passed a DIFFERENT `--system-prompt` still answered with
+the original prompt's secret word, with the flag explicitly set to `off`. This
+is what makes §9's envelope load-bearing and what makes `/role` rotate the
+session.
+
+**14.6 `WorkingAgents` comes from `turns.status = running`.** §4 inherited the
+v2 idea of counting "working background agents" from the fleet view. v3 has no
+fleet; one running turn is one `claude -p` process, so the turn table is both
+cheaper and exactly right.
+
+**14.7 `access` has a `replies` column.** §5's column list has nowhere to record
+"at most two replies to a stranger, then silence", which §8 requires. One
+integer per row.
+
+**14.8 The PTY login flow suppresses the browser.** Not in the plan, and found
+the hard way: `claude auth login` shells out to `open`/`xdg-open` (and honours
+`$BROWSER`), so the first string-capture probe opened a real browser tab on the
+Mac pointing at a `localhost` callback nothing was listening on. Every PTY flow
+now runs with a directory of no-op shims first on `PATH` and `$BROWSER` pointed
+at one of them. The login URL belongs in Telegram and nowhere else — the VM is
+headless, and hijacking the owner's browser on the Mac is worse than useless.
+
+**14.9 The disclaimer strings were read from the binary, not captured.** The
+login prompts were captured verbatim from a throwaway config dir under
+`/private/tmp` (process killed, directory deleted, no code entered, no login
+completed, `~/.claude` and the Keychain untouched). The bypass-permissions
+disclaimer only appears once a config dir is logged in, which that constraint
+forbids, so its strings were extracted from the 2.1.270 binary instead — the
+same technique that produced `bypassDisclaimerMsg`. Because neither probe pins
+the option ORDER, the driver reads the numbered list off the screen and answers
+with the number beside the label it wants, and success is always verified
+against real state (`claude auth status --json`, `bypassAccepted`).
+
+**14.10 A waking inbox message becomes a turn.** §3.3 says delivery "= enqueue a
+turn on the target bot"; Phase 2a only kicked the target's queue, which had
+nothing in it, so `send_to_bot` never actually reached anybody. Phase 2b creates
+the queued turn, labelled with the sender. This is what makes `spawn_bot` with a
+`first_message` — and the child's report back — work.
+
+**14.11 A watch's first run is a baseline.** §7 did not say what happens on the
+very first run, when `last_hash` is empty. Treating that as a change would wake
+the bot for "the watch exists", so the first run records the hash silently.
+Changing a watch's command resets the baseline for the same reason.
+
+**14.12 `/model` does not rotate sessions.** Unlike `/role`, `--model` is passed
+on every turn including resumes, so a model change takes effect immediately and
+there is nothing to rotate.
+
+**14.13 Headless bootstrap.** §8 assumed `ccc setup`'s interactive Telegram
+loop. A VM has no terminal to run it in, so `ccc config set <key> <value>` sets
+every bootstrap key non-interactively and `/setgroup` binds the forum group from
+Telegram. `ccc install` writes a systemd **user** unit whose only `Environment=`
+lines are the `env_passthrough` names that are actually set.
