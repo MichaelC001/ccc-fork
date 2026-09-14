@@ -104,10 +104,27 @@ ccc config                                  # check it
 `chat_id` is the access-control root: only that user id can administer the
 instance, and until it is set **nobody** can talk to ccc at all.
 
+**`env_passthrough` and secrets.** Those names are the only channel by which a
+secret reaches a bot. The service is started by `systemctl --user`, which never
+sources `~/.profile` or `~/.zshrc`, so ccc snapshots the VALUES into
+`~/.config/ccc/env` (mode 0600) and the unit reads that file — the unit itself
+holds no secrets. `ccc config set env_passthrough …` writes it, and so does
+`ccc install`. **Run them from a login shell**, or the values will not be
+visible:
+
+```bash
+bash -lc 'ccc env sync'      # re-snapshot after exporting a new secret
+```
+
+Each of those commands prints which names it found and which are missing — names
+only, never values — and `/status` shows the same thing from Telegram. Change a
+token? Export it and run `ccc env sync` again, then restart the service.
+
 ### 5. Install the service
 
 ```bash
-ccc install                       # writes ~/.config/systemd/user/ccc.service and starts it
+bash -lc 'ccc install'            # login shell: it snapshots env_passthrough into ~/.config/ccc/env
+                                  # writes ~/.config/systemd/user/ccc.service and starts it
 loginctl enable-linger $USER      # so it keeps running after you log out
 systemctl --user status ccc
 journalctl --user -u ccc -f
@@ -207,7 +224,7 @@ what the bot is doing. It is replaced by the answer, and your message gets a ✅
 | Command | Effect |
 |---|---|
 | `/bots` | Every bot, its status and when it last ran. |
-| `/status` | Queue, running turns, accounts, watches, schedules and doctor findings. |
+| `/status` | Queue, running turns, accounts, watches, schedules, passthrough secrets (names only) and doctor findings. |
 | `/usage` | Tokens in/out, cache hit ratio, turns, average duration and cost — per bot and in total, for today and the last 7 days. |
 
 **Owner only**
@@ -321,6 +338,7 @@ An approved user can talk to the bots. They cannot use `/account`, `/access`,
 | What | Where |
 |---|---|
 | Bootstrap config (token, owner, group, accounts) | `~/.config/ccc/config.json` (mode 0600) |
+| Passthrough secrets for the service | `~/.config/ccc/env` (mode 0600, written by `ccc env sync`) |
 | Everything runtime (bots, turns, memories, watches, schedules, access) | `<data_dir>/ccc.db` (SQLite, WAL) |
 | A bot's default working directory | `<data_dir>/bots/<name>/workspace` |
 | Files you send a bot | `<its cwd>/inbox/` |
@@ -349,6 +367,13 @@ profile is marked. Fix it with `/account login <name>`.
 
 **Every account is rate limited.** The turn reports it and the accounts go on
 cooldown until their cached reset time. `/status` shows the cooldowns.
+
+**A bot cannot see `GH_TOKEN` (or any other secret).** `/status` lists the
+`env_passthrough` names it can and cannot see. A missing one almost always means
+`ccc install` / `ccc env sync` was run from a non-login shell, so the value was
+never snapshotted into `~/.config/ccc/env`. Fix it with
+`bash -lc 'ccc env sync'` and restart the service. The file is 0600 and the
+systemd unit contains no secrets, only `EnvironmentFile=-%h/.config/ccc/env`.
 
 **A compaction dropped something I wanted.** `/memory stats` shows the last
 compaction id per scope; `/memory restore <id>` puts the originals back and
@@ -383,6 +408,8 @@ ccc setup <bot_token>         Interactive bootstrap (owner, group, service)
 ccc config [get|set] …        Non-interactive bootstrap
 ccc setgroup                  Record the group from your next message in it
 ccc install                   Install the service (launchd / systemd --user)
+ccc env sync                  Snapshot env_passthrough secrets into ~/.config/ccc/env
+                              (run from a login shell: bash -lc 'ccc env sync')
 ccc maintain                  Run the daily growth-control job once, now
 ccc doctor                    Check dependencies and configuration
 ccc profile <cmd>             Manage accounts from a shell (list/add/remove/default/login)

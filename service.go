@@ -11,6 +11,18 @@ import (
 func installService() error {
 	home, _ := os.UserHomeDir()
 
+	// The service will not have the owner's login shell, so snapshot the
+	// env_passthrough secrets into <config_dir>/env first (see envfile.go). It
+	// is printed by name, so the owner sees immediately whether `ccc install`
+	// was run from a login shell.
+	if config := loadConfigOrNil(); config != nil && len(passthroughNames(config)) > 0 {
+		res, err := syncEnvFile(config)
+		if err != nil {
+			return fmt.Errorf("write the env file: %w", err)
+		}
+		fmt.Print(res.String())
+	}
+
 	// Detect OS and install appropriate service
 	if _, err := os.Stat("/Library"); err == nil {
 		// macOS - use launchd
@@ -93,29 +105,26 @@ func installSystemdService(home string) error {
 	return nil
 }
 
-// renderSystemdUnit builds the unit text. The only Environment= lines it emits
-// are the env_passthrough names that are actually set right now: those are the
-// secrets bots are meant to inherit (DESIGN §3.1), and systemd gives the
-// service a bare environment otherwise. Everything else a bot may see is built
-// by claudeEnv at spawn time, not here.
+// renderSystemdUnit builds the unit text. It holds NO secrets: the
+// env_passthrough values (DESIGN §3.1) live in <config_dir>/env, written 0600
+// by `ccc env sync`, and the unit reads them with `EnvironmentFile=-` (the `-`
+// means "carry on if it is not there").
+//
+// Earlier versions baked `Environment="NAME=value"` lines in here at install
+// time. That was wrong twice over: it wrote live tokens into a world-readable
+// unit file under ~/.config/systemd, and it captured only the variables that
+// happened to be set in whatever shell ran `ccc install` — `systemctl --user`
+// never sources ~/.profile or ~/.zshrc, so the usual answer of "export it in my
+// shell rc" silently produced a service with no secrets at all.
+//
+// Everything else a bot may see is built by claudeEnv at spawn time, not here.
 func renderSystemdUnit(binary string, config *Config) string {
 	var env strings.Builder
-	if config != nil {
-		for _, name := range config.EnvPassthrough {
-			name = strings.TrimSpace(name)
-			if name == "" || strings.HasPrefix(name, "CLAUDE") || strings.HasPrefix(name, "ANTHROPIC") {
-				continue
-			}
-			value, ok := os.LookupEnv(name)
-			if !ok {
-				continue
-			}
-			// systemd quoting: one "NAME=value" per line, value in quotes with
-			// backslashes and quotes escaped.
-			escaped := strings.ReplaceAll(value, `\`, `\\`)
-			escaped = strings.ReplaceAll(escaped, `"`, `\"`)
-			fmt.Fprintf(&env, "Environment=\"%s=%s\"\n", name, escaped)
-		}
+	if len(passthroughNames(config)) > 0 {
+		// %h is systemd's specifier for the user's home, which is where
+		// configDir() lives; writing it that way keeps the unit correct if the
+		// home is ever mounted somewhere else.
+		env.WriteString("EnvironmentFile=-%h/.config/ccc/env\n")
 	}
 	return fmt.Sprintf(`[Unit]
 Description=ccc - a team of Claude bots in one Telegram forum group

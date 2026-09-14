@@ -615,3 +615,22 @@ waking message starts a turn on the recipient (14.10), so the system prompt
 tells bots to use `wake=false` for anything the other bot only needs to know and
 `wake=true` only when it must act now, and to say everything they have in ONE
 message rather than several.
+
+**14.22 The service reads its secrets from a 0600 file, not from the unit.**
+`ccc install` used to bake `Environment="NAME=value"` lines for every
+`env_passthrough` name set in the shell that ran it. That was wrong twice: it
+wrote live tokens into a 0644 unit file under `~/.config/systemd` (readable by
+anything that can run `systemctl --user cat ccc`), and it captured only what
+that shell happened to export — `systemctl --user` never sources `~/.profile` or
+`~/.zshrc`, so the obvious "I exported it in my rc file" produced a service with
+no secrets at all and no warning. Now `ccc install`, `ccc env sync` and
+`ccc config set env_passthrough …` write `<config_dir>/env` (0600, atomic
+replace) with one `NAME="value"` line per name found in the CURRENT process
+environment, and the unit carries only `EnvironmentFile=-%h/.config/ccc/env`.
+Each of those commands prints which names were found and which were missing —
+**names only, never values** — and points at `bash -lc 'ccc env sync'` when
+something is missing. `ccc listen` also reads the file itself, filling only the
+variables that are not already set, which is what makes the same mechanism work
+under launchd on macOS (a plist cannot source a file). `/status` shows the same
+present/missing names. A value containing a newline cannot be written as one
+line, so it is reported as skipped rather than mangled.

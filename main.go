@@ -173,6 +173,10 @@ func main() {
 	case "install":
 		must(installService())
 
+	case "env":
+		// `ccc env sync` snapshots the env_passthrough secrets for the service.
+		must(runEnvSyncCommand(os.Args[2:]))
+
 	case "send":
 		if len(os.Args) < 3 {
 			fail("Usage: ccc send <file>")
@@ -245,6 +249,16 @@ func configCommand(args []string) error {
 			return err
 		}
 		fmt.Printf("✅ %s = %s\n", args[1], value)
+		if args[1] == "env_passthrough" {
+			// The names just changed, so the file the service reads is stale.
+			// Re-syncing here is also the moment the owner finds out that a
+			// name they listed is not actually exported in this shell.
+			res, err := syncEnvFile(config)
+			if err != nil {
+				return fmt.Errorf("write the env file: %w", err)
+			}
+			fmt.Print(res.String())
+		}
 		return nil
 	default:
 		return fmt.Errorf("usage: ccc config [get <key> | set <key> <value>]")

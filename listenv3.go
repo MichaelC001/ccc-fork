@@ -115,6 +115,16 @@ func listenV3() error {
 		return fmt.Errorf("no bot token. Run: ccc setup <bot_token>")
 	}
 
+	// A service started by systemd --user or launchd has none of the owner's
+	// shell environment, so the env_passthrough secrets come from the file
+	// `ccc env sync` wrote. A value already in the environment always wins.
+	if loaded := loadEnvFile(cfg); len(loaded) > 0 {
+		listenLog("env file: loaded %s", strings.Join(loaded, " ")) // names only, never values
+	}
+	if _, missing := envPassthroughStatus(cfg); len(missing) > 0 {
+		listenLog("env file: still missing %s (run `bash -lc 'ccc env sync'`)", strings.Join(missing, " "))
+	}
+
 	db, err := openStore(dbPath(cfg))
 	if err != nil {
 		return err
@@ -1013,6 +1023,19 @@ func (in *instance) renderStatus() string {
 	in.db.Model(&Watch{}).Where("enabled = ?", true).Count(&watches)
 	in.db.Model(&Schedule{}).Where("fired_at IS NULL").Count(&schedules)
 	fmt.Fprintf(&sb, "watches: %d · schedules: %d\n", watches, schedules)
+
+	// Passthrough secrets, by NAME only (DESIGN §12: ccc never posts a value).
+	// "missing" here almost always means `ccc env sync` was not run from a
+	// login shell, and is the difference between a bot that can push to GitHub
+	// and one that cannot.
+	if present, missing := envPassthroughStatus(cfg); len(present)+len(missing) > 0 {
+		fmt.Fprintf(&sb, "env: %s", htmlEscape(namesOrNone(present)))
+		if len(missing) > 0 {
+			fmt.Fprintf(&sb, " · <b>missing</b>: %s (run <code>bash -lc 'ccc env sync'</code>)",
+				htmlEscape(strings.Join(missing, " ")))
+		}
+		sb.WriteString("\n")
+	}
 
 	sb.WriteString("\n<b>Accounts</b>\n")
 	now := time.Now()

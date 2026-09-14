@@ -324,6 +324,8 @@ COMMANDS:
     config                  Show the whole configuration
     setgroup                Record the forum group from your next message in it
     install                 Install the background service (launchd / systemd --user)
+    env sync                Snapshot env_passthrough secrets into <config>/env
+                            (run from a login shell: bash -lc 'ccc env sync')
     doctor                  Check dependencies and configuration
     maintain                Run the daily growth-control job once, now
     profile <cmd>           Manage Claude accounts (list/add/remove/default/login)
