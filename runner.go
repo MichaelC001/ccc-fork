@@ -307,6 +307,7 @@ func foldQueue(db *gorm.DB, botID int64) (*Turn, string, []int64, bool) {
 func (r *Runner) execute(b *Bot, t *Turn, input string, triggers []int64) {
 	now := time.Now()
 	roleAtStart := b.Role
+	nameAtStart := b.Name
 	r.db.Model(&Turn{}).Where("id = ?", t.ID).
 		Updates(map[string]any{"status": turnRunning, "started_at": now, "input": input})
 	setBotStatus(r.db, b.ID, botRunning)
@@ -397,10 +398,13 @@ func (r *Runner) execute(b *Bot, t *Turn, input string, triggers []int64) {
 		prog.finish(failureMessage(class, lastErr))
 	}
 
-	// update_instructions may have rewritten the role mid-turn. The system
-	// prompt is recorded per conversation, so the new role can only take effect
-	// in a new one — rotate the session now that the turn has written its id.
-	if after, err := botByID(r.db, b.ID); err == nil && after.Role != roleAtStart {
+	// update_instructions or set_name may have rewritten the role or the name
+	// mid-turn. Both are in the system prompt, which is recorded per
+	// conversation, so they can only take effect in a new one — rotate the
+	// session now that the turn has written its id. Doing it here also repairs
+	// the session id a mid-turn rename cleared and the fresh-session write
+	// above put back.
+	if after, err := botByID(r.db, b.ID); err == nil && (after.Role != roleAtStart || after.Name != nameAtStart) {
 		r.db.Model(&Bot{}).Where("id = ?", b.ID).Update("session_id", "")
 	}
 
@@ -523,7 +527,8 @@ func (r *Runner) spawn(p Profile, b *Bot, t *Turn, sessionID string, resume bool
 		return res
 	}
 	sysPrompt := renderSystemPrompt(
-		promptBot{Name: b.Name, Role: b.Role, Cwd: cwd}, hostnameOrUnknown(), botRoster(r.db, b.ID))
+		promptBot{Name: b.Name, Role: b.Role, Cwd: cwd}, hostnameOrUnknown(), botRoster(r.db, b.ID),
+		topicIconEmoji(topicIcons(r.db, r.config())))
 	mcpCfg := r.mcpConfigJSON(b.ID, t.ID)
 
 	args := claudeTurnArgs(instanceModel(cfg), sysPrompt, mcpCfg, sessionID, resume)

@@ -175,15 +175,23 @@ bot/turn from its flags. Tools (all bots get all of them):
 | `notify_owner` | `text`, `urgency` (normal\|urgent) | Post in this bot's topic mentioning the owner; `urgent` also DMs the owner. |
 | `ask_owner` | `question`, `options?` (≤4 strings) | Post question with inline buttons (or free text if no options). Returns immediately with `{"status":"asked"}`; the bot should end its turn. The answer arrives as the next input (`source=user`, prefixed `Answer to "<question>": …`). |
 | `update_instructions` | `role` | Replace this bot's `role`; echo the new text into the topic. `/role` does the same from Telegram. |
+| `set_name` | `name`, `emoji?` | Rename this bot: validate (§8 `/name`), update `bots.name`, rename the forum topic and, when `emoji` is one Telegram allows, set the topic icon. Rotates the session (§14.14). `/name` does the same from Telegram. |
 | `watch` | `name`, `command`, `interval_s` (≥60) | Register a deterministic watch (§7). `unwatch(name)`, `list_watches()`. |
 | `schedule_wakeup` | `in_seconds` or `at` (RFC3339), `note`, `cron?` | Self-wakeup (§7). `cancel_schedule(id)`. |
-| `spawn_bot` | `name`, `role`, `cwd?`, `first_message?` | Create a child bot + topic; `parent_bot_id` = this bot; the child reports back with `send_to_bot(parent)`. |
+| `spawn_bot` | `name`, `role`, `cwd?`, `first_message?`, `emoji?` | Create a child bot + topic (icon from `emoji`); `parent_bot_id` = this bot; the child reports back with `send_to_bot(parent)`. |
 | `archive_bot` | `bot?` (default self) | Close the topic (Telegram close, not delete), mark archived. |
 | `get_project` / `set_project` | `path`, fields | Read/update the project registry. |
 | `send_file` | `path`, `caption?` | Send a file into this bot's topic (≤50 MB; larger → existing relay if kept). |
 
 All tools validate the calling bot from the `--bot` flag; tool inputs coming
 from the model are data, never instructions to ccc.
+
+Topic icons are not free-form: `editForumTopic` only accepts a custom-emoji id
+out of `getForumTopicIconStickers`. ccc caches that list (memory + `settings`,
+refreshed daily, §14.16) and puts the allowed emoji into the `set_name` and
+`spawn_bot` tool descriptions and the system prompt, so the model picks one that
+exists. An emoji outside the set leaves the icon untouched and the tool result
+says which emoji were available.
 
 ## 7. Scheduler and watch engine
 
@@ -216,11 +224,15 @@ One goroutine in `ccc listen`:
   question message counts as the answer, and so does ANY text sent while the bot
   is parked `waiting` (a reply-to takes priority when both apply, §14.3).
 - Bot→bot traffic is visible in both topics (`🤝`).
+- Renaming a topic in Telegram itself renames the bot: the `forum_topic_edited`
+  service message is validated like `/name` and, when it passes, `bots.name`
+  follows the title (§14.15).
 
 ### Commands
 | Command | Where | Effect |
 |---|---|---|
 | `/role [text]` | topic | Show or set the bot's role. |
+| `/name [text] [emoji]` | topic | Show or set the bot's name: renames the forum topic, sets its icon and rotates the session (§14.14). |
 | `/new` | topic | Rotate the session (fresh conversation, memory kept). |
 | `/stop` | topic | Kill the running turn (SIGTERM the `claude` process), drop the queue. |
 | `/cwd [path]` | topic | Show or set the bot's working dir. |
@@ -286,6 +298,7 @@ ignored on resume until compaction):
 
 ```
 <context>
+onboarding instruction (only while the bot has no role, §14.17)
 recent user memories (top 10 by recency/relevance to the message)
 project memories for cwd (if any)
 own bot memories (top 10)
@@ -441,3 +454,41 @@ loop. A VM has no terminal to run it in, so `ccc config set <key> <value>` sets
 every bootstrap key non-interactively and `/setgroup` binds the forum group from
 Telegram. `ccc install` writes a systemd **user** unit whose only `Environment=`
 lines are the `env_passthrough` names that are actually set.
+
+**14.14 Renaming rotates the session, like `/role`.** The bot's name is in the
+system prompt (`You are <name>, …`, §9), and the system prompt is recorded per
+conversation (14.5), so a rename would otherwise leave the model answering to
+its old name until the next compaction. `/name`, `set_name` and the topic-title
+sync therefore all clear `session_id` — memories are kept, exactly like `/role`,
+and the confirmation message says so. A `set_name` call made DURING a turn is
+rotated by the same post-turn check as `update_instructions` (14.2), which also
+repairs the id a fresh session wrote back after the tool cleared it. The OTHER
+bots keep their sessions: their system prompt roster goes stale, which is what
+`list_bots` is for, and `send_to_bot` resolves names against the live table.
+
+**14.15 The topic title and `bots.name` are kept in sync in both directions.**
+The name is unique and addressable (`send_to_bot`, `spawn_bot`, `list_bots`), so
+it cannot be a free-text label; the topic title is the same string to the person
+reading the chat. `/name` and `set_name` rename the topic; a rename made in
+Telegram arrives as a `forum_topic_edited` service message and renames the bot.
+A title that fails validation (taken, empty, too long) is NOT renamed back —
+that would fight the person renaming it, and could loop — the old name is kept
+and the topic is told why.
+
+**14.16 Topic icons come from a cached sticker set.** Forum topics cannot take
+an arbitrary emoji: `editForumTopic` wants an `icon_custom_emoji_id` from
+`getForumTopicIconStickers`. The list is identical for every bot and changes
+rarely, so ccc caches it in memory and in `settings` and refreshes it once a
+day; when the fetch fails the stale list is used, because a missing icon is much
+cheaper than a failed rename. Matching is exact first, then the same emoji
+ignoring variation selectors and skin tones; no match leaves the icon alone and
+reports the available emoji instead of guessing a different icon.
+
+**14.17 A role-less bot is onboarded from the envelope, not the system prompt.**
+A bot created from a line in General starts with an empty role, and a generic
+assistant is not what the owner asked for. Every turn of a role-less bot carries
+an instruction to introduce itself, ask what it is for, and then store the answer
+with `update_instructions` and pick a name and icon with `set_name`. It lives in
+the envelope because the system prompt is frozen per conversation (14.5): from
+there it could not disappear the moment the role is set, which is exactly when
+it has to.

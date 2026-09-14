@@ -45,6 +45,15 @@ type TelegramMessage struct {
 	Photo          []TelegramPhoto   `json:"photo,omitempty"`
 	Document       *TelegramDocument `json:"document,omitempty"`
 	Caption        string            `json:"caption,omitempty"`
+	// ForumTopicEdited is the service message Telegram posts into a topic when
+	// somebody renames it in the app. ccc follows the title with the bot's name.
+	ForumTopicEdited *ForumTopicEdited `json:"forum_topic_edited,omitempty"`
+}
+
+// ForumTopicEdited carries the new title of a renamed forum topic. Only the
+// changed fields are present, so an icon-only edit has an empty Name.
+type ForumTopicEdited struct {
+	Name string `json:"name,omitempty"`
 }
 
 type TelegramVoice struct {

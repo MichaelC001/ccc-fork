@@ -30,7 +30,7 @@ scheduling, account management, access control and the Telegram UX.
                                   │        ccc mcp (stdio)             │
                                   └────────────────────────────────────┘
               remember · recall · ask_owner · send_to_bot · watch ·
-              schedule_wakeup · spawn_bot · get_project · send_file
+              schedule_wakeup · spawn_bot · set_name · get_project · send_file
 ```
 
 ### Concepts
@@ -162,6 +162,11 @@ keep an eye on the fecha deploy and tell me if anything breaks
 ccc creates a topic named after the first line, with a bot behind it, and
 dispatches your message. From then on, talk in that topic.
 
+A brand new bot has no role yet, so it introduces itself and asks what it should
+be responsible for. Answer in the topic and it stores the answer as its role and
+picks a fitting name and topic icon for itself — or set them yourself with
+`/role` and `/name`.
+
 ---
 
 ## Using it
@@ -186,6 +191,7 @@ what the bot is doing. It is replaced by the answer, and your message gets a ✅
 | Command | Effect |
 |---|---|
 | `/role [text]` | Show or set the bot's role. Setting it starts a fresh conversation. |
+| `/name [name] [emoji]` | Show or set the bot's name. It renames the topic, sets the topic icon and starts a fresh conversation (the name is in the system prompt). Names are unique; renaming the topic in Telegram renames the bot too. |
 | `/new` | Fresh conversation. Memories are kept. |
 | `/stop` | Kill the running turn and drop the queue. |
 | `/cwd [path]` | Show or set the bot's working directory. |
@@ -227,6 +233,9 @@ Every bot has these tools, and uses them without being told:
   reports back with `send_to_bot`; archive it when the job is done.
 - `get_project` / `set_project` — the team's shared notes about a code base.
 - `update_instructions` — rewrite its own role.
+- `set_name` — rename itself and set its topic icon. The icon must be one of the
+  emoji Telegram allows for forum topics; the tool lists them, and an emoji
+  outside the set leaves the icon unchanged.
 - `send_file` — send a file into its topic (refuses credential paths).
 
 ### Access control

@@ -129,6 +129,11 @@ type updateInstructionsIn struct {
 	Role string `json:"role" jsonschema:"your new role description, replacing the current one"`
 }
 
+type setNameIn struct {
+	Name  string `json:"name" jsonschema:"your new name: a short, unique handle the owner and the other bots address you by"`
+	Emoji string `json:"emoji,omitempty" jsonschema:"icon for your Telegram topic; must be one of the emoji listed in this tool's description"`
+}
+
 type sendFileIn struct {
 	Path    string `json:"path" jsonschema:"absolute path of the file to send"`
 	Caption string `json:"caption,omitempty" jsonschema:"optional caption"`
@@ -171,6 +176,12 @@ func (s *mcpServer) register(server *mcp.Server) {
 		Name:        "update_instructions",
 		Description: "Replace your own role description. This starts a fresh conversation on your next message.",
 	}, s.updateInstructions)
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "set_name",
+		Description: "Rename yourself: the name is how the owner and the other bots address you, and the title of your " +
+			"Telegram topic, so keep it short and unique. This starts a fresh conversation on your next message. " +
+			s.iconEmojiHint(),
+	}, s.setName)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "send_file",
 		Description: "Send a file from this machine into your Telegram topic (max 50 MB).",
@@ -386,6 +397,49 @@ func (s *mcpServer) updateInstructions(_ context.Context, _ *mcp.CallToolRequest
 	return text("role updated; your next message starts a fresh conversation with it"), nil, nil
 }
 
+// iconEmojiHint names the emoji Telegram accepts as topic icons. It goes into
+// the tool descriptions so the model picks one that exists instead of guessing
+// and being told no.
+func (s *mcpServer) iconEmojiHint() string {
+	available := topicIconEmoji(topicIcons(s.db, s.config))
+	if len(available) == 0 {
+		return "The optional emoji sets your topic icon."
+	}
+	return "The optional emoji sets your topic icon; it must be one of: " + strings.Join(available, " ")
+}
+
+func (s *mcpServer) setName(_ context.Context, _ *mcp.CallToolRequest, in setNameIn) (*mcp.CallToolResult, any, error) {
+	b, err := s.bot()
+	if err != nil {
+		return toolErr("unknown bot"), nil, nil
+	}
+	name, err := validateBotName(s.db, b.ID, in.Name)
+	if err != nil {
+		return toolErr("%v", err), nil, nil
+	}
+	iconID, iconNote := resolveTopicIcon(s.db, s.config, in.Emoji)
+	old := b.Name
+	if name != old {
+		if err := renameBot(s.db, s.config, b, name); err != nil {
+			return toolErr("could not rename: %v", err), nil, nil
+		}
+	}
+	if err := editForumTopic(s.config, b.TopicID, name, iconID); err != nil {
+		hookLog("edit topic %d: %v", b.TopicID, err)
+	}
+	if name != old {
+		s.post(b.TopicID, fmt.Sprintf("✏️ <b>%s</b> is now <b>%s</b>", htmlEscape(old), htmlEscape(name)))
+	}
+	out := fmt.Sprintf("renamed to %q; your next message starts a fresh conversation with it", name)
+	if name == old {
+		out = fmt.Sprintf("you were already called %q", name)
+	}
+	if iconNote != "" {
+		out += ". " + iconNote
+	}
+	return text("%s", out), nil, nil
+}
+
 // sendFileMaxBytes is Telegram's bot upload limit.
 const sendFileMaxBytes = 50 * 1024 * 1024
 
@@ -552,6 +606,7 @@ type spawnBotIn struct {
 	Role         string `json:"role" jsonschema:"what the new bot is for, in a sentence or two"`
 	Cwd          string `json:"cwd,omitempty" jsonschema:"absolute working directory (default: its own fresh workspace)"`
 	FirstMessage string `json:"first_message,omitempty" jsonschema:"the first thing to tell it; it replies to you with send_to_bot"`
+	Emoji        string `json:"emoji,omitempty" jsonschema:"icon for its Telegram topic; must be one of the emoji listed in this tool's description"`
 }
 
 type archiveBotIn struct {
@@ -594,8 +649,9 @@ func (s *mcpServer) registerAutomation(server *mcp.Server) {
 		Description: "Cancel one of your pending wakeups.",
 	}, s.cancelSchedule)
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        "spawn_bot",
-		Description: "Create a helper bot with its own Telegram topic. Give it a first_message; it reports back to you with send_to_bot.",
+		Name: "spawn_bot",
+		Description: "Create a helper bot with its own Telegram topic. Give it a first_message; it reports back to you with send_to_bot. " +
+			s.iconEmojiHint(),
 	}, s.spawnBot)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "archive_bot",
@@ -734,8 +790,18 @@ func (s *mcpServer) spawnBot(_ context.Context, _ *mcp.CallToolRequest, in spawn
 			return toolErr("the bot was created but its first message could not be queued: %v", err), nil, nil
 		}
 	}
+	iconID, iconNote := resolveTopicIcon(s.db, s.config, in.Emoji)
+	if iconID != "" {
+		if err := editForumTopic(s.config, child.TopicID, "", iconID); err != nil {
+			hookLog("set icon on topic %d: %v", child.TopicID, err)
+		}
+	}
 	s.post(parent.TopicID, fmt.Sprintf("🐣 <b>%s</b> spawned <b>%s</b>.", htmlEscape(parent.Name), htmlEscape(child.Name)))
-	return text("created bot %q (topic %d). It will report back to you with send_to_bot.", child.Name, child.TopicID), nil, nil
+	out := fmt.Sprintf("created bot %q (topic %d). It will report back to you with send_to_bot.", child.Name, child.TopicID)
+	if iconNote != "" {
+		out += " " + iconNote
+	}
+	return text("%s", out), nil, nil
 }
 
 func (s *mcpServer) archiveBot(_ context.Context, _ *mcp.CallToolRequest, in archiveBotIn) (*mcp.CallToolResult, any, error) {

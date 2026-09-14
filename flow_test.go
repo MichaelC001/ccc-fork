@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"gorm.io/gorm"
 )
@@ -50,6 +51,11 @@ func newFakeBotAPI(t *testing.T) *fakeBotAPI {
 			f.nextTop++
 			body = fmt.Sprintf(`{"ok":true,"result":{"message_thread_id":%d,"name":%q}}`,
 				f.nextTop, r.Form.Get("name"))
+		case "getForumTopicIconStickers":
+			// The real set is ~30 stickers; two is enough to exercise the
+			// lookup, the fallback and the "not available" path.
+			body = `{"ok":true,"result":[{"custom_emoji_id":"icon-rocket","emoji":"🚀"},` +
+				`{"custom_emoji_id":"icon-memo","emoji":"📝"}]}`
 		case "getFile":
 			body = `{"ok":true,"result":{"file_path":"documents/blob.bin"}}`
 		case "sendMessage", "editMessageText":
@@ -147,6 +153,8 @@ func testInstance(t *testing.T) (*instance, *fakeRunner, *fakeBotAPI) {
 	// Commands that write the configuration (/model, /setgroup, /account) go
 	// through loadConfig/saveConfig, so the tests get their own HOME.
 	t.Setenv("HOME", t.TempDir())
+	// The topic-icon cache is process-wide; each test gets its own fake API.
+	resetTopicIconCache()
 	api := newFakeBotAPI(t)
 	dir := t.TempDir()
 	cfg := &Config{BotToken: "TESTTOKEN", ChatID: 42, GroupID: -100777, DataDir: dir}
@@ -475,5 +483,251 @@ func TestDocumentIsSavedIntoTheBotInbox(t *testing.T) {
 	}
 	if strings.Contains(last.Text, "..") {
 		t.Errorf("path traversal survived sanitisation: %q", last.Text)
+	}
+}
+
+func TestNameCommandRenamesTheBotAndTheTopic(t *testing.T) {
+	in, _, api := testInstance(t)
+	b, err := in.createBot("worker", "does things")
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.db.Model(&Bot{}).Where("id = ?", b.ID).Update("session_id", "abc-123")
+
+	// No argument shows the current name and changes nothing.
+	in.handleMessage(ownerMessage(b.TopicID, "/name"))
+	if len(api.since("editForumTopic")) != 0 {
+		t.Error("/name with no argument must not rename anything")
+	}
+	if texts := api.texts(fmt.Sprint(b.TopicID)); len(texts) == 0 || !strings.Contains(texts[len(texts)-1], "worker") {
+		t.Errorf("/name did not show the current name: %v", texts)
+	}
+
+	in.handleMessage(ownerMessage(b.TopicID, "/name shipper 🚀"))
+
+	after, err := botByID(in.db, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Name != "shipper" {
+		t.Errorf("name = %q, want shipper", after.Name)
+	}
+	if after.SessionID != "" {
+		t.Error("/name must rotate the session: the name is part of the system prompt")
+	}
+	if after.Role != "does things" {
+		t.Errorf("role = %q, want it untouched by a rename", after.Role)
+	}
+	edits := api.since("editForumTopic")
+	if len(edits) != 1 {
+		t.Fatalf("expected one editForumTopic call, got %d", len(edits))
+	}
+	if got := edits[0].Params.Get("name"); got != "shipper" {
+		t.Errorf("topic renamed to %q, want shipper", got)
+	}
+	if got := edits[0].Params.Get("message_thread_id"); got != fmt.Sprint(b.TopicID) {
+		t.Errorf("renamed topic %s, want %d", got, b.TopicID)
+	}
+	if got := edits[0].Params.Get("icon_custom_emoji_id"); got != "icon-rocket" {
+		t.Errorf("icon id = %q, want the id 🚀 maps to", got)
+	}
+}
+
+func TestNameCommandRejectsACollision(t *testing.T) {
+	in, _, api := testInstance(t)
+	if _, err := in.createBot("alpha", ""); err != nil {
+		t.Fatal(err)
+	}
+	b, err := in.createBot("beta", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.db.Model(&Bot{}).Where("id = ?", b.ID).Update("session_id", "keep-me")
+
+	// Case-insensitively taken: alpha already exists.
+	in.handleMessage(ownerMessage(b.TopicID, "/name ALPHA"))
+
+	after, err := botByID(in.db, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Name != "beta" {
+		t.Errorf("name = %q, want beta: the rename should have been rejected", after.Name)
+	}
+	if after.SessionID != "keep-me" {
+		t.Error("a rejected rename must not rotate the session")
+	}
+	if len(api.since("editForumTopic")) != 0 {
+		t.Error("a rejected rename must not touch the topic")
+	}
+	joined := strings.Join(api.texts(fmt.Sprint(b.TopicID)), "\n")
+	if !strings.Contains(joined, "alpha") {
+		t.Errorf("the rejection should say which bot holds the name: %q", joined)
+	}
+}
+
+func TestNameCommandReportsAnUnavailableIcon(t *testing.T) {
+	in, _, api := testInstance(t)
+	b, err := in.createBot("worker", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	in.handleMessage(ownerMessage(b.TopicID, "/name shipper 🦄"))
+
+	after, _ := botByID(in.db, b.ID)
+	if after.Name != "shipper" {
+		t.Errorf("name = %q: an unavailable icon must not block the rename", after.Name)
+	}
+	edits := api.since("editForumTopic")
+	if len(edits) != 1 || edits[0].Params.Get("icon_custom_emoji_id") != "" {
+		t.Errorf("an emoji Telegram does not offer must leave the icon alone: %v", edits)
+	}
+	joined := strings.Join(api.texts(fmt.Sprint(b.TopicID)), "\n")
+	if !strings.Contains(joined, "🦄") || !strings.Contains(joined, "🚀") {
+		t.Errorf("the reply should name the rejected emoji and the available ones: %q", joined)
+	}
+}
+
+func TestTopicRenameSyncsTheBotName(t *testing.T) {
+	in, _, api := testInstance(t)
+	b, err := in.createBot("worker", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.db.Model(&Bot{}).Where("id = ?", b.ID).Update("session_id", "abc-123")
+
+	renamed := ownerMessage(b.TopicID, "")
+	renamed.ForumTopicEdited = &ForumTopicEdited{Name: "shipper"}
+	in.handleMessage(renamed)
+
+	after, err := botByID(in.db, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Name != "shipper" {
+		t.Errorf("name = %q, want the topic title", after.Name)
+	}
+	if after.SessionID != "" {
+		t.Error("a synced rename rotates the session too")
+	}
+	// The title is already right, so ccc must not rename it back.
+	if len(api.since("editForumTopic")) != 0 {
+		t.Error("following a topic rename must not call editForumTopic")
+	}
+}
+
+func TestTopicRenameKeepsTheOldNameOnACollision(t *testing.T) {
+	in, _, api := testInstance(t)
+	if _, err := in.createBot("alpha", ""); err != nil {
+		t.Fatal(err)
+	}
+	b, err := in.createBot("beta", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	renamed := ownerMessage(b.TopicID, "")
+	renamed.ForumTopicEdited = &ForumTopicEdited{Name: "alpha"}
+	in.handleMessage(renamed)
+
+	after, _ := botByID(in.db, b.ID)
+	if after.Name != "beta" {
+		t.Errorf("name = %q, want beta: a colliding title must not be adopted", after.Name)
+	}
+	joined := strings.Join(api.texts(fmt.Sprint(b.TopicID)), "\n")
+	if !strings.Contains(joined, "beta") {
+		t.Errorf("the topic should have been told the name was kept: %q", joined)
+	}
+}
+
+func TestSendToBotFollowsTheRename(t *testing.T) {
+	in, _, _ := testInstance(t)
+	sender, err := in.createBot("alpha", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := in.createBot("beta", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	in.handleMessage(ownerMessage(target.TopicID, "/name gamma"))
+
+	s := &mcpServer{db: in.db, config: in.cfg, botID: sender.ID}
+	res, _, err := s.sendToBot(t.Context(), nil, sendToBotIn{Bot: "gamma", Text: "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Errorf("the new name should be addressable: %+v", res.Content)
+	}
+	res, _, err = s.sendToBot(t.Context(), nil, sendToBotIn{Bot: "beta", Text: "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError {
+		t.Error("the old name should no longer resolve")
+	}
+}
+
+func TestSetNameToolRenamesAndSetsTheIcon(t *testing.T) {
+	in, _, api := testInstance(t)
+	b, err := in.createBot("worker", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &mcpServer{db: in.db, config: in.cfg, botID: b.ID}
+
+	res, _, err := s.setName(t.Context(), nil, setNameIn{Name: "shipper", Emoji: "📝"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Fatalf("set_name failed: %+v", res.Content)
+	}
+	after, _ := botByID(in.db, b.ID)
+	if after.Name != "shipper" {
+		t.Errorf("name = %q, want shipper", after.Name)
+	}
+	edits := api.since("editForumTopic")
+	if len(edits) != 1 || edits[0].Params.Get("name") != "shipper" ||
+		edits[0].Params.Get("icon_custom_emoji_id") != "icon-memo" {
+		t.Errorf("set_name did not update the topic correctly: %v", edits)
+	}
+
+	// A taken name is a tool error, not a silent no-op.
+	if _, err := in.createBot("taken", ""); err != nil {
+		t.Fatal(err)
+	}
+	res, _, err = s.setName(t.Context(), nil, setNameIn{Name: "taken"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError {
+		t.Error("set_name should refuse a name another bot already has")
+	}
+}
+
+// A bot created from General has no role, so its very first turn must carry the
+// onboarding instruction. The fake runner records the raw input; the envelope
+// the real runner would build from it is rendered here.
+func TestNewBotIsOnboardedOnItsFirstTurn(t *testing.T) {
+	in, runner, _ := testInstance(t)
+	in.handleMessage(ownerMessage(0, "help me with the deploy"))
+
+	last, ok := runner.last()
+	if !ok {
+		t.Fatal("nothing enqueued for the new bot")
+	}
+	b, err := botByID(in.db, last.BotID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := buildEnvelope(in.db, b, last.Source, last.Text, time.Now())
+	for _, want := range []string{"no role yet", "update_instructions", "set_name", "help me with the deploy"} {
+		if !strings.Contains(envelope, want) {
+			t.Errorf("the first turn is missing %q:\n%s", want, envelope)
+		}
 	}
 }

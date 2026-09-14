@@ -12,8 +12,10 @@ func TestRenderSystemPromptCarriesIdentityAndRoster(t *testing.T) {
 		promptBot{Name: "deployer", Role: "ships fecha to prod", Cwd: "/srv/fecha"},
 		"jairo.local",
 		[]otherBot{{Name: "watcher", Role: "watches CI", Status: botIdle}},
+		[]string{"🚀", "📝"},
 	)
-	for _, want := range []string{"deployer", "ships fecha to prod", "jairo.local", "/srv/fecha", "watcher", "watches CI"} {
+	for _, want := range []string{"deployer", "ships fecha to prod", "jairo.local", "/srv/fecha", "watcher", "watches CI",
+		"set_name", "🚀"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("system prompt is missing %q:\n%s", want, got)
 		}
@@ -24,7 +26,7 @@ func TestRenderSystemPromptCarriesIdentityAndRoster(t *testing.T) {
 }
 
 func TestRenderSystemPromptWithoutRole(t *testing.T) {
-	got := renderSystemPrompt(promptBot{Name: "fresh", Cwd: "/tmp"}, "host", nil)
+	got := renderSystemPrompt(promptBot{Name: "fresh", Cwd: "/tmp"}, "host", nil, nil)
 	if !strings.Contains(got, "/role") {
 		t.Errorf("a role-less bot should be told how a role gets set:\n%s", got)
 	}
@@ -132,5 +134,33 @@ func TestBuildEnvelopeKeepsOtherBotsMemoriesOut(t *testing.T) {
 	got := buildEnvelope(in.db, mine, sourceUser, "hi", time.Now())
 	if strings.Contains(got, "not for you") {
 		t.Error("a bot's private memory leaked into another bot's envelope")
+	}
+}
+
+// A bot with no role is onboarded through the envelope, so the instruction can
+// disappear the moment update_instructions runs (the system prompt could not).
+func TestEnvelopeOnboardsARoleLessBot(t *testing.T) {
+	in, _, _ := testInstance(t)
+	b, err := in.createBot("nameless", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := buildEnvelope(in.db, b, sourceUser, "hello", time.Now())
+	for _, want := range []string{"no role yet", "update_instructions", "set_name"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("a role-less bot was not onboarded (missing %q):\n%s", want, got)
+		}
+	}
+
+	if err := in.db.Model(&Bot{}).Where("id = ?", b.ID).Update("role", "ships things").Error; err != nil {
+		t.Fatal(err)
+	}
+	withRole, err := botByID(in.db, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := buildEnvelope(in.db, withRole, sourceUser, "hello", time.Now()); strings.Contains(got, "no role yet") {
+		t.Errorf("the onboarding instruction survived the role being set:\n%s", got)
 	}
 }

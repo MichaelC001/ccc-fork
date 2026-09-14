@@ -40,8 +40,10 @@ type otherBot struct {
 	Status string
 }
 
-// renderSystemPrompt builds the --system-prompt text for a session.
-func renderSystemPrompt(b promptBot, hostname string, others []otherBot) string {
+// renderSystemPrompt builds the --system-prompt text for a session. iconEmoji
+// is the set Telegram accepts as topic icons (see topicIcons): it is listed
+// here so set_name is called with an emoji that actually exists.
+func renderSystemPrompt(b promptBot, hostname string, others []otherBot, iconEmoji []string) string {
 	role := strings.TrimSpace(b.Role)
 	if role == "" {
 		role = "general-purpose assistant, no specific role set yet (the owner can set one with /role)"
@@ -56,11 +58,16 @@ func renderSystemPrompt(b promptBot, hostname string, others []otherBot) string 
 	sb.WriteString("  list_bots/send_to_bot     see and message the other bots\n")
 	sb.WriteString("  notify_owner/ask_owner    reach the owner in Telegram\n")
 	sb.WriteString("  update_instructions       rewrite your own role\n")
+	sb.WriteString("  set_name                  rename yourself and set your topic icon\n")
 	sb.WriteString("  send_file                 send a file into your Telegram topic\n")
 	sb.WriteString("  watch/unwatch/list_watches  re-run a command and wake you only when its output changes\n")
 	sb.WriteString("  schedule_wakeup/cancel_schedule  start a turn later, once or on a cron\n")
 	sb.WriteString("  spawn_bot/archive_bot     create a helper bot with its own topic, or retire one\n")
 	sb.WriteString("  get_project/set_project   the team's notes about a code base\n")
+	if len(iconEmoji) > 0 {
+		fmt.Fprintf(&sb, "\nTopic icons set_name and spawn_bot accept (Telegram allows no others): %s\n",
+			strings.Join(iconEmoji, " "))
+	}
 	if len(others) > 0 {
 		sb.WriteString("\nOther bots:\n")
 		for _, o := range others {
@@ -104,7 +111,18 @@ type envelopeInput struct {
 	BotMems     []Memory
 	// InboxFrom counts pending inbox messages per sender label.
 	InboxFrom map[string]int
+	// NeedsRole is set while the bot has no role: its first job is to ask the
+	// owner what it is for, rather than to answer as a generic assistant.
+	NeedsRole bool
 }
+
+// onboardingInstruction is what a role-less bot is told on every turn until it
+// has a role. It is deliberately in the envelope and not the system prompt: the
+// prompt is recorded per conversation, so it could not disappear on its own the
+// moment update_instructions runs.
+const onboardingInstruction = "you have no role yet. Before doing anything else, briefly introduce yourself " +
+	"and ask the owner what you should be responsible for; when they answer, store it with update_instructions " +
+	"and pick a fitting short name and icon with set_name\n"
 
 // renderEnvelope builds the text actually handed to `claude -p`: a <context>
 // block capped at envelopeBudget followed by the message itself. The message is
@@ -116,6 +134,12 @@ func renderEnvelope(in envelopeInput) string {
 	line := fmt.Sprintf("today is %s\n", in.Now.Format("Monday 2006-01-02 15:04 MST"))
 	ctx.WriteString(line)
 	used += len(line)
+	// Onboarding comes before the memories and is never dropped by the budget:
+	// a bot with no role has nothing more important to do.
+	if in.NeedsRole {
+		ctx.WriteString(onboardingInstruction)
+		used += len(onboardingInstruction)
+	}
 
 	writeSection := func(title string, mems []Memory) {
 		if len(mems) == 0 {
@@ -173,7 +197,7 @@ func collapseWhitespace(s string) string {
 
 // buildEnvelope gathers the live context for a bot and renders the envelope.
 func buildEnvelope(db *gorm.DB, b *Bot, source, message string, now time.Time) string {
-	in := envelopeInput{Source: source, Message: message, Now: now}
+	in := envelopeInput{Source: source, Message: message, Now: now, NeedsRole: strings.TrimSpace(b.Role) == ""}
 	const perScope = 10
 	db.Model(&Memory{}).Where("scope = ?", scopeUser).
 		Order("updated_at DESC").Limit(perScope).Find(&in.UserMems)

@@ -505,8 +505,35 @@ func createForumTopic(config *Config, name string) (int64, error) {
 	return topic.MessageThreadID, nil
 }
 
-// editForumTopic renames an existing forum topic.
-func editForumTopic(config *Config, topicID int64, name string) error {
+// TopicIconSticker is one entry of getForumTopicIconStickers: an emoji and the
+// custom-emoji id editForumTopic accepts for it. Topic icons are NOT arbitrary
+// emoji — only ids from this list work — and the set is free for bots.
+type TopicIconSticker struct {
+	CustomEmojiID string `json:"custom_emoji_id"`
+	Emoji         string `json:"emoji"`
+}
+
+// fetchForumTopicIcons asks Telegram for the emoji allowed as topic icons.
+// Callers go through topicIcons (store.go), which caches the answer.
+func fetchForumTopicIcons(config *Config) ([]TopicIconSticker, error) {
+	result, err := telegramAPI(config, "getForumTopicIconStickers", url.Values{})
+	if err != nil {
+		return nil, err
+	}
+	if !result.OK {
+		return nil, fmt.Errorf("getForumTopicIconStickers: %s", result.Description)
+	}
+	var stickers []TopicIconSticker
+	if err := json.Unmarshal(result.Result, &stickers); err != nil {
+		return nil, fmt.Errorf("failed to parse icon stickers: %w", err)
+	}
+	return stickers, nil
+}
+
+// editForumTopic renames an existing forum topic and/or changes its icon. An
+// empty name or icon id is omitted from the request, which is how the Bot API
+// spells "keep the current one".
+func editForumTopic(config *Config, topicID int64, name, iconCustomEmojiID string) error {
 	if config.GroupID == 0 {
 		return fmt.Errorf("no group configured")
 	}
@@ -514,7 +541,15 @@ func editForumTopic(config *Config, topicID int64, name string) error {
 	params := url.Values{
 		"chat_id":           {fmt.Sprintf("%d", config.GroupID)},
 		"message_thread_id": {fmt.Sprintf("%d", topicID)},
-		"name":              {name},
+	}
+	if name != "" {
+		params.Set("name", name)
+	}
+	if iconCustomEmojiID != "" {
+		params.Set("icon_custom_emoji_id", iconCustomEmojiID)
+	}
+	if len(params) == 2 {
+		return nil // nothing to change
 	}
 
 	result, err := telegramAPI(config, "editForumTopic", params)
@@ -522,7 +557,7 @@ func editForumTopic(config *Config, topicID int64, name string) error {
 		return err
 	}
 	if !result.OK {
-		return fmt.Errorf("failed to rename topic: %s", result.Description)
+		return fmt.Errorf("failed to edit topic: %s", result.Description)
 	}
 
 	return nil
