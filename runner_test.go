@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -334,5 +335,51 @@ func TestBotNameFromText(t *testing.T) {
 	long := strings.Repeat("word ", 30)
 	if got := botNameFromText(long); len(got) > 40 {
 		t.Errorf("name is %d chars: %q", len(got), got)
+	}
+}
+
+// Failover (DESIGN §3.4) only works if the profile picker actually takes the
+// accounts a turn already burned out of the running.
+func TestPickProfileExcludingSkipsTriedAndLoggedOutAccounts(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{
+		DataDir: dir, // no ChatID: markNeedsLogin must not try to message anyone
+		Profiles: map[string]*Profile{
+			"alpha": {ConfigDir: filepath.Join(dir, "alpha")},
+			"beta":  {ConfigDir: filepath.Join(dir, "beta")},
+		},
+	}
+	r := newRunner(nil, cfg, nil)
+
+	first, ok := r.pickProfileExcluding(nil)
+	if !ok || first.Name != "alpha" {
+		t.Fatalf("first pick = %q (ok=%v), want the deterministic alpha", first.Name, ok)
+	}
+
+	second, ok := r.pickProfileExcluding(map[string]bool{"alpha": true})
+	if !ok || second.Name != "beta" {
+		t.Fatalf("after alpha failed, pick = %q (ok=%v), want beta", second.Name, ok)
+	}
+
+	// A profile marked needs_login is skipped like an excluded one.
+	r.markNeedsLogin(second)
+	third, ok := r.pickProfileExcluding(nil)
+	if !ok || third.Name != "alpha" {
+		t.Fatalf("pick with beta logged out = %q (ok=%v), want alpha", third.Name, ok)
+	}
+
+	// When everything is excluded the turn still gets an account rather than
+	// being dropped: a stale needs_login flag must not deadlock the queue.
+	last, ok := r.pickProfileExcluding(nil)
+	if !ok {
+		t.Fatal("no profile returned at all")
+	}
+	if last.Name == "" {
+		t.Error("returned an unnamed profile")
+	}
+
+	// With every profile already tried there is nothing left to fail over to.
+	if _, ok := r.pickProfileExcluding(map[string]bool{"alpha": true, "beta": true}); ok {
+		t.Error("expected no profile when every account has already been tried")
 	}
 }

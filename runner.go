@@ -129,21 +129,18 @@ type botUI interface {
 type turnRunner interface {
 	Enqueue(botID int64, source, text string, triggerMessageID int64) (*Turn, error)
 	Stop(botID int64) bool
-	Running(botID int64) bool
 }
 
 // activeTurn is a turn with a live `claude` process behind it.
 type activeTurn struct {
-	turnID  int64
 	cmd     *exec.Cmd
 	stopped bool
 }
 
 // Runner owns the per-bot turn queues.
 type Runner struct {
-	db      *gorm.DB
-	ui      botUI
-	dataDir string
+	db *gorm.DB
+	ui botUI
 
 	mu     sync.Mutex
 	cfg    *Config
@@ -160,7 +157,6 @@ func newRunner(db *gorm.DB, cfg *Config, ui botUI) *Runner {
 		db:         db,
 		ui:         ui,
 		cfg:        cfg,
-		dataDir:    dataDir(cfg),
 		active:     map[int64]*activeTurn{},
 		wake:       map[int64]chan struct{}{},
 		done:       make(chan struct{}),
@@ -172,12 +168,6 @@ func (r *Runner) config() *Config {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.cfg
-}
-
-func (r *Runner) setConfig(c *Config) {
-	r.mu.Lock()
-	r.cfg = c
-	r.mu.Unlock()
 }
 
 // Close stops the per-bot loops. Running turns are left to finish.
@@ -205,13 +195,6 @@ func (r *Runner) Enqueue(botID int64, source, text string, triggerMessageID int6
 	}
 	r.kick(botID)
 	return t, nil
-}
-
-// Running reports whether a turn is executing for this bot.
-func (r *Runner) Running(botID int64) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.active[botID] != nil
 }
 
 // Stop SIGTERMs the bot's running turn and drops its queue (/stop, DESIGN §8).
@@ -534,7 +517,7 @@ func (r *Runner) spawn(p Profile, b *Bot, t *Turn, sessionID string, resume bool
 	}
 
 	r.mu.Lock()
-	r.active[b.ID] = &activeTurn{turnID: t.ID, cmd: cmd}
+	r.active[b.ID] = &activeTurn{cmd: cmd}
 	r.mu.Unlock()
 
 	scanner := bufio.NewScanner(stdout)

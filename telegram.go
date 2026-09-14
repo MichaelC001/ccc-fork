@@ -616,26 +616,6 @@ func setMessageReaction(config *Config, chatID int64, messageID int64, emoji str
 	return nil
 }
 
-// closeForumTopic closes a topic without deleting it (used when a bot is
-// archived, so the conversation stays readable).
-func closeForumTopic(config *Config, topicID int64) error {
-	if config.GroupID == 0 {
-		return fmt.Errorf("no group configured")
-	}
-	params := url.Values{
-		"chat_id":           {fmt.Sprintf("%d", config.GroupID)},
-		"message_thread_id": {fmt.Sprintf("%d", topicID)},
-	}
-	result, err := telegramAPI(config, "closeForumTopic", params)
-	if err != nil {
-		return err
-	}
-	if !result.OK {
-		return fmt.Errorf("telegram error: %s", result.Description)
-	}
-	return nil
-}
-
 // sendMessageKeyboardGetID sends one HTML message with an inline keyboard and
 // returns its message id, which ask_owner needs to match a tap to a question.
 func sendMessageKeyboardGetID(config *Config, chatID int64, threadID int64, text string, buttons [][]InlineKeyboardButton) (int64, error) {

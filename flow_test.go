@@ -132,8 +132,6 @@ func (f *fakeRunner) Stop(botID int64) bool {
 	return true
 }
 
-func (f *fakeRunner) Running(int64) bool { return false }
-
 func (f *fakeRunner) last() (fakeTurn, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
