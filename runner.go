@@ -282,16 +282,30 @@ func (r *Runner) runNext(botID int64) bool {
 	if b.Status == botWaiting || b.Status == botDisabled || b.ArchivedAt != nil {
 		return false
 	}
-	var queued []Turn
-	if err := r.db.Where("bot_id = ? AND status = ?", botID, turnQueued).Order("id").Find(&queued).Error; err != nil {
+	head, input, triggers, ok := foldQueue(r.db, botID)
+	if !ok {
 		return false
 	}
+	r.execute(b, head, input, triggers)
+	return true
+}
+
+// foldQueue takes every input queued for a bot right now and folds it into the
+// oldest one, which becomes the turn that runs. The others are closed as
+// "merged" so a burst of chat messages costs one `claude -p` run, not one per
+// message (DESIGN §2). It returns the carrier turn, the combined input and
+// every Telegram message that should get a ✅ when the turn lands.
+func foldQueue(db *gorm.DB, botID int64) (*Turn, string, []int64, bool) {
+	var queued []Turn
+	if err := db.Where("bot_id = ? AND status = ?", botID, turnQueued).Order("id").Find(&queued).Error; err != nil {
+		return nil, "", nil, false
+	}
 	if len(queued) == 0 {
-		return false
+		return nil, "", nil, false
 	}
 	head := queued[0]
 	inputs := []string{head.Input}
-	triggers := []int64{}
+	var triggers []int64
 	if head.TriggerMessageID != 0 {
 		triggers = append(triggers, head.TriggerMessageID)
 	}
@@ -300,11 +314,10 @@ func (r *Runner) runNext(botID int64) bool {
 		if extra.TriggerMessageID != 0 {
 			triggers = append(triggers, extra.TriggerMessageID)
 		}
-		r.db.Model(&Turn{}).Where("id = ?", extra.ID).
+		db.Model(&Turn{}).Where("id = ?", extra.ID).
 			Updates(map[string]any{"status": turnDone, "stop_reason": "merged into turn " + fmt.Sprint(head.ID)})
 	}
-	r.execute(b, &head, strings.Join(inputs, "\n\n"), triggers)
-	return true
+	return &head, strings.Join(inputs, "\n\n"), triggers, true
 }
 
 // execute runs one turn end to end, including profile failover (DESIGN §3.4).

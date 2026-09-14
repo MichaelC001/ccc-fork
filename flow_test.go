@@ -1,0 +1,478 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+
+	"gorm.io/gorm"
+)
+
+// fakeBotAPI is a stand-in Telegram Bot API: it answers the handful of methods
+// ccc uses and records every call so the conversation tests can assert on what
+// the user would have seen.
+type fakeBotAPI struct {
+	*httptest.Server
+
+	mu      sync.Mutex
+	calls   []apiCall
+	nextMsg int64
+	nextTop int64
+}
+
+type apiCall struct {
+	Method string
+	Params url.Values
+}
+
+func newFakeBotAPI(t *testing.T) *fakeBotAPI {
+	t.Helper()
+	f := &fakeBotAPI{nextMsg: 1000, nextTop: 500}
+	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// File downloads are served from a different path shape than methods.
+		if strings.HasPrefix(r.URL.Path, "/file/") {
+			fmt.Fprint(w, "fake file contents")
+			return
+		}
+		_ = r.ParseForm() // safe-ignore: a malformed body simply yields empty params
+		method := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+		f.mu.Lock()
+		f.calls = append(f.calls, apiCall{Method: method, Params: r.Form})
+		var body string
+		switch method {
+		case "createForumTopic":
+			f.nextTop++
+			body = fmt.Sprintf(`{"ok":true,"result":{"message_thread_id":%d,"name":%q}}`,
+				f.nextTop, r.Form.Get("name"))
+		case "getFile":
+			body = `{"ok":true,"result":{"file_path":"documents/blob.bin"}}`
+		case "sendMessage", "editMessageText":
+			f.nextMsg++
+			body = fmt.Sprintf(`{"ok":true,"result":{"message_id":%d}}`, f.nextMsg)
+		default:
+			body = `{"ok":true,"result":true}`
+		}
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, body)
+	}))
+	old := telegramBaseURL
+	telegramBaseURL = f.URL
+	t.Cleanup(func() {
+		telegramBaseURL = old
+		f.Close()
+	})
+	return f
+}
+
+func (f *fakeBotAPI) since(method string) []apiCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []apiCall
+	for _, c := range f.calls {
+		if c.Method == method {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// texts returns every message body sent to a thread ("" = any thread).
+func (f *fakeBotAPI) texts(thread string) []string {
+	var out []string
+	for _, c := range f.since("sendMessage") {
+		if thread != "" && c.Params.Get("message_thread_id") != thread {
+			continue
+		}
+		out = append(out, c.Params.Get("text"))
+	}
+	return out
+}
+
+// fakeRunner records what the conversation layer asks the runner to do,
+// so the flow tests never spawn claude.
+type fakeRunner struct {
+	db *gorm.DB
+
+	mu       sync.Mutex
+	enqueued []fakeTurn
+	stops    []int64
+}
+
+type fakeTurn struct {
+	BotID   int64
+	Source  string
+	Text    string
+	Trigger int64
+}
+
+func (f *fakeRunner) Enqueue(botID int64, source, text string, trigger int64) (*Turn, error) {
+	f.mu.Lock()
+	f.enqueued = append(f.enqueued, fakeTurn{botID, source, text, trigger})
+	f.mu.Unlock()
+	t := &Turn{BotID: botID, Source: source, Input: text, Status: turnQueued, TriggerMessageID: trigger}
+	if f.db != nil {
+		if err := f.db.Create(t).Error; err != nil {
+			return nil, err
+		}
+	}
+	return t, nil
+}
+
+func (f *fakeRunner) Stop(botID int64) bool {
+	f.mu.Lock()
+	f.stops = append(f.stops, botID)
+	f.mu.Unlock()
+	return true
+}
+
+func (f *fakeRunner) Running(int64) bool { return false }
+
+func (f *fakeRunner) last() (fakeTurn, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.enqueued) == 0 {
+		return fakeTurn{}, false
+	}
+	return f.enqueued[len(f.enqueued)-1], true
+}
+
+// testInstance wires an instance against a temp database and the fake API.
+func testInstance(t *testing.T) (*instance, *fakeRunner, *fakeBotAPI) {
+	t.Helper()
+	api := newFakeBotAPI(t)
+	dir := t.TempDir()
+	cfg := &Config{BotToken: "TESTTOKEN", ChatID: 42, GroupID: -100777, DataDir: dir}
+	db, err := openStore(dbPath(cfg))
+	if err != nil {
+		t.Fatalf("openStore: %v", err)
+	}
+	runner := &fakeRunner{db: db}
+	return &instance{db: db, cfg: cfg, runner: runner, dataDir: dir}, runner, api
+}
+
+// ownerMessage builds an inbound group message from the owner.
+func ownerMessage(threadID int64, text string) *TelegramMessage {
+	m := &TelegramMessage{MessageThreadID: threadID, Text: text, MessageID: 7}
+	m.Chat.ID = -100777
+	m.Chat.Type = "supergroup"
+	m.From.ID = 42
+	return m
+}
+
+func TestTextInGeneralCreatesBotAndTopic(t *testing.T) {
+	in, runner, api := testInstance(t)
+
+	in.handleMessage(ownerMessage(0, "watch the deploy\nand tell me when it is green"))
+
+	topics := api.since("createForumTopic")
+	if len(topics) != 1 {
+		t.Fatalf("expected one topic created, got %d", len(topics))
+	}
+	if got := topics[0].Params.Get("name"); got != "watch the deploy" {
+		t.Errorf("topic name = %q, want the first line of the message", got)
+	}
+
+	bots, err := liveBots(in.db)
+	if err != nil || len(bots) != 1 {
+		t.Fatalf("expected one bot, got %d (%v)", len(bots), err)
+	}
+	b := bots[0]
+	if b.TopicID == 0 {
+		t.Error("bot has no topic id")
+	}
+	if want := filepath.Join(in.dataDir, "bots", b.Name, "workspace"); b.Cwd != want {
+		t.Errorf("cwd = %q, want %q", b.Cwd, want)
+	}
+	last, ok := runner.last()
+	if !ok || last.BotID != b.ID || !strings.HasPrefix(last.Text, "watch the deploy") {
+		t.Errorf("first message was not dispatched to the new bot: %+v", last)
+	}
+}
+
+func TestTextInTopicEnqueuesTurnForThatBot(t *testing.T) {
+	in, runner, _ := testInstance(t)
+	b, err := in.createBot("deployer", "ships things")
+	if err != nil {
+		t.Fatalf("createBot: %v", err)
+	}
+
+	msg := ownerMessage(b.TopicID, "status?")
+	msg.MessageID = 99
+	in.handleMessage(msg)
+
+	last, ok := runner.last()
+	if !ok {
+		t.Fatal("nothing enqueued")
+	}
+	if last.BotID != b.ID || last.Text != "status?" || last.Source != sourceUser {
+		t.Errorf("unexpected turn: %+v", last)
+	}
+	if last.Trigger != 99 {
+		t.Errorf("trigger message = %d, want 99 (needed for the ✅ reaction)", last.Trigger)
+	}
+}
+
+func TestTextInUnknownTopicIsNotDispatched(t *testing.T) {
+	in, runner, _ := testInstance(t)
+	in.handleMessage(ownerMessage(31337, "hello?"))
+	if _, ok := runner.last(); ok {
+		t.Error("a message in a topic with no bot should not enqueue anything")
+	}
+}
+
+func TestNonOwnerIsIgnored(t *testing.T) {
+	in, runner, api := testInstance(t)
+	msg := ownerMessage(0, "let me in")
+	msg.From.ID = 999
+	in.handleMessage(msg)
+	if _, ok := runner.last(); ok {
+		t.Error("a stranger's message must not create a bot")
+	}
+	if len(api.since("createForumTopic")) != 0 {
+		t.Error("a stranger's message must not create a topic")
+	}
+}
+
+func TestQuestionCallbackAnswersAndResumesTheBot(t *testing.T) {
+	in, runner, _ := testInstance(t)
+	b, err := in.createBot("asker", "")
+	if err != nil {
+		t.Fatalf("createBot: %v", err)
+	}
+	setBotStatus(in.db, b.ID, botWaiting)
+	opts, err := json.Marshal([]string{"ship it", "hold"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := Question{BotID: b.ID, Question: "Deploy to prod?", OptionsJSON: string(opts), AskedMessageID: 555}
+	if err := in.db.Create(&q).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	cb := &CallbackQuery{ID: "cb1", Data: fmt.Sprintf("q:%d:0", q.ID)}
+	cb.From.ID = 42
+	cb.Message = ownerMessage(b.TopicID, "")
+	cb.Message.MessageID = 555
+	in.handleCallback(cb)
+
+	var stored Question
+	if err := in.db.First(&stored, q.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.AnsweredAt == nil || stored.Answer != "ship it" {
+		t.Fatalf("question not answered: %+v", stored)
+	}
+	last, ok := runner.last()
+	if !ok || last.BotID != b.ID || !strings.Contains(last.Text, "ship it") {
+		t.Errorf("the answer was not fed back to the bot: %+v", last)
+	}
+	after, err := botByID(in.db, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status != botIdle {
+		t.Errorf("bot status = %q, want idle after answering", after.Status)
+	}
+}
+
+func TestCallbackFromStrangerIsIgnored(t *testing.T) {
+	in, runner, _ := testInstance(t)
+	b, _ := in.createBot("asker", "")
+	q := Question{BotID: b.ID, Question: "?", OptionsJSON: `["a"]`}
+	in.db.Create(&q)
+
+	cb := &CallbackQuery{ID: "cb", Data: fmt.Sprintf("q:%d:0", q.ID)}
+	cb.From.ID = 999
+	in.handleCallback(cb)
+
+	var stored Question
+	in.db.First(&stored, q.ID)
+	if stored.AnsweredAt != nil {
+		t.Error("a stranger must not be able to answer a question")
+	}
+	if _, ok := runner.last(); ok {
+		t.Error("a stranger's tap must not enqueue a turn")
+	}
+}
+
+func TestReplyToQuestionCountsAsAnswer(t *testing.T) {
+	in, runner, _ := testInstance(t)
+	b, _ := in.createBot("asker", "")
+	q := Question{BotID: b.ID, Question: "Which branch?", AskedMessageID: 777}
+	in.db.Create(&q)
+
+	msg := ownerMessage(b.TopicID, "main")
+	msg.ReplyToMessage = &TelegramMessage{MessageID: 777}
+	in.handleMessage(msg)
+
+	var stored Question
+	in.db.First(&stored, q.ID)
+	if stored.Answer != "main" {
+		t.Fatalf("answer = %q, want main", stored.Answer)
+	}
+	last, _ := runner.last()
+	if !strings.Contains(last.Text, `Answer to "Which branch?"`) {
+		t.Errorf("answer envelope = %q", last.Text)
+	}
+}
+
+func TestSendToBotMirrorsIntoBothTopics(t *testing.T) {
+	in, _, api := testInstance(t)
+	a, err := in.createBot("alpha", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bb, err := in.createBot("beta", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := &mcpServer{db: in.db, config: in.cfg, botID: a.ID}
+	res, _, err := s.sendToBot(t.Context(), nil, sendToBotIn{Bot: "beta", Text: "please review PR 12"})
+	if err != nil {
+		t.Fatalf("sendToBot: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("sendToBot reported an error: %+v", res.Content)
+	}
+
+	var queued []InboxMessage
+	if err := in.db.Where("to_bot_id = ?", bb.ID).Find(&queued).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(queued) != 1 || queued[0].FromBotID == nil || *queued[0].FromBotID != a.ID {
+		t.Fatalf("inbox row not written correctly: %+v", queued)
+	}
+
+	fromTopic := fmt.Sprint(a.TopicID)
+	toTopic := fmt.Sprint(bb.TopicID)
+	seenFrom, seenTo := false, false
+	for _, c := range api.since("sendMessage") {
+		if !strings.Contains(c.Params.Get("text"), "please review PR 12") {
+			continue
+		}
+		switch c.Params.Get("message_thread_id") {
+		case fromTopic:
+			seenFrom = true
+		case toTopic:
+			seenTo = true
+		}
+	}
+	if !seenFrom || !seenTo {
+		t.Errorf("mirror missing (sender topic: %v, target topic: %v)", seenFrom, seenTo)
+	}
+}
+
+func TestSendToBotRejectsUnknownTarget(t *testing.T) {
+	in, _, _ := testInstance(t)
+	a, _ := in.createBot("alpha", "")
+	s := &mcpServer{db: in.db, config: in.cfg, botID: a.ID}
+	res, _, err := s.sendToBot(t.Context(), nil, sendToBotIn{Bot: "nobody", Text: "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError {
+		t.Error("sending to a bot that does not exist should be a tool error")
+	}
+}
+
+func TestCommandsInTopic(t *testing.T) {
+	in, runner, api := testInstance(t)
+	b, _ := in.createBot("worker", "")
+	in.db.Model(&Bot{}).Where("id = ?", b.ID).Update("session_id", "abc-123")
+
+	in.handleMessage(ownerMessage(b.TopicID, "/role ships the deploy"))
+	after, _ := botByID(in.db, b.ID)
+	if after.Role != "ships the deploy" {
+		t.Errorf("role = %q", after.Role)
+	}
+	if after.SessionID != "" {
+		t.Error("/role must rotate the session: the system prompt is recorded per conversation")
+	}
+
+	in.db.Model(&Bot{}).Where("id = ?", b.ID).Update("session_id", "def-456")
+	in.handleMessage(ownerMessage(b.TopicID, "/new"))
+	after, _ = botByID(in.db, b.ID)
+	if after.SessionID != "" {
+		t.Error("/new must clear the session id")
+	}
+
+	in.handleMessage(ownerMessage(b.TopicID, "/stop"))
+	if len(runner.stops) != 1 || runner.stops[0] != b.ID {
+		t.Errorf("/stop did not reach the runner: %v", runner.stops)
+	}
+
+	in.handleMessage(ownerMessage(b.TopicID, "/cwd /definitely/not/here"))
+	after, _ = botByID(in.db, b.ID)
+	if after.Cwd == "/definitely/not/here" {
+		t.Error("/cwd accepted a directory that does not exist")
+	}
+	dir := t.TempDir()
+	in.handleMessage(ownerMessage(b.TopicID, "/cwd "+dir))
+	after, _ = botByID(in.db, b.ID)
+	if after.Cwd != dir {
+		t.Errorf("cwd = %q, want %q", after.Cwd, dir)
+	}
+
+	if err := upsertMemory(in.db, scopeUser, "", "deploy-target", "vps3", b.ID); err != nil {
+		t.Fatal(err)
+	}
+	in.handleMessage(ownerMessage(b.TopicID, "/memory deploy"))
+	found := false
+	for _, txt := range api.texts(fmt.Sprint(b.TopicID)) {
+		if strings.Contains(txt, "deploy-target") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("/memory did not show the stored memory")
+	}
+
+	in.handleMessage(ownerMessage(b.TopicID, "/forget user deploy-target"))
+	var n int64
+	in.db.Model(&Memory{}).Where("key = ?", "deploy-target").Count(&n)
+	if n != 0 {
+		t.Error("/forget did not delete the memory")
+	}
+}
+
+func TestBotsCommandWorksAnywhere(t *testing.T) {
+	in, _, api := testInstance(t)
+	if _, err := in.createBot("alpha", "does alpha things"); err != nil {
+		t.Fatal(err)
+	}
+	in.handleMessage(ownerMessage(0, "/bots"))
+	joined := strings.Join(api.texts(""), "\n")
+	if !strings.Contains(joined, "alpha") || !strings.Contains(joined, "does alpha things") {
+		t.Errorf("/bots output missing the bot: %q", joined)
+	}
+}
+
+func TestDocumentIsSavedIntoTheBotInbox(t *testing.T) {
+	in, runner, _ := testInstance(t)
+	b, _ := in.createBot("filer", "")
+
+	msg := ownerMessage(b.TopicID, "")
+	msg.Document = &TelegramDocument{FileID: "file-1", FileName: "../../escape.txt"}
+	msg.Caption = "read this"
+	in.handleMessage(msg)
+
+	last, ok := runner.last()
+	if !ok {
+		t.Fatal("nothing enqueued for the attachment")
+	}
+	wantDir := filepath.Join(b.Cwd, "inbox")
+	if !strings.Contains(last.Text, wantDir) {
+		t.Errorf("message %q does not point at the bot inbox %q", last.Text, wantDir)
+	}
+	if strings.Contains(last.Text, "..") {
+		t.Errorf("path traversal survived sanitisation: %q", last.Text)
+	}
+}
