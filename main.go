@@ -51,6 +51,9 @@ type Config struct {
 	RelayURL         string                  `json:"relay_url,omitempty"`         // Relay server URL for large file transfers
 	Profiles         map[string]*Profile     `json:"profiles,omitempty"`         // profile name -> Claude account (CLAUDE_CONFIG_DIR)
 	DefaultProfile   string                  `json:"default_profile,omitempty"`  // profile new sessions use when none is picked
+	DataDir          string                  `json:"data_dir,omitempty"`          // v3 runtime root (default ~/.local/share/ccc)
+	Model            string                  `json:"model,omitempty"`             // model every v3 bot runs on (default: claude's own default)
+	EnvPassthrough   []string                `json:"env_passthrough,omitempty"`   // extra env var names bots inherit (DESIGN §3.1)
 	Away             bool                    `json:"away"`
 	OAuthToken       string                  `json:"oauth_token,omitempty"`
 	OTPSecret        string                  `json:"otp_secret,omitempty"`        // TOTP secret for safe mode

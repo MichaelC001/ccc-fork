@@ -1,0 +1,450 @@
+package main
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/glebarez/sqlite"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+	"gorm.io/gorm/logger"
+)
+
+// The v3 runtime state lives in one SQLite file (<data_dir>/ccc.db) accessed
+// through GORM. The driver is github.com/glebarez/sqlite (modernc-based, pure
+// Go): ccc ships cross-compiled release binaries, so a cgo driver is not an
+// option. The schema is DESIGN.md §5.
+//
+// Two processes touch this database: `ccc listen` and the short-lived
+// `ccc mcp` server spawned per turn. WAL + busy_timeout is what makes that
+// safe; every write is short.
+
+// Bot is one forum topic: an identity (name + role) with its own memory scope,
+// workspace and Claude session.
+type Bot struct {
+	ID          int64  `gorm:"primaryKey"`
+	Name        string `gorm:"uniqueIndex;not null"`
+	TopicID     int64  `gorm:"index"`
+	Role        string
+	Cwd         string
+	SessionID   string
+	Status      string `gorm:"not null;default:idle"` // idle|running|waiting|disabled
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	ArchivedAt  *time.Time
+	ParentBotID *int64
+}
+
+// Bot statuses.
+const (
+	botIdle     = "idle"
+	botRunning  = "running"
+	botWaiting  = "waiting"
+	botDisabled = "disabled"
+)
+
+// Turn is one `claude -p` invocation: one input, one result.
+type Turn struct {
+	ID        int64 `gorm:"primaryKey"`
+	BotID     int64 `gorm:"index;not null"`
+	SessionID string
+	Profile   string
+	Source    string `gorm:"not null"` // user|bot|schedule|watch|system
+	Input     string
+	Output    string
+	Status    string `gorm:"index;not null"` // queued|running|done|failed
+	StopReason string
+	ErrorClass string
+	StartedAt  *time.Time
+	EndedAt    *time.Time
+	UsageJSON  string
+	CreatedAt  time.Time
+	// TriggerMessageID is the Telegram message that produced this turn, so the
+	// runner can react to it with ✅ when the turn completes. 0 = no message.
+	TriggerMessageID int64
+}
+
+// Turn statuses and sources.
+const (
+	turnQueued  = "queued"
+	turnRunning = "running"
+	turnDone    = "done"
+	turnFailed  = "failed"
+
+	sourceUser     = "user"
+	sourceBot      = "bot"
+	sourceSchedule = "schedule"
+	sourceWatch    = "watch"
+	sourceSystem   = "system"
+)
+
+// InboxMessage is a message addressed to a bot that has not been folded into a
+// turn yet. FromBotID nil means the owner or ccc itself.
+type InboxMessage struct {
+	ID          int64 `gorm:"primaryKey"`
+	ToBotID     int64 `gorm:"index;not null"`
+	FromBotID   *int64
+	Text        string
+	Wake        bool
+	CreatedAt   time.Time
+	DeliveredAt *time.Time
+	TurnID      *int64
+}
+
+func (InboxMessage) TableName() string { return "inbox" }
+
+// Memory is one remembered fact. Scope is user (everyone), project (keyed by
+// path) or bot (keyed by bot id).
+type Memory struct {
+	ID            int64  `gorm:"primaryKey"`
+	Scope         string `gorm:"not null;uniqueIndex:idx_mem_key,priority:1"`
+	ScopeKey      string `gorm:"not null;uniqueIndex:idx_mem_key,priority:2"`
+	Key           string `gorm:"column:key;not null;uniqueIndex:idx_mem_key,priority:3"`
+	Text          string
+	CreatedByBotID *int64
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
+// Memory scopes.
+const (
+	scopeUser    = "user"
+	scopeProject = "project"
+	scopeBot     = "bot"
+)
+
+// Project is the registry entry for a code base a bot works on.
+type Project struct {
+	ID          int64  `gorm:"primaryKey"`
+	Path        string `gorm:"uniqueIndex;not null"`
+	Name        string
+	Description string
+	Stack       string
+	DeployNotes string
+	UpdatedAt   time.Time
+}
+
+// Watch is a deterministic command re-run on an interval (Phase 2b).
+type Watch struct {
+	ID         int64 `gorm:"primaryKey"`
+	BotID      int64 `gorm:"index;not null"`
+	Name       string
+	Command    string
+	IntervalS  int
+	LastHash   string
+	LastOutput string
+	LastRunAt  *time.Time
+	Enabled    bool
+}
+
+// Schedule is a self-wakeup (Phase 2b).
+type Schedule struct {
+	ID            int64 `gorm:"primaryKey"`
+	BotID         int64 `gorm:"index;not null"`
+	FireAt        time.Time
+	Note          string
+	RecurringCron string
+	FiredAt       *time.Time
+}
+
+// Question is an ask_owner round trip: asked during a turn, answered later by
+// a button tap or a reply in the topic.
+type Question struct {
+	ID             int64 `gorm:"primaryKey"`
+	BotID          int64 `gorm:"index;not null"`
+	TurnID         *int64
+	Question       string
+	OptionsJSON    string
+	Answer         string
+	AskedMessageID int64 `gorm:"index"`
+	CreatedAt      time.Time
+	AnsweredAt     *time.Time
+}
+
+// Access is the pairing/allowlist table (Phase 2b; created now so the schema
+// does not change under a live database).
+type Access struct {
+	TelegramUserID int64  `gorm:"primaryKey"`
+	Display        string
+	State          string // pending|approved|blocked
+	PairCode       string
+	CodeExpiresAt  *time.Time
+}
+
+func (Access) TableName() string { return "access" }
+
+// Setting is an instance setting editable from Telegram.
+type Setting struct {
+	Key   string `gorm:"column:key;primaryKey"`
+	Value string
+}
+
+// allModels is the AutoMigrate list; the whole DESIGN §5 schema is created up
+// front even where Phase 2a does not use a table yet.
+func allModels() []any {
+	return []any{
+		&Bot{}, &Turn{}, &InboxMessage{}, &Memory{}, &Project{},
+		&Watch{}, &Schedule{}, &Question{}, &Access{}, &Setting{},
+	}
+}
+
+// ftsAvailable records whether the memories FTS5 index exists. modernc's SQLite
+// build normally has FTS5, but the driver is swappable and an older build may
+// not, so recall() falls back to LIKE when this is false.
+var ftsAvailable bool
+
+// dataDir is the root for everything runtime: the database, bot workspaces and
+// the shared projects/ link. Configurable so tests get their own.
+func dataDir(config *Config) string {
+	if config != nil && strings.TrimSpace(config.DataDir) != "" {
+		return expandPath(config.DataDir)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".ccc" // safe-ignore: no home means a relative fallback is the least-bad option
+	}
+	return filepath.Join(home, ".local", "share", "ccc")
+}
+
+func dbPath(config *Config) string { return filepath.Join(dataDir(config), "ccc.db") }
+
+// botsDir holds one workspace per bot: <data_dir>/bots/<name>/workspace.
+func botsDir(config *Config) string { return filepath.Join(dataDir(config), "bots") }
+
+func botWorkspace(config *Config, name string) string {
+	return filepath.Join(botsDir(config), name, "workspace")
+}
+
+// openStore opens (creating if needed) the SQLite database at path and applies
+// the schema. WAL lets the `ccc mcp` child read and write while `ccc listen`
+// holds the file; busy_timeout absorbs the short write contention that causes;
+// foreign_keys is on because DESIGN §5 models real references.
+func openStore(path string) (*gorm.DB, error) {
+	if dir := filepath.Dir(path); dir != "" {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, fmt.Errorf("create data dir: %w", err)
+		}
+	}
+	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(10000)&_pragma=synchronous(NORMAL)"
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", path, err)
+	}
+	if err := db.AutoMigrate(allModels()...); err != nil {
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	if err := ensureMemoryFTS(db); err != nil {
+		ftsAvailable = false
+		hookLog("FTS5 unavailable (%v); recall falls back to LIKE search", err)
+	} else {
+		ftsAvailable = true
+	}
+	return db, nil
+}
+
+// ensureMemoryFTS creates the FTS5 index over memories. AutoMigrate cannot
+// express a virtual table, so it is raw SQL; the triggers keep it in sync with
+// whatever writes the memories table (including the separate `ccc mcp`
+// process, which is why this is done in SQL and not in Go callbacks).
+func ensureMemoryFTS(db *gorm.DB) error {
+	stmts := []string{
+		`CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(key, text, content='memories', content_rowid='id')`,
+		`CREATE TRIGGER IF NOT EXISTS memories_fts_ai AFTER INSERT ON memories BEGIN
+			INSERT INTO memories_fts(rowid, key, text) VALUES (new.id, new.key, new.text);
+		END`,
+		`CREATE TRIGGER IF NOT EXISTS memories_fts_ad AFTER DELETE ON memories BEGIN
+			INSERT INTO memories_fts(memories_fts, rowid, key, text) VALUES ('delete', old.id, old.key, old.text);
+		END`,
+		`CREATE TRIGGER IF NOT EXISTS memories_fts_au AFTER UPDATE ON memories BEGIN
+			INSERT INTO memories_fts(memories_fts, rowid, key, text) VALUES ('delete', old.id, old.key, old.text);
+			INSERT INTO memories_fts(rowid, key, text) VALUES (new.id, new.key, new.text);
+		END`,
+	}
+	for _, s := range stmts {
+		if err := db.Exec(s).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Bots
+// ---------------------------------------------------------------------------
+
+// botByTopic finds the live bot behind a forum topic.
+func botByTopic(db *gorm.DB, topicID int64) (*Bot, error) {
+	var b Bot
+	err := db.Where("topic_id = ? AND archived_at IS NULL", topicID).First(&b).Error
+	if err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
+func botByID(db *gorm.DB, id int64) (*Bot, error) {
+	var b Bot
+	if err := db.First(&b, id).Error; err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
+func botByName(db *gorm.DB, name string) (*Bot, error) {
+	var b Bot
+	if err := db.Where("name = ? AND archived_at IS NULL", name).First(&b).Error; err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
+func liveBots(db *gorm.DB) ([]Bot, error) {
+	var bots []Bot
+	err := db.Where("archived_at IS NULL").Order("id").Find(&bots).Error
+	return bots, err
+}
+
+// uniqueBotName makes a name unique among live bots by suffixing -2, -3, …
+func uniqueBotName(db *gorm.DB, base string) string {
+	base = strings.TrimSpace(base)
+	if base == "" {
+		base = "bot"
+	}
+	name := base
+	for i := 2; i < 1000; i++ {
+		var n int64
+		db.Model(&Bot{}).Where("name = ?", name).Count(&n)
+		if n == 0 {
+			return name
+		}
+		name = fmt.Sprintf("%s-%d", base, i)
+	}
+	return fmt.Sprintf("%s-%d", base, time.Now().Unix())
+}
+
+func setBotStatus(db *gorm.DB, botID int64, status string) {
+	db.Model(&Bot{}).Where("id = ?", botID).Update("status", status)
+}
+
+// ---------------------------------------------------------------------------
+// Memories
+// ---------------------------------------------------------------------------
+
+// memoryScopeKey normalizes the (scope, scope_key) pair. bot scope is always
+// the calling bot; project scope needs an explicit path.
+func memoryScopeKey(scope string, botID int64, projectPath string) (string, string, error) {
+	switch scope {
+	case scopeUser:
+		return scopeUser, "", nil
+	case scopeBot:
+		return scopeBot, fmt.Sprintf("%d", botID), nil
+	case scopeProject:
+		p := strings.TrimSpace(projectPath)
+		if p == "" {
+			return "", "", errors.New("project scope needs project_path")
+		}
+		return scopeProject, expandPath(p), nil
+	default:
+		return "", "", fmt.Errorf("unknown scope %q (use user, project or bot)", scope)
+	}
+}
+
+// upsertMemory writes one memory, replacing any existing text under the same
+// (scope, scope_key, key).
+func upsertMemory(db *gorm.DB, scope, scopeKey, key, text string, botID int64) error {
+	m := Memory{Scope: scope, ScopeKey: scopeKey, Key: key, Text: text, CreatedByBotID: &botID}
+	return db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "scope"}, {Name: "scope_key"}, {Name: "key"}},
+		DoUpdates: clause.Assignments(map[string]any{"text": text, "updated_at": time.Now()}),
+	}).Create(&m).Error
+}
+
+// visibleMemories returns the memories a bot may see: every user memory, every
+// project memory, and its own bot memories (DESIGN §6 recall).
+func visibleMemories(db *gorm.DB, botID int64) *gorm.DB {
+	return db.Model(&Memory{}).Where(
+		"scope = ? OR scope = ? OR (scope = ? AND scope_key = ?)",
+		scopeUser, scopeProject, scopeBot, fmt.Sprintf("%d", botID))
+}
+
+// searchMemories runs the recall query. FTS5 when available, LIKE otherwise;
+// an empty query lists the most recent visible memories.
+func searchMemories(db *gorm.DB, botID int64, query string, scope string, limit int) ([]Memory, error) {
+	if limit <= 0 || limit > 50 {
+		limit = 10
+	}
+	q := visibleMemories(db, botID)
+	if scope != "" {
+		q = q.Where("scope = ?", scope)
+	}
+	query = strings.TrimSpace(query)
+	if query == "" {
+		var out []Memory
+		err := q.Order("updated_at DESC").Limit(limit).Find(&out).Error
+		return out, err
+	}
+	if ftsAvailable {
+		var out []Memory
+		err := q.Where("id IN (SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?)", ftsQuery(query)).
+			Order("updated_at DESC").Limit(limit).Find(&out).Error
+		if err == nil {
+			return out, nil
+		}
+		// A malformed MATCH expression is a user-input problem, not a broken
+		// index: fall through to LIKE rather than failing the tool call.
+		hookLog("FTS query failed (%v); falling back to LIKE", err)
+		q = visibleMemories(db, botID)
+		if scope != "" {
+			q = q.Where("scope = ?", scope)
+		}
+	}
+	like := "%" + query + "%"
+	var out []Memory
+	err := q.Where("key LIKE ? OR text LIKE ?", like, like).Order("updated_at DESC").Limit(limit).Find(&out).Error
+	return out, err
+}
+
+// ftsQuery turns free text into a safe FTS5 MATCH expression: every word is
+// quoted, so user text can never inject FTS operators.
+func ftsQuery(s string) string {
+	fields := strings.FieldsFunc(s, func(r rune) bool {
+		return !(r == '_' || r == '-' || r == '.' || r == '/' ||
+			(r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'))
+	})
+	if len(fields) == 0 {
+		return `""`
+	}
+	quoted := make([]string, 0, len(fields))
+	for _, f := range fields {
+		quoted = append(quoted, `"`+f+`"`)
+	}
+	return strings.Join(quoted, " OR ")
+}
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+func getSetting(db *gorm.DB, key, def string) string {
+	var s Setting
+	if err := db.First(&s, "key = ?", key).Error; err != nil {
+		return def
+	}
+	if s.Value == "" {
+		return def
+	}
+	return s.Value
+}
+
+func setSetting(db *gorm.DB, key, value string) error {
+	return db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "key"}},
+		DoUpdates: clause.Assignments(map[string]any{"value": value}),
+	}).Create(&Setting{Key: key, Value: value}).Error
+}
