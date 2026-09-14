@@ -49,14 +49,14 @@ const (
 
 // Turn is one `claude -p` invocation: one input, one result.
 type Turn struct {
-	ID        int64 `gorm:"primaryKey"`
-	BotID     int64 `gorm:"index;not null"`
-	SessionID string
-	Profile   string
-	Source    string `gorm:"not null"` // user|bot|schedule|watch|system
-	Input     string
-	Output    string
-	Status    string `gorm:"index;not null"` // queued|running|done|failed
+	ID         int64 `gorm:"primaryKey"`
+	BotID      int64 `gorm:"index;not null"`
+	SessionID  string
+	Profile    string
+	Source     string `gorm:"not null"` // user|bot|schedule|watch|system
+	Input      string
+	Output     string
+	Status     string `gorm:"index;not null"` // queued|running|done|failed
 	StopReason string
 	ErrorClass string
 	StartedAt  *time.Time
@@ -100,14 +100,14 @@ func (InboxMessage) TableName() string { return "inbox" }
 // Memory is one remembered fact. Scope is user (everyone), project (keyed by
 // path) or bot (keyed by bot id).
 type Memory struct {
-	ID            int64  `gorm:"primaryKey"`
-	Scope         string `gorm:"not null;uniqueIndex:idx_mem_key,priority:1"`
-	ScopeKey      string `gorm:"not null;uniqueIndex:idx_mem_key,priority:2"`
-	Key           string `gorm:"column:key;not null;uniqueIndex:idx_mem_key,priority:3"`
-	Text          string
+	ID             int64  `gorm:"primaryKey"`
+	Scope          string `gorm:"not null;uniqueIndex:idx_mem_key,priority:1"`
+	ScopeKey       string `gorm:"not null;uniqueIndex:idx_mem_key,priority:2"`
+	Key            string `gorm:"column:key;not null;uniqueIndex:idx_mem_key,priority:3"`
+	Text           string
 	CreatedByBotID *int64
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // Memory scopes.
@@ -168,7 +168,7 @@ type Question struct {
 // Access is the pairing/allowlist table (Phase 2b; created now so the schema
 // does not change under a live database).
 type Access struct {
-	TelegramUserID int64  `gorm:"primaryKey"`
+	TelegramUserID int64 `gorm:"primaryKey"`
 	Display        string
 	State          string // pending|approved|blocked
 	PairCode       string
@@ -447,4 +447,89 @@ func setSetting(db *gorm.DB, key, value string) error {
 		Columns:   []clause.Column{{Name: "key"}},
 		DoUpdates: clause.Assignments(map[string]any{"value": value}),
 	}).Create(&Setting{Key: key, Value: value}).Error
+}
+
+// ---------------------------------------------------------------------------
+// Profile load
+// ---------------------------------------------------------------------------
+
+// runningTurnsByProfile counts the turns currently executing on each account.
+// This replaces the v2 "working background agents" input to chooseProfile
+// (DESIGN §4): v3 has no fleet to ask, and its own turn table is both cheaper
+// and exactly right — one running turn is one `claude -p` process.
+func runningTurnsByProfile(config *Config) map[string]int {
+	db, err := openStore(dbPath(config))
+	if err != nil {
+		return nil
+	}
+	defer closeStore(db)
+	return runningTurnsByProfileDB(db)
+}
+
+func runningTurnsByProfileDB(db *gorm.DB) map[string]int {
+	var rows []struct {
+		Profile string
+		N       int
+	}
+	if err := db.Model(&Turn{}).Select("profile, count(*) as n").
+		Where("status = ? AND profile <> ''", turnRunning).Group("profile").Scan(&rows).Error; err != nil {
+		return nil
+	}
+	out := make(map[string]int, len(rows))
+	for _, r := range rows {
+		out[r.Profile] = r.N
+	}
+	return out
+}
+
+// profileHasLiveTurns names the bots whose turn is running on a profile right
+// now, so `ccc profile remove` / `/account remove` refuse to pull it away.
+func profileHasLiveTurns(config *Config, profile string) ([]string, error) {
+	db, err := openStore(dbPath(config))
+	if err != nil {
+		return nil, nil // safe-ignore: no database means no instance has ever run, so nothing is live
+	}
+	defer closeStore(db)
+	var names []string
+	err = db.Model(&Turn{}).Joins("JOIN bots ON bots.id = turns.bot_id").
+		Where("turns.status = ? AND turns.profile = ?", turnRunning, profile).
+		Distinct().Pluck("bots.name", &names).Error
+	return names, err
+}
+
+// closeStore releases the underlying sqlite handle. The long-lived listener
+// never calls it; the short CLI paths above must, or they leak a file handle
+// (and a WAL reader) per invocation.
+func closeStore(db *gorm.DB) {
+	if sqlDB, err := db.DB(); err == nil {
+		sqlDB.Close() // safe-ignore: the process is about to move on either way
+	}
+}
+
+// botByCwd finds the live bot whose working directory contains path. It is how
+// `ccc send <file>`, run from inside a bot's workspace, knows which topic to
+// post into.
+func botByCwd(db *gorm.DB, path string) (*Bot, error) {
+	bots, err := liveBots(db)
+	if err != nil {
+		return nil, err
+	}
+	best := -1
+	for i := range bots {
+		cwd := strings.TrimRight(bots[i].Cwd, string(filepath.Separator))
+		if cwd == "" {
+			continue
+		}
+		if path != cwd && !strings.HasPrefix(path, cwd+string(filepath.Separator)) {
+			continue
+		}
+		// Prefer the most specific match when workspaces nest.
+		if best < 0 || len(cwd) > len(bots[best].Cwd) {
+			best = i
+		}
+	}
+	if best < 0 {
+		return nil, errors.New("no bot owns this directory")
+	}
+	return &bots[best], nil
 }

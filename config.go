@@ -14,9 +14,9 @@ import (
 var cfgMu sync.Mutex
 
 // updateConfig serializes a load→mutate→save cycle on the shared config file.
-// Every writer must go through it: the mirror poller and the Telegram update
-// handlers mutate the config concurrently, and racing whole-file saves silently
-// drop each other's changes (lost session entries → orphaned Telegram topics).
+// Every writer must go through it: the doctor loop and the Telegram update
+// handlers mutate the config concurrently (profiles, model), and racing
+// whole-file saves silently drop each other's changes.
 // mutate runs on a freshly-loaded copy; return true to persist it. Returns the
 // fresh (possibly mutated) config, or nil if the config could not be loaded.
 func updateConfig(mutate func(*Config) bool) *Config {
@@ -63,93 +63,18 @@ func getConfigPath() string {
 	return newPath
 }
 
+// loadConfig reads <config_dir>/config.json. Keys ccc no longer knows (the v2
+// `sessions` map above all) are simply ignored: v3 keeps no session state in
+// this file, and the first `saveConfig` drops them for good.
 func loadConfig() (*Config, error) {
 	data, err := os.ReadFile(getConfigPath())
 	if err != nil {
 		return nil, err
 	}
-
-	// First check if this is old format (sessions as map[string]int64)
-	var rawConfig map[string]json.RawMessage
-	if err := json.Unmarshal(data, &rawConfig); err != nil {
+	var config Config
+	if err := json.Unmarshal(data, &config); err != nil {
 		return nil, err
 	}
-
-	// Try to detect old sessions format
-	var needsMigration bool
-	var oldSessions map[string]int64
-	if sessionsRaw, ok := rawConfig["sessions"]; ok {
-		// Try to parse as old format (map of topic IDs)
-		if json.Unmarshal(sessionsRaw, &oldSessions) == nil && len(oldSessions) > 0 {
-			// Check if values are positive numbers (old format)
-			for _, v := range oldSessions {
-				if v > 0 {
-					needsMigration = true
-					break
-				}
-			}
-		}
-	}
-
-	var config Config
-	if needsMigration {
-		// Parse everything except sessions first
-		type ConfigWithoutSessions struct {
-			BotToken    string `json:"bot_token"`
-			ChatID      int64  `json:"chat_id"`
-			GroupID     int64  `json:"group_id"`
-			ProjectsDir string `json:"projects_dir"`
-			Away        bool   `json:"away"`
-		}
-		var partial ConfigWithoutSessions
-		json.Unmarshal(data, &partial)
-
-		config.BotToken = partial.BotToken
-		config.ChatID = partial.ChatID
-		config.GroupID = partial.GroupID
-		config.ProjectsDir = partial.ProjectsDir
-		config.Away = partial.Away
-
-		// Migrate sessions
-		home, _ := os.UserHomeDir()
-		config.Sessions = make(map[string]*SessionInfo)
-		for name, topicID := range oldSessions {
-			// For old sessions, try to figure out the path
-			var sessionPath string
-			if strings.HasPrefix(name, "/") {
-				// Absolute path
-				sessionPath = name
-			} else if strings.HasPrefix(name, "~/") {
-				// Home-relative path
-				sessionPath = filepath.Join(home, name[2:])
-			} else if config.ProjectsDir != "" {
-				// Use projects_dir if set
-				projectsDir := config.ProjectsDir
-				if strings.HasPrefix(projectsDir, "~/") {
-					projectsDir = filepath.Join(home, projectsDir[2:])
-				}
-				sessionPath = filepath.Join(projectsDir, name)
-			} else {
-				sessionPath = filepath.Join(home, name)
-			}
-			config.Sessions[name] = &SessionInfo{
-				TopicID: topicID,
-				Path:    sessionPath,
-			}
-		}
-		// Save migrated config
-		saveConfig(&config)
-	} else {
-		// Parse with new format
-		if err := json.Unmarshal(data, &config); err != nil {
-			return nil, err
-		}
-	}
-
-	if config.Sessions == nil {
-		config.Sessions = make(map[string]*SessionInfo)
-	}
-
 	return &config, nil
 }
 
@@ -168,12 +93,12 @@ func saveConfig(config *Config) error {
 	}
 	tmpName := tmp.Name()
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close() // safe-ignore: best-effort cleanup on an error path
+		tmp.Close()        // safe-ignore: best-effort cleanup on an error path
 		os.Remove(tmpName) // safe-ignore: best-effort cleanup on an error path
 		return err
 	}
 	if err := tmp.Chmod(0600); err != nil {
-		tmp.Close() // safe-ignore: best-effort cleanup on an error path
+		tmp.Close()        // safe-ignore: best-effort cleanup on an error path
 		os.Remove(tmpName) // safe-ignore: best-effort cleanup on an error path
 		return err
 	}
@@ -182,40 +107,6 @@ func saveConfig(config *Config) error {
 		return err
 	}
 	return os.Rename(tmpName, path)
-}
-
-// getProjectsDir returns the base directory for projects
-func getProjectsDir(config *Config) string {
-	if config.ProjectsDir != "" {
-		// Expand ~ to home directory
-		if strings.HasPrefix(config.ProjectsDir, "~/") {
-			home, _ := os.UserHomeDir()
-			return filepath.Join(home, config.ProjectsDir[2:])
-		}
-		return config.ProjectsDir
-	}
-	home, _ := os.UserHomeDir()
-	return home
-}
-
-// resolveProjectPath resolves the full path for a project
-// If name starts with / or ~/, it's treated as absolute/home-relative path
-// Otherwise, it's relative to projects_dir
-func resolveProjectPath(config *Config, name string) string {
-	// Absolute path
-	if strings.HasPrefix(name, "/") {
-		return name
-	}
-	// Home-relative path (~/something or just ~)
-	if strings.HasPrefix(name, "~/") || name == "~" {
-		home, _ := os.UserHomeDir()
-		if name == "~" {
-			return home
-		}
-		return filepath.Join(home, name[2:])
-	}
-	// Relative to projects_dir
-	return filepath.Join(getProjectsDir(config), name)
 }
 
 // expandPath expands ~ to home directory

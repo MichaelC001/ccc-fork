@@ -36,23 +36,23 @@ func handleSendFile(filePath string) error {
 		return fmt.Errorf("file not found: %w", err)
 	}
 
-	// Find session from current directory
-	cwd, _ := os.Getwd()
-	var sessionName string
-	var topicID int64
-	for name, info := range config.Sessions {
-		if info == nil {
-			continue
-		}
-		if cwd == info.Path || strings.HasPrefix(cwd, info.Path+"/") {
-			sessionName = name
-			topicID = info.TopicID
-			break
-		}
+	// Find the bot that owns the current directory.
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("cannot resolve the working directory: %w", err)
 	}
-
-	if topicID == 0 || config.GroupID == 0 {
-		return fmt.Errorf("no session found for current directory")
+	db, err := openStore(dbPath(config))
+	if err != nil {
+		return fmt.Errorf("open the ccc database: %w", err)
+	}
+	defer closeStore(db)
+	bot, err := botByCwd(db, cwd)
+	if err != nil {
+		return fmt.Errorf("no bot owns %s — run this from a bot's working directory", cwd)
+	}
+	sessionName, topicID := bot.Name, bot.TopicID
+	if config.GroupID == 0 {
+		return fmt.Errorf("no Telegram group configured")
 	}
 
 	fileName := filepath.Base(filePath)

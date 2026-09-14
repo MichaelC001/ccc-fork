@@ -58,9 +58,9 @@ func profileCommand(args []string) error {
 func printProfileUsage() {
 	fmt.Println(`ccc profile - manage the Claude accounts ccc runs agents under.
 
-Each profile is one CLAUDE_CONFIG_DIR: its own credentials, .claude.json,
-projects/, jobs/ and background-agent daemon. Sessions are pinned to the
-profile they were started in.
+Each profile is one CLAUDE_CONFIG_DIR: its own credentials, .claude.json and
+settings.json. Profiles share <data_dir>/projects, so any account can resume
+any bot's conversation; ccc picks one per turn (DESIGN §4).
 
     ccc profile list                             Show profiles, usage and login state
     ccc profile add <name> <dir> [--label X]     Register a profile (creates dir)
@@ -81,29 +81,27 @@ func loadConfigOrNil() *Config {
 
 // profileRow is one rendered line of the profile table.
 type profileRow struct {
-	Profile       Profile
-	Usage         profileUsage
-	WorkingAgents int
-	FleetOK       bool
-	LoggedIn      bool
-	LoginKnown    bool
-	Account       string
-	CooledUntil   time.Time
+	Profile      Profile
+	Usage        profileUsage
+	RunningTurns int
+	LoggedIn     bool
+	LoginKnown   bool
+	Account      string
+	CooledUntil  time.Time
 }
 
 // collectProfileRows gathers everything the table shows. probeLogin is slow (it
 // shells out per profile), so the Telegram path can skip it.
 func collectProfileRows(config *Config, probeLogin bool) []profileRow {
 	now := time.Now()
-	snaps := snapshotAllProfiles(config)
+	working := runningTurnsByProfile(config)
 	var rows []profileRow
 	for _, p := range listProfiles(config) {
 		row := profileRow{
-			Profile:       p,
-			Usage:         readProfileUsage(p),
-			WorkingAgents: countWorking(snaps[p.Name]),
-			FleetOK:       snaps[p.Name].OK,
-			CooledUntil:   profileCooledUntil(p.Name, now),
+			Profile:      p,
+			Usage:        readProfileUsage(p),
+			RunningTurns: working[p.Name],
+			CooledUntil:  profileCooledUntil(p.Name, now),
 		}
 		if probeLogin {
 			in, acct, err := profileLoggedIn(p)
@@ -127,7 +125,7 @@ func renderProfileTable(config *Config, probeLogin bool) string {
 	rows := collectProfileRows(config, probeLogin)
 	def := defaultProfile(config).Name
 	var sb strings.Builder
-	header := []string{"NAME", "LABEL", "CONFIG DIR", "5h", "7d", "WORKING", "LOGIN"}
+	header := []string{"NAME", "LABEL", "CONFIG DIR", "5h", "7d", "TURNS", "LOGIN"}
 	table := [][]string{header}
 	for _, r := range rows {
 		name := r.Profile.Name
@@ -147,10 +145,7 @@ func renderProfileTable(config *Config, probeLogin bool) string {
 				login = "NO"
 			}
 		}
-		working := fmt.Sprintf("%d", r.WorkingAgents)
-		if !r.FleetOK {
-			working = "?"
-		}
+		working := fmt.Sprintf("%d", r.RunningTurns)
 		table = append(table, []string{
 			name,
 			orDash(r.Profile.Label),
@@ -184,7 +179,7 @@ func renderProfileTable(config *Config, probeLogin bool) string {
 			sb.WriteString(fmt.Sprintf("\n⏳ %s is on usage cooldown until %s\n", r.Profile.Name, r.CooledUntil.Format("15:04")))
 		}
 	}
-	sb.WriteString("\n* = default profile for new sessions. Utilization comes from Claude Code's own cache and may be stale.\n")
+	sb.WriteString("\n* = default profile. TURNS = turns running on it right now. Utilization comes from Claude Code's own cache and may be stale.\n")
 	return sb.String()
 }
 
@@ -254,18 +249,12 @@ func profileRemove(name string) error {
 	if config.Profiles == nil || config.Profiles[name] == nil {
 		return fmt.Errorf("no such profile: %s", name)
 	}
-	// A session's conversation only exists inside its own config dir, so
-	// dropping a profile that sessions still reference would orphan them.
-	var used []string
-	for sessName, info := range config.Sessions {
-		if info != nil && info.Profile == name {
-			used = append(used, sessName)
-		}
-	}
-	if len(used) > 0 {
-		sort.Strings(used)
-		return fmt.Errorf("profile %q is still used by %d session(s): %s\n(delete them in Telegram with /delete first)",
-			name, len(used), strings.Join(used, ", "))
+	if busy, err := profileHasLiveTurns(config, name); err != nil {
+		return err
+	} else if len(busy) > 0 {
+		sort.Strings(busy)
+		return fmt.Errorf("profile %q is running a turn for %d bot(s): %s\n(wait for them, or /stop them in Telegram first)",
+			name, len(busy), strings.Join(busy, ", "))
 	}
 	delete(config.Profiles, name)
 	if config.DefaultProfile == name {
@@ -342,15 +331,6 @@ func doctorProfiles() bool {
 			ok = false
 		}
 
-		fmt.Printf("    fleet......... ")
-		if _, err := listAgents(p, true); err == nil {
-			fmt.Println("✅ `claude agents --json` works")
-		} else {
-			fmt.Printf("❌ %v\n", err)
-			fmt.Println("       Update Claude Code: it must support `claude --bg` / `claude agents`")
-			ok = false
-		}
-
 		fmt.Printf("    login......... ")
 		loggedIn, acct, err := profileLoggedIn(p)
 		switch {
@@ -370,20 +350,9 @@ func doctorProfiles() bool {
 			ok = false
 		}
 
-		// A stale token passes `auth status` (which only reads local state) and
-		// surfaces only once a session actually calls the model, so look for it in
-		// the profile's most recent blocked job too. Its wording blames the
-		// organization, but we have seen it clear with nothing but a fresh login.
-		if reason := lastBlockedReason(p); isStaleTokenError(reason) {
-			fmt.Println("    token......... ❌ a recent session was blocked by a stale token")
-			fmt.Printf("       %s\n", truncate(reason, 160))
-			fmt.Printf("       Reads like an org policy block; usually fixed by: ccc profile login %s\n", p.Name)
-			ok = false
-		}
-
-		// `--bg --dangerously-skip-permissions` is refused until the
-		// bypass-permissions disclaimer has been accepted ONCE PER CONFIG DIR,
-		// so a fresh profile always needs this before ccc can dispatch into it.
+		// The bypass-permissions disclaimer is accepted ONCE PER CONFIG DIR.
+		// `/account login` drives it through a PTY; without it a profile can
+		// still run turns, but the acceptance state is worth reporting.
 		fmt.Printf("    disclaimer.... ")
 		accepted, known := bypassAccepted(p)
 		switch {
@@ -391,10 +360,10 @@ func doctorProfiles() bool {
 			fmt.Println("✅ bypass-permissions accepted")
 		case !known:
 			fmt.Println("⚠️  unknown (no settings.json / .claude.json yet)")
-			fmt.Printf("       If --bg is refused: %s\n", bypassDisclaimerHint(p))
-		default:
-			fmt.Println("❌ not accepted — `claude --bg` will refuse to launch")
 			fmt.Printf("       %s\n", bypassDisclaimerHint(p))
+		default:
+			fmt.Println("❌ not accepted")
+			fmt.Printf("       %s, or send /account login %s in Telegram\n", bypassDisclaimerHint(p), p.Name)
 			ok = false
 		}
 

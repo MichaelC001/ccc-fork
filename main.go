@@ -4,79 +4,47 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
-const version = "2.0.0"
+const version = "3.0.0"
 
-// SessionInfo stores information about a session. Each session is a dedicated
-// Claude Code background agent (visible in `claude agents`). The stable key is
-// TopicID; SessionID/ShortID track the CURRENT bg agent and are refreshed on
-// every dispatch/resume (the short id changes each time a session is resumed).
-type SessionInfo struct {
-	TopicID   int64  `json:"topic_id"`
-	Path      string `json:"path"`
-	SessionID string `json:"session_id,omitempty"` // current conversation UUID
-	ShortID   string `json:"short_id,omitempty"`   // current bg daemon short id
-	Title     string `json:"title,omitempty"`      // current Telegram topic title (mirrors the agent's name)
-	Marked    bool   `json:"marked,omitempty"`     // ccc has embedded its stable marker (cccMarker) in this conversation
-
-	// Profile is the Claude account (CLAUDE_CONFIG_DIR) this session runs
-	// under. Empty means the default profile, which keeps configs written
-	// before multi-profile support valid with no migration. A session never
-	// changes profile once it has a SessionID: its transcript, job state and
-	// daemon all live inside that profile's config dir.
-	Profile string `json:"profile,omitempty"`
-
-	// OldSessionIDs are the conversation UUIDs this session used before its most
-	// recent resume(s). A resume mints a brand-new UUID with no server-side link
-	// to its parent, which lingers in `claude agents --all` as a pid-less "done"
-	// entry — tracking the lineage lets discovery skip it instead of spawning a
-	// duplicate topic for the parent conversation.
-	OldSessionIDs []string `json:"old_session_ids,omitempty"`
-	// ResumingAt is the unix time a resume started for this session (0 when not
-	// resuming). While fresh it tells the reaper the agent's brief absence from
-	// the fleet is an in-flight resume, not a dismissed session.
-	ResumingAt int64 `json:"resuming_at,omitempty"`
-}
-
-// Config stores bot configuration and session mappings
+// Config is the bootstrap configuration (<config_dir>/config.json). Everything
+// that changes at runtime lives in SQLite instead (DESIGN §5); this file only
+// holds what ccc needs before the database exists.
 type Config struct {
-	BotToken         string                  `json:"bot_token"`
-	ChatID           int64                   `json:"chat_id"`                     // Private chat for simple commands
-	GroupID          int64                   `json:"group_id,omitempty"`          // Group with topics for sessions
-	Sessions         map[string]*SessionInfo `json:"sessions,omitempty"`          // session name -> session info
-	ProjectsDir      string                  `json:"projects_dir,omitempty"`      // Base directory for new projects (default: ~)
-	TranscriptionLang string                  `json:"transcription_lang,omitempty"` // Language code for whisper (e.g. "es", "en")
-	RelayURL         string                  `json:"relay_url,omitempty"`         // Relay server URL for large file transfers
-	Profiles         map[string]*Profile     `json:"profiles,omitempty"`         // profile name -> Claude account (CLAUDE_CONFIG_DIR)
-	DefaultProfile   string                  `json:"default_profile,omitempty"`  // profile new sessions use when none is picked
-	DataDir          string                  `json:"data_dir,omitempty"`          // v3 runtime root (default ~/.local/share/ccc)
-	Model            string                  `json:"model,omitempty"`             // model every v3 bot runs on (default: claude's own default)
-	EnvPassthrough   []string                `json:"env_passthrough,omitempty"`   // extra env var names bots inherit (DESIGN §3.1)
-	Away             bool                    `json:"away"`
-	OAuthToken       string                  `json:"oauth_token,omitempty"`
-	OTPSecret        string                  `json:"otp_secret,omitempty"`        // TOTP secret for safe mode
+	BotToken          string              `json:"bot_token"`
+	ChatID            int64               `json:"chat_id"`                      // the owner's Telegram user id — also their DM chat
+	GroupID           int64               `json:"group_id,omitempty"`           // the forum group the bots live in
+	TranscriptionLang string              `json:"transcription_lang,omitempty"` // language code for whisper (e.g. "es")
+	RelayURL          string              `json:"relay_url,omitempty"`          // relay server for files over 50 MB
+	Profiles          map[string]*Profile `json:"profiles,omitempty"`           // profile name -> Claude account (CLAUDE_CONFIG_DIR)
+	DefaultProfile    string              `json:"default_profile,omitempty"`    // profile used when selection has no better answer
+	DataDir           string              `json:"data_dir,omitempty"`           // runtime root (default ~/.local/share/ccc)
+	Model             string              `json:"model,omitempty"`              // model every bot runs on (default: claude's own)
+	EnvPassthrough    []string            `json:"env_passthrough,omitempty"`    // extra env var names bots inherit (DESIGN §3.1)
 }
 
-// TelegramMessage represents a Telegram message
+// TelegramMessage represents a Telegram message.
 type TelegramMessage struct {
-	MessageID       int    `json:"message_id"`
-	MessageThreadID int64  `json:"message_thread_id,omitempty"` // Topic ID
+	MessageID       int   `json:"message_id"`
+	MessageThreadID int64 `json:"message_thread_id,omitempty"` // topic id
 	Chat            struct {
 		ID   int64  `json:"id"`
 		Type string `json:"type"` // "private", "group", "supergroup"
 	} `json:"chat"`
 	From struct {
-		ID       int64  `json:"id"`
-		Username string `json:"username"`
+		ID        int64  `json:"id"`
+		Username  string `json:"username"`
+		FirstName string `json:"first_name"`
 	} `json:"from"`
-	Text           string           `json:"text"`
-	ReplyToMessage *TelegramMessage `json:"reply_to_message,omitempty"`
-	Voice          *TelegramVoice   `json:"voice,omitempty"`
-	Photo          []TelegramPhoto  `json:"photo,omitempty"`
+	Text           string            `json:"text"`
+	ReplyToMessage *TelegramMessage  `json:"reply_to_message,omitempty"`
+	Voice          *TelegramVoice    `json:"voice,omitempty"`
+	Photo          []TelegramPhoto   `json:"photo,omitempty"`
 	Document       *TelegramDocument `json:"document,omitempty"`
-	Caption        string           `json:"caption,omitempty"`
+	Caption        string            `json:"caption,omitempty"`
 }
 
 type TelegramVoice struct {
@@ -97,90 +65,47 @@ type TelegramDocument struct {
 	FileSize int    `json:"file_size"`
 }
 
-// CallbackQuery represents a Telegram callback query (button press)
+// CallbackQuery represents an inline-button tap.
 type CallbackQuery struct {
 	ID   string `json:"id"`
 	From struct {
-		ID int64 `json:"id"`
+		ID        int64  `json:"id"`
+		Username  string `json:"username"`
+		FirstName string `json:"first_name"`
 	} `json:"from"`
 	Message *TelegramMessage `json:"message"`
 	Data    string           `json:"data"`
 }
 
-// TelegramUpdate represents an update from Telegram
-type TelegramUpdate struct {
-	OK          bool   `json:"ok"`
-	Description string `json:"description"`
-	Result      []struct {
-		UpdateID      int             `json:"update_id"`
-		Message       TelegramMessage `json:"message"`
-		CallbackQuery *CallbackQuery  `json:"callback_query"`
-	} `json:"result"`
+// telegramUpdateEntry is one element of a getUpdates result.
+type telegramUpdateEntry struct {
+	UpdateID      int              `json:"update_id"`
+	Message       TelegramMessage  `json:"message"`
+	EditedMessage *TelegramMessage `json:"edited_message"`
+	CallbackQuery *CallbackQuery   `json:"callback_query"`
 }
 
-// TelegramResponse represents a response from Telegram API
+// TelegramUpdate represents a getUpdates response.
+type TelegramUpdate struct {
+	OK          bool                  `json:"ok"`
+	Description string                `json:"description"`
+	Result      []telegramUpdateEntry `json:"result"`
+}
+
+// TelegramResponse represents a generic Bot API response.
 type TelegramResponse struct {
 	OK          bool            `json:"ok"`
 	Description string          `json:"description,omitempty"`
 	Result      json.RawMessage `json:"result,omitempty"`
 }
 
-// TopicResult represents the result of creating a forum topic
+// TopicResult is the result of creating a forum topic.
 type TopicResult struct {
 	MessageThreadID int64  `json:"message_thread_id"`
 	Name            string `json:"name"`
 }
 
-// HookData represents data received from Claude hook
-type HookData struct {
-	Cwd              string          `json:"cwd"`
-	TranscriptPath   string          `json:"transcript_path"`
-	SessionID        string          `json:"session_id"`
-	HookEventName    string          `json:"hook_event_name"`
-	ToolName         string          `json:"tool_name"`
-	Prompt           string          `json:"prompt"`            // For UserPromptSubmit hook
-	Message          string          `json:"message"`           // For Notification hook
-	Title            string          `json:"title"`             // For Notification hook
-	NotificationType string          `json:"notification_type"` // For Notification hook
-	StopHookActive   bool            `json:"stop_hook_active"`  // For Stop hook
-	ToolInputRaw     json.RawMessage `json:"tool_input"`        // Raw tool input JSON
-	ToolInput        HookToolInput   `json:"-"`                 // Parsed from ToolInputRaw
-}
-
-// HookToolInput holds parsed tool input for known tool types
-type HookToolInput struct {
-	Questions []struct {
-		Question    string `json:"question"`
-		Header      string `json:"header"`
-		MultiSelect bool   `json:"multiSelect"`
-		Options     []struct {
-			Label       string `json:"label"`
-			Description string `json:"description"`
-		} `json:"options"`
-	} `json:"questions"`
-	Command     string `json:"command,omitempty"`     // For Bash
-	Description string `json:"description,omitempty"` // For Bash/Task
-	FilePath    string `json:"file_path,omitempty"`   // For Read/Write/Edit
-	Query       string `json:"query,omitempty"`       // For WebSearch
-	Pattern     string `json:"pattern,omitempty"`     // For Grep/Glob
-	URL         string `json:"url,omitempty"`         // For WebFetch
-	Prompt      string `json:"prompt,omitempty"`      // For Task/WebFetch
-	OldString   string `json:"old_string,omitempty"`  // For Edit
-}
-
-// parseHookData unmarshals raw JSON and populates ToolInput
-func parseHookData(data []byte) (HookData, error) {
-	var hd HookData
-	if err := json.Unmarshal(data, &hd); err != nil {
-		return hd, err
-	}
-	if len(hd.ToolInputRaw) > 0 {
-		json.Unmarshal(hd.ToolInputRaw, &hd.ToolInput)
-	}
-	return hd, nil
-}
-
-// InlineKeyboardButton represents a Telegram inline keyboard button
+// InlineKeyboardButton represents a Telegram inline keyboard button.
 type InlineKeyboardButton struct {
 	Text         string `json:"text"`
 	CallbackData string `json:"callback_data"`
@@ -192,206 +117,53 @@ func init() {
 }
 
 func main() {
-	// Handle flags
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "-h", "--help", "help":
-			printHelp()
-			return
-		case "-v", "--version", "version":
-			fmt.Printf("ccc version %s\n", version)
-			return
-		}
-	}
-
 	if len(os.Args) < 2 {
-		// No args: attach to this directory's background session (or run claude)
-		if err := startSession(false); err != nil {
-			os.Exit(1)
-		}
-		return
-	}
-
-	// Check for -c flag (continue) as first arg
-	if os.Args[1] == "-c" {
-		if err := startSession(true); err != nil {
-			os.Exit(1)
-		}
+		printHelp()
 		return
 	}
 
 	switch os.Args[1] {
+	case "-h", "--help", "help":
+		printHelp()
+
+	case "-v", "--version", "version":
+		fmt.Printf("ccc version %s\n", version)
+
 	case "setup":
 		if len(os.Args) < 3 {
-			fmt.Println("Usage: ccc setup <bot_token>")
-			os.Exit(1)
+			fail("Usage: ccc setup <bot_token>")
 		}
-		if err := setup(os.Args[2]); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
+		must(setup(os.Args[2]))
 
 	case "doctor":
 		doctor()
 
 	case "profile":
-		if err := profileCommand(os.Args[2:]); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
+		must(profileCommand(os.Args[2:]))
 
 	case "config":
-		config, err := loadConfig()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		if len(os.Args) < 3 {
-			// Show current config
-			fmt.Printf("projects_dir: %s\n", getProjectsDir(config))
-			if config.OAuthToken != "" {
-				fmt.Println("oauth_token: configured")
-			} else {
-				fmt.Println("oauth_token: not set")
-			}
-			if config.TranscriptionLang != "" {
-				fmt.Printf("transcription_lang: %s\n", config.TranscriptionLang)
-			} else {
-				fmt.Println("transcription_lang: not set (auto-detect)")
-			}
-			fmt.Println("\nUsage: ccc config <key> <value>")
-			fmt.Println("  ccc config projects-dir ~/Projects")
-			fmt.Println("  ccc config oauth-token <token>")
-			fmt.Println("  ccc config transcription-lang es")
-			os.Exit(0)
-		}
-		key := os.Args[2]
-		if len(os.Args) < 4 {
-			// Show specific key
-			switch key {
-			case "projects-dir":
-				fmt.Println(getProjectsDir(config))
-			case "oauth-token":
-				if config.OAuthToken != "" {
-					fmt.Println("configured")
-				} else {
-					fmt.Println("not set")
-				}
-			case "bot-token":
-				if config.BotToken != "" {
-					fmt.Println("configured")
-				} else {
-					fmt.Println("not set")
-				}
-			case "transcription-lang":
-				if config.TranscriptionLang != "" {
-					fmt.Println(config.TranscriptionLang)
-				} else {
-					fmt.Println("not set (auto-detect)")
-				}
-			default:
-				fmt.Fprintf(os.Stderr, "Unknown config key: %s\n", key)
-				os.Exit(1)
-			}
-			os.Exit(0)
-		}
-		value := os.Args[3]
-		switch key {
-		case "projects-dir":
-			config.ProjectsDir = value
-			if err := saveConfig(config); err != nil {
-				fmt.Fprintf(os.Stderr, "Error saving config: %v\n", err)
-				os.Exit(1)
-			}
-			fmt.Printf("✅ projects_dir set to: %s\n", getProjectsDir(config))
-		case "oauth-token":
-			config.OAuthToken = value
-			if err := saveConfig(config); err != nil {
-				fmt.Fprintf(os.Stderr, "Error saving config: %v\n", err)
-				os.Exit(1)
-			}
-			fmt.Println("✅ OAuth token saved")
-		case "bot-token":
-			config.BotToken = value
-			if err := saveConfig(config); err != nil {
-				fmt.Fprintf(os.Stderr, "Error saving config: %v\n", err)
-				os.Exit(1)
-			}
-			fmt.Println("✅ Bot token saved")
-		case "transcription-lang":
-			config.TranscriptionLang = value
-			if err := saveConfig(config); err != nil {
-				fmt.Fprintf(os.Stderr, "Error saving config: %v\n", err)
-				os.Exit(1)
-			}
-			fmt.Printf("✅ Transcription language set to: %s\n", value)
-		default:
-			fmt.Fprintf(os.Stderr, "Unknown config key: %s\n", key)
-			os.Exit(1)
-		}
+		must(configCommand(os.Args[2:]))
 
 	case "setgroup":
 		config, err := loadConfig()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		if err := setGroup(config); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
+		must(err)
+		must(setGroup(config))
 
 	case "mcp":
 		// Stdio MCP server for one turn; spawned by Claude Code, never by hand.
-		if err := runMCPServer(os.Args[2:]); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
+		must(runMCPServer(os.Args[2:]))
 
 	case "listen":
-		if err := listenV3(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-
-	case "hook-question":
-		handleAskQuestionHook()
+		must(listenV3())
 
 	case "install":
-		if err := installSkill(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		if err := installService(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-
-	case "uninstall":
-		uninstallSkill()
-		fmt.Println("✅ CCC uninstalled")
+		must(installService())
 
 	case "send":
 		if len(os.Args) < 3 {
-			fmt.Fprintf(os.Stderr, "Usage: ccc send <file>\n")
-			os.Exit(1)
+			fail("Usage: ccc send <file>")
 		}
-		if err := handleSendFile(os.Args[2]); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-
-	case "start":
-		// start <name> <work-dir> <prompt>
-		// Creates a Telegram topic + background agent and sends the initial prompt (detached)
-		if len(os.Args) < 5 {
-			fmt.Fprintf(os.Stderr, "Usage: ccc start <session-name> <work-dir> <prompt>\n")
-			os.Exit(1)
-		}
-		if err := startDetached(os.Args[2], os.Args[3], os.Args[4]); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
+		must(handleSendFile(os.Args[2]))
 
 	case "relay":
 		port := "8080"
@@ -401,9 +173,166 @@ func main() {
 		runRelayServer(port)
 
 	default:
-		if err := send(strings.Join(os.Args[1:], " ")); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+		fail("Unknown command %q. Run `ccc --help`.", os.Args[1])
+	}
+}
+
+func must(err error) {
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func fail(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
+	os.Exit(1)
+}
+
+// ---------------------------------------------------------------------------
+// `ccc config`
+// ---------------------------------------------------------------------------
+
+// configCommand is the non-interactive bootstrap path: on a headless VM,
+// `ccc config set bot_token …`, `chat_id …` and `group_id …` are enough to
+// bring an instance up without ever attaching a terminal to Telegram.
+func configCommand(args []string) error {
+	config, err := loadConfig()
+	if err != nil || config == nil {
+		config = &Config{} // not configured yet: `config set` is how it starts existing
+	}
+	if len(args) == 0 {
+		printConfig(config)
+		return nil
+	}
+	switch args[0] {
+	case "get":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: ccc config get <key>")
+		}
+		value, err := configGet(config, args[1])
+		if err != nil {
+			return err
+		}
+		fmt.Println(value)
+		return nil
+	case "set":
+		if len(args) < 3 {
+			return fmt.Errorf("usage: ccc config set <key> <value>")
+		}
+		if err := configSet(config, args[1], strings.Join(args[2:], " ")); err != nil {
+			return err
+		}
+		if err := saveConfig(config); err != nil {
+			return fmt.Errorf("save config: %w", err)
+		}
+		value, err := configGet(config, args[1])
+		if err != nil {
+			return err
+		}
+		fmt.Printf("✅ %s = %s\n", args[1], value)
+		return nil
+	default:
+		return fmt.Errorf("usage: ccc config [get <key> | set <key> <value>]")
+	}
+}
+
+// configKeys are the keys `ccc config` understands. Secrets are never printed
+// back (DESIGN §12): the bot token reads as "configured".
+var configKeys = []string{"bot_token", "chat_id", "group_id", "model", "data_dir", "env_passthrough", "relay_url", "transcription_lang", "default_profile"}
+
+func configGet(config *Config, key string) (string, error) {
+	switch key {
+	case "bot_token":
+		if config.BotToken == "" {
+			return "not set", nil
+		}
+		return "configured", nil
+	case "chat_id":
+		return fmt.Sprint(config.ChatID), nil
+	case "group_id":
+		return fmt.Sprint(config.GroupID), nil
+	case "model":
+		return firstNonEmpty(config.Model, "(claude default)"), nil
+	case "data_dir":
+		return dataDir(config), nil
+	case "env_passthrough":
+		return strings.Join(config.EnvPassthrough, ","), nil
+	case "relay_url":
+		return firstNonEmpty(config.RelayURL, defaultRelayURL), nil
+	case "transcription_lang":
+		return firstNonEmpty(config.TranscriptionLang, "(auto-detect)"), nil
+	case "default_profile":
+		return firstNonEmpty(config.DefaultProfile, "(first by name)"), nil
+	}
+	return "", fmt.Errorf("unknown config key %q (known: %s)", key, strings.Join(configKeys, ", "))
+}
+
+func configSet(config *Config, key, value string) error {
+	value = strings.TrimSpace(value)
+	parseID := func() (int64, error) {
+		n, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("%s must be a number, got %q", key, value)
+		}
+		return n, nil
+	}
+	switch key {
+	case "bot_token":
+		config.BotToken = value
+	case "chat_id":
+		n, err := parseID()
+		if err != nil {
+			return err
+		}
+		config.ChatID = n
+	case "group_id":
+		n, err := parseID()
+		if err != nil {
+			return err
+		}
+		config.GroupID = n
+	case "model":
+		config.Model = value
+	case "data_dir":
+		config.DataDir = value
+	case "env_passthrough":
+		config.EnvPassthrough = splitList(value)
+	case "relay_url":
+		config.RelayURL = value
+	case "transcription_lang":
+		config.TranscriptionLang = value
+	case "default_profile":
+		config.DefaultProfile = value
+	default:
+		return fmt.Errorf("unknown config key %q (known: %s)", key, strings.Join(configKeys, ", "))
+	}
+	return nil
+}
+
+// splitList parses a comma- or space-separated list, dropping empties.
+func splitList(s string) []string {
+	fields := strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' })
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if f = strings.TrimSpace(f); f != "" {
+			out = append(out, f)
 		}
 	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func printConfig(config *Config) {
+	fmt.Printf("config file: %s\n\n", getConfigPath())
+	for _, key := range configKeys {
+		value, err := configGet(config, key)
+		if err != nil {
+			continue
+		}
+		fmt.Printf("%-19s %s\n", key+":", value)
+	}
+	fmt.Println("\nUsage: ccc config set <key> <value>")
 }

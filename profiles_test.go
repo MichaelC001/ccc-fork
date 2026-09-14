@@ -186,44 +186,6 @@ func TestChooseProfileIsDeterministic(t *testing.T) {
 	}
 }
 
-func TestCountWorking(t *testing.T) {
-	snap := profileSnapshot{OK: true, Agents: []AgentInfo{
-		{ID: "1", State: "working"},
-		{ID: "2", State: "Working"}, // state comparison is case-insensitive
-		{ID: "3", State: "done"},
-		{ID: "4", State: ""},
-	}}
-	if got := countWorking(snap); got != 2 {
-		t.Errorf("countWorking = %d, want 2", got)
-	}
-	// A failed snapshot claims nothing rather than reporting a bogus zero-truth.
-	if got := countWorking(profileSnapshot{OK: false, Agents: snap.Agents}); got != 0 {
-		t.Errorf("countWorking(!OK) = %d, want 0", got)
-	}
-}
-
-func TestIsUsageLimitSignal(t *testing.T) {
-	tests := []struct {
-		name string
-		js   *jobState
-		want bool
-	}{
-		{"nil", nil, false},
-		{"not blocked", &jobState{State: "working", Detail: "usage limit reached"}, false},
-		{"blocked with usage limit in detail", &jobState{State: "blocked", Detail: "Usage limit reached"}, true},
-		{"blocked with rate limit in needs", &jobState{State: "blocked", Needs: "rate limit — try later"}, true},
-		{"blocked with resets in needs", &jobState{State: "blocked", Needs: "limit resets at 5pm"}, true},
-		{"blocked for another reason", &jobState{State: "blocked", Detail: "waiting for your answer", Needs: "a decision"}, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := isUsageLimitSignal(tt.js); got != tt.want {
-				t.Errorf("isUsageLimitSignal = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestProfileCooldown(t *testing.T) {
 	cooldownMu.Lock()
 	cooldowns = map[string]time.Time{}
@@ -321,45 +283,6 @@ func TestListProfilesAndDefault(t *testing.T) {
 	})
 }
 
-func TestProfileForSession(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	cfg := &Config{
-		Profiles:       map[string]*Profile{"work": {ConfigDir: "/tmp/a"}, "work2": {ConfigDir: "/tmp/b"}},
-		DefaultProfile: "work",
-	}
-	// Empty Profile means "the default" — this is what keeps configs written
-	// before multi-profile support valid with no migration.
-	if got := profileFor(cfg, &SessionInfo{}).Name; got != "work" {
-		t.Errorf("empty profile = %q, want work", got)
-	}
-	if got := profileFor(cfg, &SessionInfo{Profile: "work2"}).Name; got != "work2" {
-		t.Errorf("explicit profile = %q, want work2", got)
-	}
-	// A profile deleted behind a session's back must not lose the session.
-	if got := profileFor(cfg, &SessionInfo{Profile: "removed"}).Name; got != "work" {
-		t.Errorf("dangling profile = %q, want work", got)
-	}
-	if got := profileFor(cfg, nil).Name; got != "work" {
-		t.Errorf("nil session = %q, want work", got)
-	}
-}
-
-func TestSessionProfileName(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	cfg := &Config{
-		Profiles:       map[string]*Profile{"work": {ConfigDir: "/tmp/a"}, "work2": {ConfigDir: "/tmp/b"}},
-		DefaultProfile: "work",
-	}
-	// The default profile is stored as "" so single-account configs stay
-	// byte-identical to what ccc wrote before profiles existed.
-	if got := sessionProfileName(cfg, Profile{Name: "work"}); got != "" {
-		t.Errorf("default profile stored as %q, want empty", got)
-	}
-	if got := sessionProfileName(cfg, Profile{Name: "work2"}); got != "work2" {
-		t.Errorf("non-default profile stored as %q, want work2", got)
-	}
-}
-
 func TestClaudeEnvScrubsInheritedState(t *testing.T) {
 	// The leak this guards against: ccc started from inside a Claude Code
 	// session inherits these, and a child `claude` then authenticates and
@@ -448,11 +371,9 @@ func TestClaudeEnvOmitsConfigDirForImplicitProfile(t *testing.T) {
 func TestProfilePathsAreScopedToTheConfigDir(t *testing.T) {
 	p := Profile{Name: "work2", ConfigDir: "/tmp/claude-b"}
 	cases := map[string]string{
-		profileJobsDir(p):      "/tmp/claude-b/jobs",
-		profileProjectsDir(p):  "/tmp/claude-b/projects",
-		profileSessionNames(p): "/tmp/claude-b/session-names",
-		profileClaudeJSON(p):   "/tmp/claude-b/.claude.json",
-		profileSettings(p):     "/tmp/claude-b/settings.json",
+		profileProjectsDir(p): "/tmp/claude-b/projects",
+		profileClaudeJSON(p):  "/tmp/claude-b/.claude.json",
+		profileSettings(p):    "/tmp/claude-b/settings.json",
 	}
 	for got, want := range cases {
 		if got != want {

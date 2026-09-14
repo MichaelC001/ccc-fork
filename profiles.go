@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -16,14 +15,15 @@ import (
 //
 // A profile is just a CLAUDE_CONFIG_DIR. That env var fully scopes a Claude
 // Code installation: credentials (the macOS Keychain service name gets a hash
-// suffix derived from the dir), .claude.json, projects/, jobs/, daemon/ and
-// settings.json all move with it. Crucially the FLEET is per config dir — the
-// supervisor daemon is a separate instance per dir, so
-// `CLAUDE_CONFIG_DIR=X claude agents --json --all` lists only X's sessions and
-// a fresh dir returns []. Everything ccc reads off disk or asks the CLI for
-// must therefore be addressed per profile.
+// suffix derived from the dir), .claude.json, projects/ and settings.json all
+// move with it. Everything ccc reads off disk or asks the CLI for must
+// therefore be addressed per profile.
 //
-// Verified against Claude Code 2.1.259.
+// v3 deliberately points every profile's projects/ at the SAME shared
+// directory (DESIGN §4), so a turn that fails over to another account can
+// resume the same conversation UUID.
+//
+// Verified against Claude Code 2.1.270.
 
 // defaultProfileName is the name of the synthesized profile used when the user
 // has not configured any. It keeps single-account setups working unchanged.
@@ -129,22 +129,8 @@ func defaultProfile(config *Config) Profile {
 	return all[0]
 }
 
-// profileFor returns the profile a session runs under. An empty
-// SessionInfo.Profile means the default profile, which keeps configs written
-// before multi-profile support valid without any migration.
-func profileFor(config *Config, info *SessionInfo) Profile {
-	if info != nil && info.Profile != "" {
-		if p, ok := profileByName(config, info.Profile); ok {
-			return p
-		}
-		// The profile was removed from the config behind the session's back.
-		// Fall through to the default rather than losing the session.
-	}
-	return defaultProfile(config)
-}
-
 // claudeHome is the on-disk root of a profile: the directory that holds
-// .claude.json, settings.json, projects/, jobs/, daemon/ and session-names/.
+// .claude.json, settings.json and projects/.
 func claudeHome(p Profile) string {
 	if p.ConfigDir != "" {
 		return p.ConfigDir
@@ -152,10 +138,8 @@ func claudeHome(p Profile) string {
 	return implicitProfile().ConfigDir
 }
 
-func profileJobsDir(p Profile) string      { return filepath.Join(claudeHome(p), "jobs") }
-func profileProjectsDir(p Profile) string  { return filepath.Join(claudeHome(p), "projects") }
-func profileSessionNames(p Profile) string { return filepath.Join(claudeHome(p), "session-names") }
-func profileSettings(p Profile) string     { return filepath.Join(claudeHome(p), "settings.json") }
+func profileProjectsDir(p Profile) string { return filepath.Join(claudeHome(p), "projects") }
+func profileSettings(p Profile) string    { return filepath.Join(claudeHome(p), "settings.json") }
 
 // profileClaudeJSON is the odd one out. Everything else lives INSIDE the config
 // dir, but .claude.json only moves in when CLAUDE_CONFIG_DIR is actually set:
@@ -382,21 +366,6 @@ var (
 	cooldowns  = map[string]time.Time{} // profile name -> available again at
 )
 
-// usageLimitRe matches the human text Claude Code puts in a blocked job's
-// detail/needs when the account has run out of headroom. The job state file is
-// explicitly not a stable interface, so this is a best-effort signal used only
-// to steer future dispatches, never to decide a session's fate.
-var usageLimitRe = regexp.MustCompile(`(?i)usage limit|rate limit|limit reached|resets`)
-
-// isUsageLimitSignal reports whether a job state looks like the profile hit a
-// usage/rate limit.
-func isUsageLimitSignal(js *jobState) bool {
-	if js == nil || !strings.EqualFold(js.State, "blocked") {
-		return false
-	}
-	return usageLimitRe.MatchString(js.Detail) || usageLimitRe.MatchString(js.Needs)
-}
-
 // noteProfileLimit puts a profile on cooldown after a limit signal: until its
 // cached five-hour reset time when we have one, else defaultLimitCooldown.
 func noteProfileLimit(p Profile, now time.Time) {
@@ -428,10 +397,11 @@ func profileCooledUntil(name string, now time.Time) time.Time {
 	return until
 }
 
-// collectProfileStats gathers the selection inputs for every profile. snaps is
-// the poller's per-profile fleet snapshot; a nil/absent entry just means the
-// working-agent count is unknown (0) for that profile this round.
-func collectProfileStats(config *Config, snaps map[string]profileSnapshot, now time.Time) []profileStat {
+// collectProfileStats gathers the selection inputs for every profile. working
+// is the number of turns currently running on each profile (DESIGN §4's
+// "fewer working bots" tie-break); a nil map just means that input is unknown
+// this round, which only affects ties.
+func collectProfileStats(config *Config, working map[string]int, now time.Time) []profileStat {
 	var stats []profileStat
 	for _, p := range listProfiles(config) {
 		u := readProfileUsage(p)
@@ -439,35 +409,11 @@ func collectProfileStats(config *Config, snaps map[string]profileSnapshot, now t
 			Name:          p.Name,
 			FiveHour:      u.FiveHour,
 			SevenDay:      u.SevenDay,
-			WorkingAgents: countWorking(snaps[p.Name]),
+			WorkingAgents: working[p.Name],
 			CooledUntil:   profileCooledUntil(p.Name, now),
 		})
 	}
 	return stats
-}
-
-func countWorking(snap profileSnapshot) int {
-	if !snap.OK {
-		return 0
-	}
-	n := 0
-	for i := range snap.Agents {
-		if strings.EqualFold(snap.Agents[i].State, "working") {
-			n++
-		}
-	}
-	return n
-}
-
-// pickProfile chooses the profile for a brand-new session. It takes its own
-// fleet snapshot per profile, so it is safe to call outside the poller.
-func pickProfile(config *Config) Profile {
-	snaps := snapshotAllProfiles(config)
-	name := chooseProfile(collectProfileStats(config, snaps, time.Now()), time.Now())
-	if p, ok := profileByName(config, name); ok {
-		return p
-	}
-	return defaultProfile(config)
 }
 
 // ---------------------------------------------------------------------------
@@ -561,40 +507,4 @@ func profileLoggedIn(p Profile) (loggedIn bool, account string, err error) {
 		acct = st.Account
 	}
 	return st.LoggedIn, acct, nil
-}
-
-// lastBlockedReason returns the detail/needs text of the profile's most recently
-// updated blocked job, or "". A stale token passes `claude auth status` — which
-// only reads local state — and only surfaces when a session actually calls the
-// model, so this is the one place doctor can see it without spending tokens.
-// Job state files are not a stable interface; this is best-effort diagnostics.
-func lastBlockedReason(p Profile) string {
-	entries, err := os.ReadDir(profileJobsDir(p))
-	if err != nil {
-		return ""
-	}
-	var newest time.Time
-	reason := ""
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		js := readJobState(p, e.Name())
-		if !isBlocked(js) {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		if info.ModTime().After(newest) {
-			newest = info.ModTime()
-			reason = strings.TrimSpace(js.Needs + " " + js.Detail)
-		}
-	}
-	return reason
-}
-
-func isBlocked(js *jobState) bool {
-	return js != nil && strings.EqualFold(js.State, "blocked")
 }
