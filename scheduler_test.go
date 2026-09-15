@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gorm.io/gorm"
 	"time"
 )
 
@@ -133,189 +135,6 @@ func TestChangingAWatchCommandResetsTheBaseline(t *testing.T) {
 	s.runDueWatches(time.Now())
 	if len(runner.enqueued) != 0 {
 		t.Errorf("switching commands reported a spurious change: %+v", runner.enqueued)
-	}
-}
-
-func TestWatchTimesOutAndWakesTheBot(t *testing.T) {
-	s, in, runner, _ := testScheduler(t)
-	b, err := in.createBot("watcher", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	w, err := upsertWatch(in.db, b.ID, "ci", "echo green", 60)
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now()
-	s.expireWatches(now)
-	if len(runner.enqueued) != 0 {
-		t.Fatalf("a fresh watch expired immediately: %+v", runner.enqueued)
-	}
-
-	in.db.Model(&Watch{}).Where("id = ?", w.ID).Update("created_at", now.Add(-watchTTL(in.config())-time.Minute))
-	s.expireWatches(now)
-	if len(runner.enqueued) != 1 {
-		t.Fatalf("expired watch enqueued %d, want 1: %+v", len(runner.enqueued), runner.enqueued)
-	}
-	got := runner.enqueued[0]
-	if got.BotID != b.ID || got.Source != sourceSystem {
-		t.Errorf("turn = %+v, want a system wake on the bot that set it", got)
-	}
-	for _, want := range []string{`Watch "ci" timed out`, "cancelled", "set_routine"} {
-		if !strings.Contains(got.Text, want) {
-			t.Errorf("expiry input is missing %q:\n%s", want, got.Text)
-		}
-	}
-	var n int64
-	in.db.Model(&Watch{}).Where("bot_id = ?", b.ID).Count(&n)
-	if n != 0 {
-		t.Error("the timed-out watch is still in the table")
-	}
-
-	// A routine (named cron) is not a watch and must keep firing.
-	if _, err := upsertRoutine(in.db, b.ID, "morning", "mira ventas", "0 9 * * *", defaultRoutineTZ, now); err != nil {
-		t.Fatal(err)
-	}
-	s.expireWatches(now.Add(24 * time.Hour))
-	rows, err := listRoutines(in.db, b.ID)
-	if err != nil || len(rows) != 1 {
-		t.Fatalf("routine was cancelled by watch expiry: %d (%v)", len(rows), err)
-	}
-}
-
-func TestWatchUpsertRenewsTheTTL(t *testing.T) {
-	_, in, _, _ := testScheduler(t)
-	b, err := in.createBot("watcher", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	w, err := upsertWatch(in.db, b.ID, "ci", "echo green", 60)
-	if err != nil {
-		t.Fatal(err)
-	}
-	old := w.CreatedAt.Add(-3 * time.Hour)
-	in.db.Model(&Watch{}).Where("id = ?", w.ID).Update("created_at", old)
-	renewed, err := upsertWatch(in.db, b.ID, "ci", "echo green", 60)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !renewed.CreatedAt.After(old.Add(2 * time.Hour)) {
-		t.Errorf("re-setting the watch did not restart the TTL: created_at=%s", renewed.CreatedAt)
-	}
-}
-
-func TestLegacyWatchWithZeroCreatedAtExpires(t *testing.T) {
-	s, in, runner, _ := testScheduler(t)
-	b, err := in.createBot("watcher", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	w, err := upsertWatch(in.db, b.ID, "old", "echo x", 60)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := in.db.Model(&Watch{}).Where("id = ?", w.ID).Updates(map[string]any{"created_at": time.Time{}}).Error; err != nil {
-		t.Fatal(err)
-	}
-	s.expireWatches(time.Now())
-	if len(runner.enqueued) != 1 {
-		t.Fatalf("zero CreatedAt should expire: %+v", runner.enqueued)
-	}
-}
-
-func TestIdleSessionIsRotated(t *testing.T) {
-	s, in, runner, _ := testScheduler(t)
-	b, err := in.createBot("analyst", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	ended := time.Now().Add(-2 * time.Hour)
-	if err := in.db.Model(&Bot{}).Where("id = ?", b.ID).Updates(map[string]any{
-		"session_id": "fat-session", "status": botIdle,
-	}).Error; err != nil {
-		t.Fatal(err)
-	}
-	turn := Turn{BotID: b.ID, Source: sourceUser, Status: turnDone, StartedAt: &ended, EndedAt: &ended}
-	if err := in.db.Create(&turn).Error; err != nil {
-		t.Fatal(err)
-	}
-
-	s.compactIdleSessions(time.Now())
-	after, err := botByID(in.db, b.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if after.SessionID != "" {
-		t.Errorf("session_id = %q, want it cleared after 1h idle", after.SessionID)
-	}
-	if len(runner.enqueued) != 0 {
-		t.Errorf("idle compact must not spend a turn: %+v", runner.enqueued)
-	}
-}
-
-func TestIdleCompactSkipsWaitingBots(t *testing.T) {
-	s, in, _, _ := testScheduler(t)
-	b, err := in.createBot("analyst", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	ended := time.Now().Add(-2 * time.Hour)
-	in.db.Model(&Bot{}).Where("id = ?", b.ID).Updates(map[string]any{
-		"session_id": "keep-me", "status": botWaiting,
-	})
-	in.db.Create(&Turn{BotID: b.ID, Source: sourceUser, Status: turnDone, StartedAt: &ended, EndedAt: &ended})
-	in.db.Create(&Question{BotID: b.ID, Question: "ship it?"})
-
-	s.compactIdleSessions(time.Now())
-	after, _ := botByID(in.db, b.ID)
-	if after.SessionID != "keep-me" {
-		t.Errorf("waiting bot lost its session: %q", after.SessionID)
-	}
-
-	// The runner-side check must also refuse: answering after 2h still needs the transcript.
-	r := &Runner{db: in.db, cfg: in.cfg}
-	id, resume := r.sessionForTurn(after)
-	if id != "keep-me" || !resume {
-		t.Errorf("sessionForTurn on a parked question = %q resume=%v, want keep-me/true", id, resume)
-	}
-}
-
-func TestIdleCompactSkipsRecentTurns(t *testing.T) {
-	s, in, _, _ := testScheduler(t)
-	b, err := in.createBot("analyst", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	ended := time.Now().Add(-10 * time.Minute)
-	in.db.Model(&Bot{}).Where("id = ?", b.ID).Updates(map[string]any{
-		"session_id": "keep-me", "status": botIdle,
-	})
-	in.db.Create(&Turn{BotID: b.ID, Source: sourceUser, Status: turnDone, StartedAt: &ended, EndedAt: &ended})
-	s.compactIdleSessions(time.Now())
-	after, _ := botByID(in.db, b.ID)
-	if after.SessionID != "keep-me" {
-		t.Errorf("a 10-minute idle rotated the session: %q", after.SessionID)
-	}
-}
-
-func TestSessionForTurnRotatesAColdSession(t *testing.T) {
-	in, _, _ := testInstance(t)
-	b, err := in.createBot("analyst", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	ended := time.Now().Add(-2 * time.Hour)
-	in.db.Model(&Bot{}).Where("id = ?", b.ID).Update("session_id", "fat-session")
-	in.db.Create(&Turn{BotID: b.ID, Source: sourceUser, Status: turnDone, StartedAt: &ended, EndedAt: &ended})
-	live, _ := botByID(in.db, b.ID)
-	r := &Runner{db: in.db, cfg: in.cfg}
-	id, resume := r.sessionForTurn(live)
-	if resume || id == "fat-session" {
-		t.Errorf("cold session was resumed: id=%q resume=%v", id, resume)
-	}
-	after, _ := botByID(in.db, b.ID)
-	if after.SessionID != "" {
-		t.Errorf("session_id left as %q after rotation", after.SessionID)
 	}
 }
 
@@ -669,6 +488,287 @@ func TestProjectRegistryRoundTrip(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("get_project lost %q:\n%s", want, body)
 		}
+	}
+}
+
+func seedEndedTurn(t *testing.T, db *gorm.DB, botID int64, ended time.Time) {
+	t.Helper()
+	started := ended.Add(-time.Minute)
+	tr := Turn{
+		BotID: botID, Source: sourceUser, Status: turnDone,
+		StartedAt: &started, EndedAt: &ended, CreatedAt: ended,
+	}
+	if err := db.Create(&tr).Error; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestIdleSessionIsRotatedAfterIdle(t *testing.T) {
+	s, in, runner, api := testScheduler(t)
+	b, err := in.createBot("analyst", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := in.db.Model(&Bot{}).Where("id = ?", b.ID).Updates(map[string]any{
+		"session_id": "fat-session", "status": botIdle,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	seedEndedTurn(t, in.db, b.ID, now.Add(-2*time.Hour))
+
+	s.compactIdleSessions(now)
+
+	var got Bot
+	in.db.First(&got, b.ID)
+	if got.SessionID != "" {
+		t.Errorf("session_id = %q, want empty after idle compact", got.SessionID)
+	}
+	if len(runner.enqueued) != 0 {
+		t.Errorf("idle compact must not spend a turn: %+v", runner.enqueued)
+	}
+	texts := api.texts("")
+	if !strings.Contains(strings.Join(texts, "\n"), "Fresh conversation") {
+		t.Errorf("expected a silent compact notice, got %q", texts)
+	}
+	for _, c := range api.since("sendMessage") {
+		if strings.Contains(c.Params.Get("text"), "Fresh conversation") && c.Params.Get("disable_notification") != "true" {
+			t.Error("idle compact must not ping Telegram")
+		}
+	}
+}
+
+func TestIdleSessionStaysWhileRecent(t *testing.T) {
+	s, in, _, _ := testScheduler(t)
+	b, err := in.createBot("analyst", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.db.Model(&Bot{}).Where("id = ?", b.ID).Updates(map[string]any{
+		"session_id": "keep-me", "status": botIdle,
+	})
+	now := time.Now()
+	seedEndedTurn(t, in.db, b.ID, now.Add(-10*time.Minute))
+	s.compactIdleSessions(now)
+	var got Bot
+	in.db.First(&got, b.ID)
+	if got.SessionID != "keep-me" {
+		t.Errorf("session_id = %q, want keep-me", got.SessionID)
+	}
+}
+
+func TestIdleSessionStaysWhileRunningOrWaiting(t *testing.T) {
+	s, in, _, _ := testScheduler(t)
+	now := time.Now()
+	for _, status := range []string{botRunning, botWaiting} {
+		b, err := in.createBot("bot-"+status, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		in.db.Model(&Bot{}).Where("id = ?", b.ID).Updates(map[string]any{
+			"session_id": "keep-" + status, "status": status,
+		})
+		seedEndedTurn(t, in.db, b.ID, now.Add(-3*time.Hour))
+		s.compactIdleSessions(now)
+		var got Bot
+		in.db.First(&got, b.ID)
+		if got.SessionID != "keep-"+status {
+			t.Errorf("status %s: session_id = %q, want kept", status, got.SessionID)
+		}
+	}
+}
+
+func TestIdleSessionStaysForOpenQuestion(t *testing.T) {
+	s, in, _, _ := testScheduler(t)
+	b, err := in.createBot("asker", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.db.Model(&Bot{}).Where("id = ?", b.ID).Updates(map[string]any{
+		"session_id": "keep-question", "status": botIdle,
+	})
+	now := time.Now()
+	seedEndedTurn(t, in.db, b.ID, now.Add(-3*time.Hour))
+	if err := in.db.Create(&Question{BotID: b.ID, Question: "ship it?"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	s.compactIdleSessions(now)
+	var got Bot
+	in.db.First(&got, b.ID)
+	if got.SessionID != "keep-question" {
+		t.Errorf("session_id = %q, want keep-question while ask_owner is open", got.SessionID)
+	}
+	r := &Runner{db: in.db, cfg: in.cfg}
+	id, resume := r.sessionForTurn(&got)
+	if id != "keep-question" || !resume {
+		t.Errorf("sessionForTurn on a parked question = %q resume=%v", id, resume)
+	}
+}
+
+func TestSessionForTurnRotatesAColdSession(t *testing.T) {
+	in, _, _ := testInstance(t)
+	b, err := in.createBot("analyst", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.db.Model(&Bot{}).Where("id = ?", b.ID).Update("session_id", "fat-session")
+	seedEndedTurn(t, in.db, b.ID, time.Now().Add(-2*time.Hour))
+	live, _ := botByID(in.db, b.ID)
+	r := &Runner{db: in.db, cfg: in.cfg}
+	id, resume := r.sessionForTurn(live)
+	if resume || id == "fat-session" {
+		t.Errorf("cold session was resumed: id=%q resume=%v", id, resume)
+	}
+}
+
+func TestWatchExpiresAndWakesTheBot(t *testing.T) {
+	s, in, runner, _ := testScheduler(t)
+	b, err := in.createBot("watcher", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := upsertWatch(in.db, b.ID, "ci", "echo hi", 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	s.expireWatches(now)
+	if len(runner.enqueued) != 0 {
+		t.Fatalf("a fresh watch expired immediately: %+v", runner.enqueued)
+	}
+	s.expireWatches(now.Add(watchTTL(in.config()) + time.Minute))
+	var n int64
+	in.db.Model(&Watch{}).Where("id = ?", w.ID).Count(&n)
+	if n != 0 {
+		t.Error("the expired watch is still in the table")
+	}
+	if len(runner.enqueued) != 1 {
+		t.Fatalf("expire enqueued %d turns, want 1", len(runner.enqueued))
+	}
+	got := runner.enqueued[0]
+	if got.BotID != b.ID || got.Source != sourceSystem {
+		t.Errorf("turn = %+v, want source=system on the bot that set the watch", got)
+	}
+	for _, want := range []string{`Watch "ci" timed out`, "echo hi", "set_routine"} {
+		if !strings.Contains(got.Text, want) {
+			t.Errorf("expire input missing %q:\n%s", want, got.Text)
+		}
+	}
+}
+
+func TestWatchUpsertRenewsTheTTL(t *testing.T) {
+	s, in, runner, _ := testScheduler(t)
+	b, err := in.createBot("watcher", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := upsertWatch(in.db, b.ID, "ci", "echo hi", 60); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	in.db.Model(&Watch{}).Where("bot_id = ?", b.ID).UpdateColumn("created_at", now.Add(-5*time.Hour))
+	if _, err := upsertWatch(in.db, b.ID, "ci", "echo hi", 60); err != nil {
+		t.Fatal(err)
+	}
+	s.expireWatches(now)
+	var n int64
+	in.db.Model(&Watch{}).Where("bot_id = ? AND name = ?", b.ID, "ci").Count(&n)
+	if n != 1 {
+		t.Error("renewing a watch must restart its TTL")
+	}
+	if len(runner.enqueued) != 0 {
+		t.Errorf("a renewed watch was cancelled: %+v", runner.enqueued)
+	}
+}
+
+func TestLegacyWatchWithZeroCreatedAtExpires(t *testing.T) {
+	s, in, runner, _ := testScheduler(t)
+	b, err := in.createBot("watcher", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := upsertWatch(in.db, b.ID, "old", "echo hi", 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := in.db.Model(&Watch{}).Where("id = ?", w.ID).UpdateColumn("created_at", time.Time{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	s.expireWatches(time.Now())
+	var n int64
+	in.db.Model(&Watch{}).Where("id = ?", w.ID).Count(&n)
+	if n != 0 {
+		t.Error("a pre-TTL watch must expire on upgrade, not live forever")
+	}
+	if len(runner.enqueued) != 1 || runner.enqueued[0].Source != sourceSystem {
+		t.Errorf("legacy expire should wake the bot: %+v", runner.enqueued)
+	}
+}
+
+func TestRoutinesDoNotExpireWithWatches(t *testing.T) {
+	s, in, runner, _ := testScheduler(t)
+	b, err := in.createBot("sales", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if _, err := upsertRoutine(in.db, b.ID, "morning", "mira ventas", "0 9 * * *", defaultRoutineTZ, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := upsertWatch(in.db, b.ID, "ci", "echo hi", 60); err != nil {
+		t.Fatal(err)
+	}
+	in.db.Model(&Watch{}).Where("bot_id = ?", b.ID).UpdateColumn("created_at", now.Add(-5*time.Hour))
+	s.expireWatches(now)
+	var watches, schedules int64
+	in.db.Model(&Watch{}).Where("bot_id = ?", b.ID).Count(&watches)
+	in.db.Model(&Schedule{}).Where("bot_id = ? AND name = ?", b.ID, "morning").Count(&schedules)
+	if watches != 0 {
+		t.Error("the watch should have expired")
+	}
+	if schedules != 1 {
+		t.Error("a named routine must survive watch expiry")
+	}
+	if len(runner.enqueued) != 1 || runner.enqueued[0].Source != sourceSystem {
+		t.Errorf("only the watch should have woken the bot: %+v", runner.enqueued)
+	}
+}
+
+func TestWatchTTLDisabledLeavesWatchesAlone(t *testing.T) {
+	s, in, runner, _ := testScheduler(t)
+	zero := 0
+	in.cfg.WatchTTLS = &zero
+	b, err := in.createBot("watcher", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := upsertWatch(in.db, b.ID, "ci", "echo hi", 60); err != nil {
+		t.Fatal(err)
+	}
+	in.db.Model(&Watch{}).Where("bot_id = ?", b.ID).UpdateColumn("created_at", time.Now().Add(-48*time.Hour))
+	s.expireWatches(time.Now())
+	var n int64
+	in.db.Model(&Watch{}).Count(&n)
+	if n != 1 {
+		t.Error("watch_ttl_s=0 must disable expiry")
+	}
+	if len(runner.enqueued) != 0 {
+		t.Errorf("disabled TTL still woke the bot: %+v", runner.enqueued)
+	}
+}
+
+func TestWatchExpiryLabel(t *testing.T) {
+	now := time.Now()
+	w := Watch{Enabled: true, CreatedAt: now.Add(-time.Hour)}
+	got := watchExpiryLabel(w, now, 4*time.Hour)
+	if !strings.Contains(got, "expires in") {
+		t.Errorf("label = %q, want remaining time", got)
+	}
+	if watchExpiryLabel(Watch{Enabled: false}, now, 4*time.Hour) != "disabled" {
+		t.Error("disabled watches should say so")
+	}
+	if watchExpiryLabel(w, now, 0) != "no expiry" {
+		t.Error("ttl 0 should say no expiry")
 	}
 }
 
