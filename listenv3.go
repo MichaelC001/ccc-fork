@@ -757,7 +757,7 @@ func (in *instance) handleCommand(msg *TelegramMessage, text string, inGroup boo
 	case "/model":
 		var b *Bot
 		if inGroup && topicID != 0 {
-			b, _ = botByTopic(in.db, topicID)
+			b, _ = botByTopic(in.db, topicID) // safe-ignore: /model in a topic with no bot is instance-level
 		}
 		in.handleModelCommand(msg, rest, b)
 		return
@@ -1145,7 +1145,7 @@ func (in *instance) renderStatus() string {
 		// Accounts are named by their email here too; the key is only what
 		// profile selection works with.
 		shown := s.Name
-		if p, ok := profileByName(cfg, s.Name); ok {
+		if p, ok := profileByKey(cfg, s.Name); ok {
 			shown = accountDisplay(p)
 		}
 		if s.Engine == engineClaude {
