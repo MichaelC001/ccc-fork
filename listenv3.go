@@ -179,19 +179,19 @@ func listenV3() error {
 
 	sched := newScheduler(in)
 	in.sched = sched
-	go sched.Run()
 	defer sched.Close()
 
 	linkSharedProjects(cfg)
 	setBotCommandsV3(cfg.BotToken)
 	listenLog("ccc v3 listening (group: %d, db: %s)", cfg.GroupID, dbPath(cfg))
 
-	// Conversational turns that were mid-flight died with us. Background
-	// jobs do not: they are detached, and the scheduler reattaches them.
-	db.Model(&Turn{}).Where("status = ?", turnRunning).
-		Updates(map[string]any{"status": turnFailed, "error_class": errFatal, "stop_reason": "ccc restarted"})
-	db.Model(&Bot{}).Where("status = ?", botRunning).Update("status", botIdle)
-	sched.reattachBackgroundJobs()
+	// Conversational turns that were mid-flight died with us: they are
+	// requeued (same row, so they stay oldest) and retried. Background
+	// jobs do not die: they are detached, and recoverAfterRestart
+	// reattaches them. Both get a Telegram ping so a LaunchAgent restart
+	// is not silent.
+	in.recoverAfterRestart()
+	go sched.Run()
 	// Re-arm queues that survived the restart, including bot-to-bot messages
 	// whose sender's turn ended as the process was going down.
 	runner.deliverInbox(0)
@@ -259,6 +259,74 @@ func listenV3() error {
 			}
 		}
 	}
+}
+
+// recoverAfterRestart is what a new listen does with leftover in-flight work.
+// Conversational turns cannot resume in-process (the engine CLI died), so
+// each status=running row is requeued in place — same id, so it stays older
+// than anything that arrived while it was running — and retried. Historical
+// failures are left alone. Background jobs may still be running and are
+// reattached. A single notifying message in General says ccc is back.
+func (in *instance) recoverAfterRestart() {
+	var interrupted []Turn
+	if err := in.db.Where("status = ?", turnRunning).Find(&interrupted).Error; err != nil {
+		hookLog("recover: list running turns: %v", err)
+	}
+
+	in.notifyGeneral("🔁 ccc is back")
+	now := time.Now()
+	for i := range interrupted {
+		t := interrupted[i]
+		b, err := botByID(in.db, t.BotID)
+		if err != nil || b.ArchivedAt != nil {
+			in.failInterruptedTurn(t.ID, now)
+			continue
+		}
+		if err := requeueInterruptedTurn(in.db, t.ID); err != nil {
+			hookLog("recover: requeue turn %d: %v", t.ID, err)
+			in.failInterruptedTurn(t.ID, now)
+			continue
+		}
+		in.notifyTopic(b.TopicID, renderRetriedTurn(&t))
+	}
+	in.db.Model(&Bot{}).Where("status = ?", botRunning).Update("status", botIdle)
+	if in.sched != nil {
+		in.sched.reattachBackgroundJobs()
+	}
+}
+
+func (in *instance) failInterruptedTurn(id int64, now time.Time) {
+	in.db.Model(&Turn{}).Where("id = ? AND status = ?", id, turnRunning).
+		Updates(map[string]any{
+			"status": turnFailed, "error_class": errFatal,
+			"stop_reason": "ccc restarted", "ended_at": now,
+		})
+}
+
+func requeueInterruptedTurn(db *gorm.DB, id int64) error {
+	res := db.Model(&Turn{}).Where("id = ? AND status = ?", id, turnRunning).
+		Updates(map[string]any{
+			"status":      turnQueued,
+			"started_at":  gorm.Expr("NULL"),
+			"ended_at":    gorm.Expr("NULL"),
+			"error_class": "",
+			"stop_reason": "",
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return fmt.Errorf("turn %d is no longer running", id)
+	}
+	return nil
+}
+
+func renderRetriedTurn(t *Turn) string {
+	msg := "▶️ Retrying turn interrupted by restart."
+	if summary := strings.TrimSpace(t.Input); summary != "" {
+		msg += "\n<code>" + htmlEscape(truncate(summary, 400)) + "</code>"
+	}
+	return msg
 }
 
 // linkSharedProjects makes every profile resolve transcripts from the same

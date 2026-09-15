@@ -251,10 +251,13 @@ One goroutine in `ccc listen`:
   `deadline` column the supervisor checks. On graceful shutdown the jobs
   are left `status=running` with their PID. A new listen **reattaches**:
   `exit.code` present → finish from the log and enqueue `source=background`;
-  PID still alive (`kill(pid, 0)`) → keep supervising; PID dead and no
-  exit file → fail with a clear error and wake the bot. A cancel sets
-  `cancel_requested` and SIGTERMs the stored process group. This is **not**
-  Claude Code background agents: no transcript scraping, no `claude attach`.
+  PID still alive (`kill(pid, 0)`) → keep supervising and ping ▶️ in the
+  bot's topic; PID dead and no exit file → fail with a clear error, ping ❌
+  in the topic, and wake the bot. A job that fails for any other reason
+  (non-zero exit, timeout, process death) also pings ❌ immediately — the
+  owner must not wait for the model to notice. A cancel is quiet: the owner
+  already asked for it. This is **not** Claude Code background agents: no
+  transcript scraping, no `claude attach`.
 - **Doctor loop** (every 15 min): `claude auth status --json` per profile
   (exit code 1 = logged out — verified), disclaimer check, usage cache read.
   Transitions to `needs_login` → owner notification with **Relogin** button.
@@ -738,3 +741,17 @@ message into the reply would never ping. The progress message is posted with
 `disable_notification=true`; when the turn ends it is deleted and the final
 text is a new `sendMessage` without that flag — the one notification the
 owner gets.
+
+**14.26 Listen restart is visible, and mid-flight turns are retried.** A
+LaunchAgent / systemd restart used to be silent: running turns were marked
+`failed` / `ccc restarted` in SQLite and leftover background jobs were
+reattached, but Telegram never heard and the work was dropped.
+`recoverAfterRestart` now posts 🔁 in General. Each `turns.status=running`
+row is requeued in place (same id, so it stays older than anything that
+arrived while it ran) and pinged ▶️ in its bot's topic; historical
+`failed` rows are not touched. A bot whose process is gone cannot resume
+in-process — the retry is a new `claude -p` / `grok` / `agy` spawn of the
+same input on the same session UUID. Live background jobs ping ▶️;
+a job that fails (except an explicit cancel) pings ❌ immediately, because
+the `source=background` wake is another turn and would be equally silent
+if listen died again.

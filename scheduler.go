@@ -331,12 +331,19 @@ func (s *scheduler) runMaintenanceNow(now time.Time) {
 // notifyGeneral posts into the group's General topic: maintenance belongs to
 // the instance, not to any one bot, so it is not written into a bot's topic.
 func (in *instance) notifyGeneral(text string) {
+	in.notifyTopic(0, htmlEscape(text))
+}
+
+// notifyTopic posts HTML into a forum topic (0 = General). The send is a
+// notifying sendMessage: Telegram does not ping on edits, and these are the
+// events the owner must actually see (boot, a failed job, a resumed job).
+func (in *instance) notifyTopic(topicID int64, html string) {
 	cfg := in.config()
-	if cfg.BotToken == "" || cfg.GroupID == 0 {
+	if cfg.BotToken == "" || cfg.GroupID == 0 || strings.TrimSpace(html) == "" {
 		return
 	}
-	if _, err := sendMessageHTMLGetID(cfg, cfg.GroupID, 0, htmlEscape(text)); err != nil {
-		hookLog("maintenance notification: %v", err)
+	if _, err := sendMessageHTMLGetID(cfg, cfg.GroupID, topicID, html); err != nil {
+		hookLog("topic %d notification: %v", topicID, err)
 	}
 }
 

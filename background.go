@@ -446,7 +446,9 @@ func (s *scheduler) runBackgroundJob(b *Bot, j *BackgroundJob) {
 
 // reattachBackgroundJobs is what a new listen does with leftover running
 // rows: finish the ones that already wrote exit.code, supervise the ones
-// whose PID is still alive, fail the rest. It does not kill anyone.
+// whose PID is still alive, fail the rest. It does not kill anyone. A job
+// that is still running gets a notifying ping in its bot's topic so the
+// owner can see it was resumed rather than lost.
 func (s *scheduler) reattachBackgroundJobs() {
 	var jobs []BackgroundJob
 	if err := s.in.db.Where("status = ?", jobRunning).Find(&jobs).Error; err != nil {
@@ -462,8 +464,19 @@ func (s *scheduler) reattachBackgroundJobs() {
 		if !s.bg.adopt(j.ID, j.PID, nil) {
 			continue
 		}
+		if _, done := readExitCode(dir); !done && processAlive(jobPID(&j, dir)) {
+			s.notifyJobResumed(&j)
+		}
 		go s.watchBackgroundJob(&j)
 	}
+}
+
+func (s *scheduler) notifyJobResumed(j *BackgroundJob) {
+	b, err := botByID(s.in.db, j.BotID)
+	if err != nil || b.ArchivedAt != nil {
+		return
+	}
+	s.in.notifyTopic(b.TopicID, renderJobResumedNotice(j))
 }
 
 // watchBackgroundJob waits for exit.code or process death without requiring
@@ -604,7 +617,35 @@ func (s *scheduler) enqueueBackgroundWake(j *BackgroundJob) {
 	if err != nil || b.ArchivedAt != nil {
 		return
 	}
+	// A failed job pings Telegram immediately. The source=background wake
+	// still runs so the model can react, but the owner must not depend on
+	// that turn (it dies if listen restarts again). Cancels are quiet: the
+	// owner already asked for them.
+	if j.Status == jobFailed && j.Error != "cancelled" {
+		s.in.notifyTopic(b.TopicID, renderJobFailedNotice(j))
+	}
 	if _, err := s.in.runner.Enqueue(b.ID, sourceBackground, renderBackgroundWake(j), 0); err != nil {
 		hookLog("background %d: enqueue failed: %v", j.ID, err)
 	}
+}
+
+func renderJobResumedNotice(j *BackgroundJob) string {
+	return fmt.Sprintf("▶️ Resumed background job #%d <i>%s</i>", j.ID, htmlEscape(jobNoticeName(j)))
+}
+
+func renderJobFailedNotice(j *BackgroundJob) string {
+	detail := strings.TrimSpace(j.Error)
+	if detail == "" {
+		detail = "failed"
+	}
+	return fmt.Sprintf("❌ Background job #%d <i>%s</i> failed.\n<code>%s</code>",
+		j.ID, htmlEscape(jobNoticeName(j)), htmlEscape(truncate(detail, 400)))
+}
+
+func jobNoticeName(j *BackgroundJob) string {
+	name := strings.TrimSpace(j.Name)
+	if name == "" {
+		name = strings.TrimSpace(j.Command)
+	}
+	return truncate(name, 80)
 }

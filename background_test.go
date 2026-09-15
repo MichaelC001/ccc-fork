@@ -155,7 +155,7 @@ func TestBackgroundJobWakesTheBotOnSuccess(t *testing.T) {
 }
 
 func TestBackgroundJobWakesTheBotOnFailure(t *testing.T) {
-	s, in, runner, _ := testScheduler(t)
+	s, in, runner, api := testScheduler(t)
 	b, err := in.createBot("worker", "")
 	if err != nil {
 		t.Fatal(err)
@@ -178,10 +178,23 @@ func TestBackgroundJobWakesTheBotOnFailure(t *testing.T) {
 	if !strings.Contains(runner.enqueued[0].Text, "failed") || !strings.Contains(runner.enqueued[0].Text, "Exit code: 7") {
 		t.Errorf("failure wakeup:\n%s", runner.enqueued[0].Text)
 	}
+	ping, ok := sendContaining(api, "Background job")
+	if !ok {
+		t.Fatalf("failed job must ping Telegram, texts=%v", api.texts(""))
+	}
+	if ping.Params.Get("disable_notification") == "true" {
+		t.Fatal("the failure ping must notify")
+	}
+	if !strings.Contains(ping.Params.Get("text"), "failed") {
+		t.Errorf("failure ping = %s", ping.Params.Get("text"))
+	}
+	if ping.Params.Get("message_thread_id") != strconv.FormatInt(b.TopicID, 10) {
+		t.Errorf("failure ping thread = %q", ping.Params.Get("message_thread_id"))
+	}
 }
 
 func TestCancelRunningBackground(t *testing.T) {
-	s, in, runner, _ := testScheduler(t)
+	s, in, runner, api := testScheduler(t)
 	b, err := in.createBot("worker", "")
 	if err != nil {
 		t.Fatal(err)
@@ -216,6 +229,9 @@ func TestCancelRunningBackground(t *testing.T) {
 	}
 	if len(runner.enqueued) != 1 || runner.enqueued[0].Source != sourceBackground {
 		t.Errorf("expected a failed wakeup, got %+v", runner.enqueued)
+	}
+	if _, ok := sendContaining(api, "Background job"); ok {
+		t.Fatalf("a cancel the owner asked for must not ping: %v", api.texts(""))
 	}
 }
 
@@ -265,7 +281,7 @@ func TestReattachFinishedWhileDownWakesTheBot(t *testing.T) {
 }
 
 func TestReattachDeadPIDWithoutExitFileFailsAndWakes(t *testing.T) {
-	s, in, runner, _ := testScheduler(t)
+	s, in, runner, api := testScheduler(t)
 	b, err := in.createBot("worker", "")
 	if err != nil {
 		t.Fatal(err)
@@ -283,10 +299,17 @@ func TestReattachDeadPIDWithoutExitFileFailsAndWakes(t *testing.T) {
 	if len(runner.enqueued) != 1 || runner.enqueued[0].Source != sourceBackground {
 		t.Fatalf("orphan wakeup = %+v", runner.enqueued)
 	}
+	ping, ok := sendContaining(api, "Background job")
+	if !ok {
+		t.Fatalf("a job that died while listen was down must ping, texts=%v", api.texts(""))
+	}
+	if ping.Params.Get("disable_notification") == "true" {
+		t.Fatal("the orphan failure ping must notify")
+	}
 }
 
 func TestReattachAlivePIDKeepsRunning(t *testing.T) {
-	s, in, runner, _ := testScheduler(t)
+	s, in, runner, api := testScheduler(t)
 	b, err := in.createBot("worker", "")
 	if err != nil {
 		t.Fatal(err)
@@ -314,6 +337,9 @@ func TestReattachAlivePIDKeepsRunning(t *testing.T) {
 	}
 	if len(runner.enqueued) != 0 {
 		t.Fatalf("alive reattach woke the bot early: %+v", runner.enqueued)
+	}
+	if _, ok := sendContaining(api, "Resumed"); !ok {
+		t.Fatalf("alive reattach must ping that the job was resumed, texts=%v", api.texts(""))
 	}
 	listed, err := listBackgroundJobs(in.db, b.ID)
 	if err != nil {
