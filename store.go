@@ -263,6 +263,7 @@ func allModels() []any {
 	return []any{
 		&Bot{}, &Turn{}, &InboxMessage{}, &Memory{}, &MemoryArchive{}, &Project{},
 		&Watch{}, &Schedule{}, &Question{}, &Access{}, &Setting{}, &BackgroundJob{},
+		&HubDevice{}, &HubPairCode{},
 	}
 }
 
@@ -376,6 +377,17 @@ func botByName(db *gorm.DB, name string) (*Bot, error) {
 		return nil, err
 	}
 	return &b, nil
+}
+
+// HubDevice is a phone (or other client) the owner paired with this instance
+// through the public hub. The hub itself stores no devices — only this row
+// authorises RPC.
+type HubDevice struct {
+	ID        int64 `gorm:"primaryKey"`
+	PubKey    string `gorm:"uniqueIndex;not null"`
+	Name      string
+	PairedAt  time.Time
+	LastSeen  *time.Time
 }
 
 func liveBots(db *gorm.DB) ([]Bot, error) {

@@ -369,6 +369,9 @@ COMMANDS:
     routine add|list|cancel Named recurring wakeup (⏰ in the topic)
     send <file>             Send a file into the topic of the bot owning this directory
     relay [port]            Relay server for files over 50 MB (default port: 8080)
+    pair                    Print a QR / URI to add this machine to the mobile app
+    unpair [device]         List or revoke paired mobile devices
+    hub [addr]              Run the public pairing hub (default :8787)
 
 TELEGRAM (in the forum group):
     Text in General         Create a new bot from your message

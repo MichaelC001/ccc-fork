@@ -20,6 +20,8 @@ type Config struct {
 	GroupID           int64               `json:"group_id,omitempty"`           // the forum group the bots live in
 	TranscriptionLang string              `json:"transcription_lang,omitempty"` // language code for whisper (e.g. "es")
 	RelayURL          string              `json:"relay_url,omitempty"`          // relay server for files over 50 MB
+	HubURL            string              `json:"hub_url,omitempty"`            // public ccc hub (default wss://hub.getccc.dev; "-" disables)
+	InstanceName      string              `json:"instance_name,omitempty"`      // label shown in the mobile machine picker
 	Profiles          map[string]*Profile `json:"profiles,omitempty"`           // identity -> account (engine + isolated home)
 	DefaultProfile    string              `json:"default_profile,omitempty"`    // default account; new bots inherit its engine unless default_engine is set
 	DataDir           string              `json:"data_dir,omitempty"`           // runtime root (default ~/.local/share/ccc)
@@ -209,6 +211,19 @@ func main() {
 		}
 		runRelayServer(port)
 
+	case "hub":
+		addr := ":8787"
+		if len(os.Args) >= 3 {
+			addr = os.Args[2]
+		}
+		must(runHubServer(addr))
+
+	case "pair":
+		must(runPairCommand(os.Args[2:]))
+
+	case "unpair":
+		must(runUnpairCommand(os.Args[2:]))
+
 	default:
 		fail("Unknown command %q. Run `ccc --help`.", os.Args[1])
 	}
@@ -309,8 +324,8 @@ func withDefaultNote(value string, isDefault bool) string {
 // configKeys are the keys `ccc config` understands. Secrets are never printed
 // back (DESIGN §12): the bot token reads as "configured".
 var configKeys = []string{"bot_token", "chat_id", "group_id", "model", "data_dir", "env_passthrough", "relay_url",
-	"transcription_lang", "default_profile", "default_engine", "debounce_ms", "compaction_model", "maintenance_hour",
-	"idle_compact_s", "watch_ttl_s"}
+	"hub_url", "instance_name", "transcription_lang", "default_profile", "default_engine", "debounce_ms",
+	"compaction_model", "maintenance_hour", "idle_compact_s", "watch_ttl_s"}
 
 func configGet(config *Config, key string) (string, error) {
 	switch key {
@@ -331,6 +346,10 @@ func configGet(config *Config, key string) (string, error) {
 		return strings.Join(config.EnvPassthrough, ","), nil
 	case "relay_url":
 		return firstNonEmpty(config.RelayURL, defaultRelayURL), nil
+	case "hub_url":
+		return hubURLFromConfig(config), nil
+	case "instance_name":
+		return instanceDisplayName(config), nil
 	case "transcription_lang":
 		return firstNonEmpty(config.TranscriptionLang, "(auto-detect)"), nil
 	case "default_profile":
@@ -383,6 +402,10 @@ func configSet(config *Config, key, value string) error {
 		config.EnvPassthrough = splitList(value)
 	case "relay_url":
 		config.RelayURL = value
+	case "hub_url":
+		config.HubURL = value
+	case "instance_name":
+		config.InstanceName = value
 	case "transcription_lang":
 		config.TranscriptionLang = value
 	case "default_profile":

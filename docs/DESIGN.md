@@ -813,3 +813,18 @@ monitors. After `watch_ttl_s` (default 4h) the watch is deleted and the
 bot that set it is woken (`source=system`) to re-set it. Re-upserting the
 same name restarts the clock. Routines do not expire. Both knobs are
 config.json keys; 0 disables.
+
+## 15. Public hub (mobile)
+
+The phone app talks to `ccc listen` through an untrusted relay (`ccc hub`,
+default `wss://hub.getccc.dev`). This is a DERP-style pipe, not a VPN: the
+instance opens an outbound websocket (so a Mac behind NAT is reachable), the
+device does the same, and the hub forwards NaCl boxes keyed by Curve25519
+public keys. The hub stores pairing codes and connected sockets. It never
+sees Telegram tokens, prompts, or plaintext RPC.
+
+`ccc pair` mints a 10-minute code and prints `ccc://pair/v1?h=&i=&k=&n=`.
+The `k` is the instance public key (TOFU). The phone encrypts its identity
+to that key; the hub only routes. Paired devices live in SQLite on the
+instance (`hub_devices`). `ccc unpair` revokes them. `hub_url` `-` disables
+the client.

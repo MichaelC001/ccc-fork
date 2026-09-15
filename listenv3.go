@@ -173,8 +173,10 @@ func listenV3() error {
 		return err
 	}
 	in := &instance{db: db, cfg: cfg, dataDir: dataDir(cfg)}
-	runner := newRunner(db, cfg, telegramUI{in})
+	ui := &muxUI{tg: telegramUI{in}}
+	runner := newRunner(db, cfg, ui)
 	in.runner = runner
+	ui.hub = startHubClient(in)
 	defer runner.Close()
 
 	sched := newScheduler(in)

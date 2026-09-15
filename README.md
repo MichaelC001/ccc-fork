@@ -563,6 +563,9 @@ ccc profile <cmd>             Manage accounts from a shell
                               (list/add/remove/default/login/accept-disclaimer)
 ccc send <file>               Send a file into the topic of the bot owning this directory
 ccc relay [port]              Relay server for files over 50 MB
+ccc pair                      Print a URI to add this machine to the CCC phone app
+ccc unpair                    List or revoke paired devices
+ccc hub [addr]                Run the public pairing hub (default :8787)
 ccc mcp --bot <id>            MCP server for one turn (spawned by Claude Code)
 ```
 
