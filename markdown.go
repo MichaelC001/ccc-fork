@@ -146,22 +146,22 @@ func renderInlineTelegramHTML(s string) string {
 			i = next
 			continue
 		}
-		b.WriteString(escapeByteForHTML(s[i]))
+		// Write bytes, not runes: string(byte) in Go is string(rune(byte)), so
+		// the leading byte of "ñ" (0xC3) would become "Ã" and Telegram would
+		// show mojibake on every accent, emoji or CJK character.
+		switch s[i] {
+		case '&':
+			b.WriteString("&amp;")
+		case '<':
+			b.WriteString("&lt;")
+		case '>':
+			b.WriteString("&gt;")
+		default:
+			b.WriteByte(s[i])
+		}
 		i++
 	}
 	return b.String()
-}
-
-func escapeByteForHTML(c byte) string {
-	switch c {
-	case '&':
-		return "&amp;"
-	case '<':
-		return "&lt;"
-	case '>':
-		return "&gt;"
-	}
-	return string(c)
 }
 
 // inlineCode renders a `code` span. The content is escaped and never gets any

@@ -93,6 +93,18 @@ func TestRenderTelegramHTML(t *testing.T) {
 		name: "empty input",
 		in:   "",
 		want: "",
+	}, {
+		name: "accents and ñ stay UTF-8, not mojibake",
+		in:   "Sí, niño: información, opción, pingüino.",
+		want: "Sí, niño: información, opción, pingüino.",
+	}, {
+		name: "accents inside bold and italic",
+		in:   "**opción** y *niño* y `información`",
+		want: "<b>opción</b> y <i>niño</i> y <code>información</code>",
+	}, {
+		name: "emoji and CJK are preserved",
+		in:   "💻 listo — 日本語",
+		want: "💻 listo — 日本語",
 	}}
 
 	for _, c := range cases {
