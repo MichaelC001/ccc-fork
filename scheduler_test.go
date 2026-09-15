@@ -219,6 +219,116 @@ func TestSchedulesFire(t *testing.T) {
 	}
 }
 
+func TestRoutineFiresInTimezoneAndPosts(t *testing.T) {
+	madrid, err := time.LoadLocation(defaultRoutineTZ)
+	if err != nil {
+		t.Skip("timezone data not available")
+	}
+	s, in, runner, api := testScheduler(t)
+	b, err := in.createBot("sales", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 15, 10, 0, 0, 0, madrid)
+	row, err := upsertRoutine(in.db, b.ID, "morning-ventas", "mira ventas", "0 9 * * *", defaultRoutineTZ, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantNext := time.Date(2026, 9, 16, 9, 0, 0, 0, madrid)
+	if !row.FireAt.Equal(wantNext) {
+		t.Fatalf("next fire = %s, want %s", row.FireAt, wantNext)
+	}
+
+	// Due now: fire, post ⏰, roll to the following morning.
+	in.db.Model(&Schedule{}).Where("id = ?", row.ID).Update("fire_at", now.Add(-time.Minute))
+	s.fireDueSchedules(now)
+	if len(runner.enqueued) != 1 {
+		t.Fatalf("%d turns, want 1: %+v", len(runner.enqueued), runner.enqueued)
+	}
+	got := runner.enqueued[0]
+	if got.Source != "routine:morning-ventas" {
+		t.Errorf("source = %q, want routine:morning-ventas", got.Source)
+	}
+	if !strings.Contains(got.Text, "mira ventas") {
+		t.Errorf("prompt missing from turn: %q", got.Text)
+	}
+	posted := false
+	for _, c := range api.since("sendMessage") {
+		if strings.Contains(c.Params.Get("text"), "⏰") && strings.Contains(c.Params.Get("text"), "morning-ventas") {
+			posted = true
+		}
+	}
+	if !posted {
+		t.Error("firing a routine did not post ⏰ in the topic")
+	}
+	var after Schedule
+	in.db.First(&after, row.ID)
+	if after.FiredAt != nil {
+		t.Error("a routine must not be retired")
+	}
+	if !after.FireAt.Equal(wantNext) {
+		t.Errorf("rolled to %s, want %s", after.FireAt, wantNext)
+	}
+}
+
+func TestSetRoutineToolUpsertsByName(t *testing.T) {
+	in, _, _ := testInstance(t)
+	b, err := in.createBot("sales", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &mcpServer{db: in.db, config: in.cfg, botID: b.ID}
+	res, _, err := s.setRoutine(t.Context(), nil, setRoutineIn{
+		Name: "morning-ventas", Prompt: "mira ventas", Cron: "0 9 * * 1-5",
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("set_routine: %+v %v", res, err)
+	}
+	res, _, err = s.setRoutine(t.Context(), nil, setRoutineIn{
+		Name: "morning-ventas", Prompt: "mira ventas y Resend", Cron: "0 9 * * 1-5", Timezone: defaultRoutineTZ,
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("upsert: %+v %v", res, err)
+	}
+	rows, err := listRoutines(in.db, b.ID)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("%d routines, want 1 (%v)", len(rows), err)
+	}
+	if rows[0].Note != "mira ventas y Resend" || rows[0].Timezone != defaultRoutineTZ {
+		t.Errorf("upsert did not replace: %+v", rows[0])
+	}
+
+	other, err := in.createBot("other", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherS := &mcpServer{db: in.db, config: in.cfg, botID: other.ID}
+	if res, _, _ := otherS.cancelRoutineTool(t.Context(), nil, cancelRoutineIn{Name: "morning-ventas"}); res.IsError {
+		t.Fatal(res)
+	}
+	if left, _ := listRoutines(in.db, b.ID); len(left) != 1 {
+		t.Error("another bot cancelled this bot's routine")
+	}
+	if res, _, _ := s.cancelRoutineTool(t.Context(), nil, cancelRoutineIn{Name: "morning-ventas"}); res.IsError {
+		t.Fatal(res)
+	}
+	if left, _ := listRoutines(in.db, b.ID); len(left) != 0 {
+		t.Error("cancel_routine did not remove it")
+	}
+}
+
+func TestParseRoutineAdd(t *testing.T) {
+	name, cron, tz, prompt, err := parseRoutineAdd([]string{
+		"morning-ventas", "--cron", "0 9 * * 1-5", "--tz", "Europe/Madrid", "mira", "ventas",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "morning-ventas" || cron != "0 9 * * 1-5" || tz != "Europe/Madrid" || prompt != "mira ventas" {
+		t.Errorf("got %q %q %q %q", name, cron, tz, prompt)
+	}
+}
+
 func TestParseCron(t *testing.T) {
 	for _, good := range []string{"0 9 * * *", "*/15 * * * *", "@daily", "@every 1h"} {
 		if _, err := parseCron(good); err != nil {

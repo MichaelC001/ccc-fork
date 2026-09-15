@@ -148,10 +148,19 @@ func (f *fakeRunner) last() (fakeTurn, bool) {
 }
 
 // testInstance wires an instance against a temp database and the fake API.
+// isolateConfigEnv drops CCC_CONFIG/CCC_DB inherited from a ccc turn so tests
+// that pin HOME actually read the temp config, not the instance's.
+func isolateConfigEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("CCC_CONFIG", "")
+	t.Setenv("CCC_DB", "")
+}
+
 func testInstance(t *testing.T) (*instance, *fakeRunner, *fakeBotAPI) {
 	t.Helper()
 	// Commands that write the configuration (/model, /setgroup, /account) go
 	// through loadConfig/saveConfig, so the tests get their own HOME.
+	isolateConfigEnv(t)
 	t.Setenv("HOME", t.TempDir())
 	// The topic-icon cache is process-wide; each test gets its own fake API.
 	resetTopicIconCache()

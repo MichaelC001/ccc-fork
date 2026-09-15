@@ -261,16 +261,25 @@ func (s *scheduler) fireDueSchedules(now time.Time) {
 		if note == "" {
 			note = "(no note)"
 		}
-		input := fmt.Sprintf("Scheduled wakeup: %s", note)
-		if _, err := s.in.runner.Enqueue(b.ID, sourceSchedule, input, 0); err != nil {
+		name := strings.TrimSpace(sc.Name)
+		source, input := sourceSchedule, fmt.Sprintf("Scheduled wakeup: %s", note)
+		if name != "" {
+			source = routineSource(name)
+			input = fmt.Sprintf("Routine %q:\n%s", name, note)
+		}
+		if _, err := s.in.runner.Enqueue(b.ID, source, input, 0); err != nil {
 			hookLog("schedule %d: enqueue failed: %v", sc.ID, err)
 			continue
 		}
+		if name != "" {
+			s.postRoutineFired(b, sc)
+		}
 		// A recurring schedule rolls forward instead of being retired, so one
-		// row keeps firing for the life of the bot.
+		// row keeps firing for the life of the bot. Named routines interpret
+		// cron in their timezone so 9:00 means 9:00 in Madrid on the UTC VM.
 		if sc.RecurringCron != "" {
-			if schedule, err := parseCron(sc.RecurringCron); err == nil {
-				s.in.db.Model(&Schedule{}).Where("id = ?", sc.ID).Update("fire_at", schedule.Next(now))
+			if next, err := cronNextIn(sc.RecurringCron, sc.Timezone, now); err == nil {
+				s.in.db.Model(&Schedule{}).Where("id = ?", sc.ID).Update("fire_at", next)
 				continue
 			}
 			hookLog("schedule %d: unparseable cron %q, retiring it", sc.ID, sc.RecurringCron)

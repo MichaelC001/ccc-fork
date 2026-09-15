@@ -12,6 +12,7 @@ import (
 // session map, ledger and hooks used to cover went away with them (DESIGN §11).
 
 func TestConfigSaveLoad(t *testing.T) {
+	isolateConfigEnv(t)
 	t.Setenv("HOME", t.TempDir())
 
 	config := &Config{
@@ -40,6 +41,7 @@ func TestConfigSaveLoad(t *testing.T) {
 }
 
 func TestGetConfigPathHonorsCCCConfig(t *testing.T) {
+	isolateConfigEnv(t)
 	t.Setenv("HOME", t.TempDir())
 	custom := filepath.Join(t.TempDir(), "custom.json")
 	t.Setenv("CCC_CONFIG", custom)
@@ -51,6 +53,7 @@ func TestGetConfigPathHonorsCCCConfig(t *testing.T) {
 // A config written by ccc v2 still carries `sessions` (and other dead keys).
 // v3 must load it and ignore them rather than refusing to start.
 func TestConfigLoadToleratesLegacyKeys(t *testing.T) {
+	isolateConfigEnv(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	dir := filepath.Join(home, ".config", "ccc")
@@ -92,6 +95,7 @@ func TestConfigLoadToleratesLegacyKeys(t *testing.T) {
 }
 
 func TestConfigLoadNonExistent(t *testing.T) {
+	isolateConfigEnv(t)
 	t.Setenv("HOME", t.TempDir())
 	if _, err := loadConfig(); err == nil {
 		t.Error("loadConfig should fail when there is no config file")
@@ -99,6 +103,7 @@ func TestConfigLoadNonExistent(t *testing.T) {
 }
 
 func TestConfigFilePermissions(t *testing.T) {
+	isolateConfigEnv(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	if err := saveConfig(&Config{BotToken: "secret-token", ChatID: 12345}); err != nil {
@@ -114,6 +119,7 @@ func TestConfigFilePermissions(t *testing.T) {
 }
 
 func TestConfigCommandSetAndGet(t *testing.T) {
+	isolateConfigEnv(t)
 	t.Setenv("HOME", t.TempDir())
 
 	if err := configCommand([]string{"set", "chat_id", "777"}); err != nil {
@@ -158,6 +164,7 @@ func TestConfigCommandSetAndGet(t *testing.T) {
 // config.json keys: `ccc config` reports the default in force until one is set,
 // and out-of-range values are refused rather than parking every bot.
 func TestConfigCommandTuningKnobs(t *testing.T) {
+	isolateConfigEnv(t)
 	t.Setenv("HOME", t.TempDir())
 
 	fresh := &Config{}

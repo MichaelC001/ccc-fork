@@ -195,6 +195,9 @@ func main() {
 	case "tell":
 		must(runTellCommand(os.Args[2:]))
 
+	case "routine":
+		must(runRoutineCommand(os.Args[2:]))
+
 	case "relay":
 		port := "8080"
 		if len(os.Args) >= 3 {

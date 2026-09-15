@@ -592,6 +592,17 @@ type cancelScheduleIn struct {
 	ID int64 `json:"id" jsonschema:"the schedule id from schedule_wakeup or list output"`
 }
 
+type setRoutineIn struct {
+	Name     string `json:"name" jsonschema:"short stable id, e.g. morning-ventas or weekly-review"`
+	Prompt   string `json:"prompt" jsonschema:"what to do each time it fires; this becomes the turn input"`
+	Cron     string `json:"cron" jsonschema:"5-field cron or @daily/@hourly/@every 1h"`
+	Timezone string `json:"timezone,omitempty" jsonschema:"IANA timezone (default Europe/Madrid). Always set this; the work VM is UTC."`
+}
+
+type cancelRoutineIn struct {
+	Name string `json:"name" jsonschema:"the routine to remove"`
+}
+
 type spawnBotIn struct {
 	Name         string `json:"name" jsonschema:"name for the new bot; it becomes its Telegram topic"`
 	Role         string `json:"role" jsonschema:"what the new bot is for, in a sentence or two"`
@@ -639,6 +650,18 @@ func (s *mcpServer) registerAutomation(server *mcp.Server) {
 		Name:        "cancel_schedule",
 		Description: "Cancel one of your pending wakeups.",
 	}, s.cancelSchedule)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "set_routine",
+		Description: "Create or replace a named recurring routine. It always fires (unlike a watch), in the given timezone, and posts ⏰ in your topic. Upserts by name.",
+	}, s.setRoutine)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "list_routines",
+		Description: "List your named routines and when they fire next.",
+	}, s.listRoutinesTool)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "cancel_routine",
+		Description: "Remove one of your named routines.",
+	}, s.cancelRoutineTool)
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "spawn_bot",
 		Description: "Create a helper bot with its own Telegram topic. Give it a first_message; it reports back to you with send_to_bot. " +
@@ -747,6 +770,40 @@ func (s *mcpServer) cancelSchedule(_ context.Context, _ *mcp.CallToolRequest, in
 		return text("you have no schedule #%d", in.ID), nil, nil
 	}
 	return text("cancelled schedule #%d", in.ID), nil, nil
+}
+
+func (s *mcpServer) setRoutine(_ context.Context, _ *mcp.CallToolRequest, in setRoutineIn) (*mcp.CallToolResult, any, error) {
+	row, err := upsertRoutine(s.db, s.botID, in.Name, in.Prompt, in.Cron, in.Timezone, time.Now())
+	if err != nil {
+		return toolErr("%v", err), nil, nil
+	}
+	return text("routine %q next at %s (%s, %s)", row.Name, row.FireAt.Format(time.RFC3339), row.RecurringCron, row.Timezone), nil, nil
+}
+
+func (s *mcpServer) listRoutinesTool(_ context.Context, _ *mcp.CallToolRequest, _ emptyIn) (*mcp.CallToolResult, any, error) {
+	rows, err := listRoutines(s.db, s.botID)
+	if err != nil {
+		return toolErr("could not list routines: %v", err), nil, nil
+	}
+	if len(rows) == 0 {
+		return text("no routines"), nil, nil
+	}
+	var sb strings.Builder
+	for _, r := range rows {
+		fmt.Fprintf(&sb, "%s  next %s  %s %s\n  %s\n", r.Name, r.FireAt.Format(time.RFC3339), r.RecurringCron, r.Timezone, r.Note)
+	}
+	return text("%s", strings.TrimRight(sb.String(), "\n")), nil, nil
+}
+
+func (s *mcpServer) cancelRoutineTool(_ context.Context, _ *mcp.CallToolRequest, in cancelRoutineIn) (*mcp.CallToolResult, any, error) {
+	ok, err := cancelRoutine(s.db, s.botID, in.Name)
+	if err != nil {
+		return toolErr("%v", err), nil, nil
+	}
+	if !ok {
+		return text("you have no routine named %q", sanitizeRoutineName(in.Name)), nil, nil
+	}
+	return text("cancelled routine %q", sanitizeRoutineName(in.Name)), nil, nil
 }
 
 func (s *mcpServer) spawnBot(_ context.Context, _ *mcp.CallToolRequest, in spawnBotIn) (*mcp.CallToolResult, any, error) {

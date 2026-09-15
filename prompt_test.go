@@ -23,6 +23,9 @@ func TestRenderSystemPromptCarriesIdentityAndRoster(t *testing.T) {
 	if !strings.Contains(got, "ask_owner") || !strings.Contains(got, "remember") {
 		t.Error("system prompt does not describe the ccc tools")
 	}
+	if !strings.Contains(got, "set_routine") {
+		t.Error("system prompt does not describe routines")
+	}
 }
 
 func TestRenderSystemPromptWithoutRole(t *testing.T) {

@@ -1278,10 +1278,18 @@ func (in *instance) handleSchedulesCommand(msg *TelegramMessage, b *Bot, rest st
 	for _, s := range schedules {
 		repeat := ""
 		if s.RecurringCron != "" {
-			repeat = " (repeats: " + htmlEscape(s.RecurringCron) + ")"
+			repeat = " (repeats: " + htmlEscape(s.RecurringCron)
+			if s.Timezone != "" {
+				repeat += " " + htmlEscape(s.Timezone)
+			}
+			repeat += ")"
 		}
-		fmt.Fprintf(&sb, "• <b>#%d</b> %s%s\n  %s\n",
-			s.ID, s.FireAt.Format("2006-01-02 15:04"), repeat, htmlEscape(truncate(s.Note, 200)))
+		label := fmt.Sprintf("#%d", s.ID)
+		if s.Name != "" {
+			label = htmlEscape(s.Name) + " " + label
+		}
+		fmt.Fprintf(&sb, "• <b>%s</b> %s%s\n  %s\n",
+			label, s.FireAt.Format("2006-01-02 15:04"), repeat, htmlEscape(truncate(s.Note, 200)))
 	}
 	sb.WriteString("\nCancel one with /schedules cancel &lt;id&gt;")
 	in.reply(msg, sb.String())

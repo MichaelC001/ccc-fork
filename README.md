@@ -275,7 +275,10 @@ Every bot has these tools, and uses them without being told:
   and the bot's turn ends until you answer.
 - `watch` / `unwatch` / `list_watches` — a command re-run on an interval that
   wakes the bot only when its output changes.
-- `schedule_wakeup` / `cancel_schedule` — one-off or cron wakeups.
+- `schedule_wakeup` / `cancel_schedule` — one-off (or unnamed cron) wakeups.
+- `set_routine` / `list_routines` / `cancel_routine` — named recurring work,
+  timezone-aware (default `Europe/Madrid`), ⏰ in the topic when it fires.
+  Grok/agy: `ccc routine add <name> --cron "0 9 * * 1-5" <prompt>`.
 - `spawn_bot` / `archive_bot` — create a helper with its own topic, which
   reports back with `send_to_bot`; archive it when the job is done.
 - `get_project` / `set_project` — the team's shared notes about a code base.

@@ -87,6 +87,7 @@ const (
 	sourceBot      = "bot"
 	sourceSchedule = "schedule"
 	sourceWatch    = "watch"
+	sourceRoutine  = "routine"
 	sourceSystem   = "system"
 )
 
@@ -149,13 +150,16 @@ type Watch struct {
 	Enabled    bool
 }
 
-// Schedule is a self-wakeup (Phase 2b).
+// Schedule is a self-wakeup (Phase 2b). A non-empty Name makes it a routine:
+// timezone-aware cron, upserted by name, ⏰ in the topic when it fires.
 type Schedule struct {
-	ID            int64 `gorm:"primaryKey"`
-	BotID         int64 `gorm:"index;not null"`
+	ID            int64  `gorm:"primaryKey"`
+	BotID         int64  `gorm:"index;not null"`
+	Name          string `gorm:"index"`
 	FireAt        time.Time
 	Note          string
 	RecurringCron string
+	Timezone      string
 	FiredAt       *time.Time
 }
 
