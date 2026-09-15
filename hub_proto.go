@@ -15,7 +15,7 @@ import (
 // Default is the public free hub. Override with `ccc config set hub_url …`
 // or CCC_HUB_URL. Set hub_url to "-" to disable.
 
-const defaultHubURL = "wss://hub.getccc.dev"
+const defaultHubURL = "wss://hub.mentasystems.com"
 
 func hubURLFromConfig(cfg *Config) string {
 	if env := strings.TrimSpace(os.Getenv("CCC_HUB_URL")); env != "" {
