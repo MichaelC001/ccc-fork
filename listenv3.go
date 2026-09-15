@@ -764,6 +764,9 @@ func (in *instance) handleCommand(msg *TelegramMessage, text string, inGroup boo
 	case "/setgroup":
 		in.handleSetGroupCommand(msg)
 		return
+	case "/cancel":
+		in.reply(msg, "Nothing to cancel.")
+		return
 	case "/bots":
 		in.reply(msg, in.renderBots())
 		return

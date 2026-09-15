@@ -547,12 +547,21 @@ func (in *instance) takeLoginCode(chatID, topicID int64, text string) bool {
 	in.login.mu.Lock()
 	w := in.login.waiting
 	in.login.mu.Unlock()
-	if w == nil || w.chatID != chatID || w.topicID != topicID {
+	if w == nil {
 		return false
 	}
-	if strings.EqualFold(strings.TrimSpace(text), "/cancel") {
+	// /cancel from any topic, including Telegram's /cancel@bot_username form
+	// in groups with several bots. The exact-text match used to miss the
+	// suffix and fall through to "Unknown command." while the login stayed
+	// stuck.
+	cmd, _ := splitCommand(strings.TrimSpace(text))
+	if cmd == "/cancel" {
 		w.cancel()
+		in.post(chatID, topicID, "Login cancelled.")
 		return true
+	}
+	if w.chatID != chatID || w.topicID != topicID {
+		return false
 	}
 	select {
 	case w.codes <- text:

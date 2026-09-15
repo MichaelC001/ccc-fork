@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -640,5 +641,58 @@ func TestAccountLoginDisambiguation(t *testing.T) {
 	in.accountSetDefault(42, 0, "jairo@example.com")
 	if in.config().DefaultProfile != before {
 		t.Error("default with a shared email must not pick an engine silently")
+	}
+}
+
+func TestCancelLoginStripsBotMention(t *testing.T) {
+	in, _, api := testInstance(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	waiter := &loginWaiter{
+		chatID: -100777, topicID: 7, profile: "you@example.com",
+		codes: make(chan string, 1), cancel: cancel,
+	}
+	in.login.waiting = waiter
+
+	if !in.takeLoginCode(-100777, 7, "/cancel@jairo_vps_bot") {
+		t.Fatal("/cancel@bot must be consumed as a cancel")
+	}
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("the login context was not cancelled")
+	}
+	if !strings.Contains(strings.Join(api.texts(""), "\n"), "Login cancelled.") {
+		t.Errorf("missing cancel confirmation: %v", api.texts(""))
+	}
+}
+
+func TestCancelLoginFromAnotherTopic(t *testing.T) {
+	in, _, _ := testInstance(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	in.login.waiting = &loginWaiter{
+		chatID: -100777, topicID: 1, profile: "you@example.com",
+		codes: make(chan string, 1), cancel: cancel,
+	}
+	if !in.takeLoginCode(-100777, 99, "/cancel") {
+		t.Fatal("/cancel from another topic must still abort the login")
+	}
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("the login context was not cancelled")
+	}
+}
+
+func TestCancelWithNoLogin(t *testing.T) {
+	in, _, api := testInstance(t)
+	in.handleMessage(ownerMessage(0, "/cancel"))
+	if !strings.Contains(strings.Join(api.texts(""), "\n"), "Nothing to cancel.") {
+		t.Errorf("got %v", api.texts(""))
+	}
+	in.handleMessage(ownerMessage(0, "/cancel@jairo_vps_bot"))
+	if strings.Count(strings.Join(api.texts(""), "\n"), "Nothing to cancel.") != 2 {
+		t.Errorf("/cancel@bot with no login: %v", api.texts(""))
 	}
 }
