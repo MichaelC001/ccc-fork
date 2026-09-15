@@ -64,7 +64,10 @@ func (s *scheduler) Run() {
 	// supervised (or finished) even if auth checks take a while.
 	s.reattachBackgroundJobs()
 	// Probe the accounts once at boot so /status is meaningful immediately.
-	s.runDoctor(time.Now())
+	now := time.Now()
+	s.runDoctor(now)
+	s.expireWatches(now)
+	s.compactIdleSessions(now)
 	ticker := time.NewTicker(schedulerTick)
 	bgTicker := time.NewTicker(backgroundTick)
 	defer ticker.Stop()
@@ -74,7 +77,9 @@ func (s *scheduler) Run() {
 		case <-s.stop:
 			return
 		case now := <-ticker.C:
+			s.compactIdleSessions(now)
 			s.runDueWatches(now)
+			s.expireWatches(now)
 			s.fireDueSchedules(now)
 			if now.Sub(s.doctor.lastRun) >= doctorInterval {
 				s.runDoctor(now)
@@ -131,6 +136,124 @@ func (s *scheduler) runWatch(w *Watch, now time.Time) {
 	if _, err := s.in.runner.Enqueue(b.ID, sourceWatch, input, 0); err != nil {
 		hookLog("watch %s: enqueue failed: %v", w.Name, err)
 	}
+}
+
+// expireWatches cancels enabled watches older than watch_ttl_s and wakes the
+// bot that set them. Routines are named cron on the schedules table and are
+// not touched. A zero TTL disables expiry.
+func (s *scheduler) expireWatches(now time.Time) {
+	ttl := watchTTL(s.in.config())
+	if ttl <= 0 {
+		return
+	}
+	var watches []Watch
+	if err := s.in.db.Where("enabled = ?", true).Find(&watches).Error; err != nil {
+		return
+	}
+	for i := range watches {
+		w := watches[i]
+		if !watchExpired(w, now, ttl) {
+			continue
+		}
+		if err := s.in.db.Delete(&Watch{}, w.ID).Error; err != nil {
+			hookLog("watch %s: expire delete failed: %v", w.Name, err)
+			continue
+		}
+		b, err := botByID(s.in.db, w.BotID)
+		if err != nil || b.ArchivedAt != nil {
+			continue
+		}
+		if _, err := s.in.runner.Enqueue(b.ID, sourceSystem, renderWatchExpired(&w, ttl), 0); err != nil {
+			hookLog("watch %s: expire enqueue failed: %v", w.Name, err)
+		}
+	}
+}
+
+// watchExpired is true when the watch has lived past its TTL. A zero CreatedAt
+// (legacy row from before the column existed) is treated as already expired
+// so a long-running watch does not become immortal by upgrading.
+func watchExpired(w Watch, now time.Time, ttl time.Duration) bool {
+	if ttl <= 0 || !w.Enabled {
+		return false
+	}
+	if w.CreatedAt.IsZero() {
+		return true
+	}
+	return !w.CreatedAt.After(now.Add(-ttl))
+}
+
+func renderWatchExpired(w *Watch, ttl time.Duration) string {
+	return fmt.Sprintf(
+		"Watch %q timed out after %s and was cancelled.\nCommand: %s\nRe-set it with watch if you still need it. For standing jobs use set_routine.",
+		w.Name, humanDuration(ttl), w.Command)
+}
+
+// watchExpiryLabel is the "expires in 2h" fragment for /watches and list_watches.
+func watchExpiryLabel(w Watch, now time.Time, ttl time.Duration) string {
+	if !w.Enabled {
+		return "disabled"
+	}
+	if ttl <= 0 {
+		return "no expiry"
+	}
+	if watchExpired(w, now, ttl) {
+		return "expires now"
+	}
+	left := ttl - now.Sub(w.CreatedAt)
+	if left < 0 {
+		left = 0
+	}
+	return "expires in " + humanDuration(left)
+}
+
+// compactIdleSessions clears session_id on idle bots whose last turn ended
+// longer than idle_compact_s ago. Same effect as /new: memories stay, the
+// next turn is a fresh conversation. Skips running and waiting bots (a parked
+// ask_owner still needs the transcript). A zero setting disables it.
+func (s *scheduler) compactIdleSessions(now time.Time) {
+	after := idleCompact(s.in.config())
+	if after <= 0 {
+		return
+	}
+	var bots []Bot
+	if err := s.in.db.Where("archived_at IS NULL AND session_id != ? AND status = ?", "", botIdle).Find(&bots).Error; err != nil {
+		return
+	}
+	for i := range bots {
+		b := bots[i]
+		if !sessionIdleTooLong(s.in.db, b.ID, now, after) {
+			continue
+		}
+		res := s.in.db.Model(&Bot{}).Where("id = ? AND status = ? AND session_id != ?", b.ID, botIdle, "").
+			Update("session_id", "")
+		if res.Error != nil || res.RowsAffected == 0 {
+			continue
+		}
+		s.in.notifyTopicSilent(b.TopicID, fmt.Sprintf(
+			"🧹 Fresh conversation after %s idle. Memories are kept.", humanDuration(after)))
+	}
+}
+
+// sessionIdleTooLong is the shared idle check: last finished turn older than
+// `after`, and no unanswered ask_owner. Status is the caller's problem (the
+// runner has already marked the bot running when it asks).
+func sessionIdleTooLong(db *gorm.DB, botID int64, now time.Time, after time.Duration) bool {
+	if after <= 0 {
+		return false
+	}
+	var pending int64
+	db.Model(&Question{}).Where("bot_id = ? AND answered_at IS NULL", botID).Count(&pending)
+	if pending > 0 {
+		return false
+	}
+	var last Turn
+	if err := db.Where("bot_id = ? AND ended_at IS NOT NULL", botID).Order("ended_at DESC").First(&last).Error; err != nil {
+		return false
+	}
+	if last.EndedAt == nil {
+		return false
+	}
+	return now.Sub(*last.EndedAt) >= after
 }
 
 // runWatchCommand runs a watch's command in the bot's working directory with
@@ -338,11 +461,27 @@ func (in *instance) notifyGeneral(text string) {
 // notifying sendMessage: Telegram does not ping on edits, and these are the
 // events the owner must actually see (boot, a failed job, a resumed job).
 func (in *instance) notifyTopic(topicID int64, html string) {
+	in.notifyTopicOpts(topicID, html, false)
+}
+
+// notifyTopicSilent is the same post without a Telegram ping. Idle-session
+// rotation is bookkeeping, not something that should buzz the owner's phone.
+func (in *instance) notifyTopicSilent(topicID int64, html string) {
+	in.notifyTopicOpts(topicID, html, true)
+}
+
+func (in *instance) notifyTopicOpts(topicID int64, html string, silent bool) {
 	cfg := in.config()
 	if cfg.BotToken == "" || cfg.GroupID == 0 || strings.TrimSpace(html) == "" {
 		return
 	}
-	if _, err := sendMessageHTMLGetID(cfg, cfg.GroupID, topicID, html); err != nil {
+	var err error
+	if silent {
+		_, err = sendMessageHTMLGetIDSilent(cfg, cfg.GroupID, topicID, html)
+	} else {
+		_, err = sendMessageHTMLGetID(cfg, cfg.GroupID, topicID, html)
+	}
+	if err != nil {
 		hookLog("topic %d notification: %v", topicID, err)
 	}
 }
@@ -458,7 +597,14 @@ func upsertWatch(db *gorm.DB, botID int64, name, command string, intervalS int) 
 	var w Watch
 	err := db.Where("bot_id = ? AND name = ?", botID, name).First(&w).Error
 	if err == nil {
-		updates := map[string]any{"command": command, "interval_s": intervalS, "enabled": true}
+		updates := map[string]any{
+			"command":    command,
+			"interval_s": intervalS,
+			"enabled":    true,
+			// Renewing a watch (same name) restarts the TTL, which is how a
+			// bot puts back a watch that just timed out (DESIGN §7).
+			"created_at": time.Now(),
+		}
 		if w.Command != command {
 			// A different command means a different baseline; forget the old one
 			// so the next run does not report a spurious change.
@@ -467,6 +613,9 @@ func upsertWatch(db *gorm.DB, botID int64, name, command string, intervalS int) 
 			updates["last_run_at"] = nil
 		}
 		if err := db.Model(&Watch{}).Where("id = ?", w.ID).Updates(updates).Error; err != nil {
+			return nil, err
+		}
+		if err := db.Where("id = ?", w.ID).First(&w).Error; err != nil {
 			return nil, err
 		}
 		return &w, nil

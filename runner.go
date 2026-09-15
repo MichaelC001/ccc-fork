@@ -482,7 +482,7 @@ func (r *Runner) execute(b *Bot, t *Turn, input string, triggers []int64) {
 		tried[p.Name] = true
 		r.db.Model(&Turn{}).Where("id = ?", t.ID).Update("profile", p.Name)
 
-		sessionID, resume := r.sessionFor(b)
+		sessionID, resume := r.sessionForTurn(b)
 		res = r.spawn(p, b, t, sessionID, resume, envelope, prog)
 		if res.ok() {
 			r.persistSession(b, sessionID, resume, res)
@@ -613,6 +613,17 @@ func inboxInput(db *gorm.DB, m InboxMessage) string {
 		}
 	}
 	return fmt.Sprintf("Message from %s:\n%s", sender, m.Text)
+}
+
+// sessionForTurn is sessionFor plus idle rotation: a conversation that has
+// sat unused past idle_compact_s starts fresh (DESIGN §7). The runner is
+// already `running`, so status is not part of the check.
+func (r *Runner) sessionForTurn(b *Bot) (string, bool) {
+	if strings.TrimSpace(b.SessionID) != "" && sessionIdleTooLong(r.db, b.ID, time.Now(), idleCompact(r.config())) {
+		r.db.Model(&Bot{}).Where("id = ?", b.ID).Update("session_id", "")
+		b.SessionID = ""
+	}
+	return r.sessionFor(b)
 }
 
 // sessionFor returns the session id for the next turn and whether it is a

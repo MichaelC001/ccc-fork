@@ -30,7 +30,7 @@ on purpose). One ccc instance never talks to more than one Telegram bot.
 | **Instance** | One `ccc listen` process on one machine, bound to one Telegram bot token and one forum group. Instance-level config: model, env passthrough, default profile, data dir. |
 | **Profile** | One account for one engine (see `profiles.go`). Claude = one `CLAUDE_CONFIG_DIR`. Grok = isolated `GROK_HOME`. Antigravity = isolated HOME/`GEMINI_HOME`. Codex = isolated `CODEX_HOME`. Engine is set when the account is added. Same-engine accounts are interchangeable at turn granularity (§4). One instance may mix engines. |
 | **Bot** | One forum topic. Identity = `name` + `role` (free text set with `/role`) + its own memory scope + an **engine** derived from the default account (or `default_engine`) + an optional **model** override. Turns pick a healthy account of that engine. `/engine` is a secondary pool assignment. `/model` in the topic overrides that bot; `/model <engine> <slug>` sets the instance default for the engine. Claude bots share MCP tools. Grok/Antigravity/Codex bots spawn that CLI and do not get ccc MCP. Optional per-bot `cwd` (default: `<data_dir>/bots/<name>/workspace`). |
-| **Session** | The Claude Code conversation behind a bot: a UUID ccc mints and resumes. A bot has exactly one live session; `/new` rotates it. |
+| **Session** | The Claude Code conversation behind a bot: a UUID ccc mints and resumes. A bot has exactly one live session; `/new` rotates it. After `idle_compact_s` (default 1h) of no finished turn, ccc rotates it automatically — memories stay, the transcript does not. |
 | **Turn** | One `claude -p` process: input = one user/bot/system/background message (plus context envelope), output = streamed events until `result`. At most one turn per bot at a time; further inputs queue (FIFO) and are delivered together on the next turn. A background job is **not** a turn: it must not hold `turns.status=running`. |
 | **Background job** | A long-running shell command owned by a bot, started with `run_background`. It runs in the bot's cwd with `env_passthrough` while the topic stays responsive. Completion enqueues a `source=background` turn. |
 
@@ -161,7 +161,8 @@ memories    id, scope (user|project|bot), scope_key (''|project path|bot id), ke
 memories_archive  id, compaction_id, archived_at, scope, scope_key, key, text, created_by_bot_id,
             memory_created_at, memory_updated_at            -- what a compaction replaced (§7)
 projects    id, path (unique), name, description, stack, deploy_notes, updated_at
-watches     id, bot_id, name, command, interval_s, last_hash, last_output, last_run_at, enabled
+watches     id, bot_id, name, command, interval_s, last_hash, last_output, last_run_at, enabled, created_at
+            -- created_at is the TTL clock (watch_ttl_s, default 4h); re-upserting the name renews it
 schedules   id, bot_id, fire_at, note, recurring_cron (nullable), fired_at
 questions   id, bot_id, turn_id, question, options_json, answer, asked_message_id, answered_at
 access      telegram_user_id (pk), display, state (pending|approved|blocked), pair_code, code_expires_at,
@@ -206,7 +207,7 @@ bot/turn from its flags. Tools (all bots get all of them):
 | `ask_owner` | `question`, `options?` (≤4 strings) | Post question with inline buttons (or free text if no options). Returns immediately with `{"status":"asked"}`; the bot should end its turn. The answer arrives as the next input (`source=user`, prefixed `Answer to "<question>": …`). |
 | `update_instructions` | `role` | Replace this bot's `role`; echo the new text into the topic. `/role` does the same from Telegram. |
 | `set_name` | `name`, `emoji?` | Rename this bot: validate (§8 `/name`), update `bots.name`, rename the forum topic and, when `emoji` is one Telegram allows, set the topic icon. Rotates the session (§14.14). `/name` does the same from Telegram. |
-| `watch` | `name`, `command`, `interval_s` (≥60) | Register a deterministic watch (§7). `unwatch(name)`, `list_watches()`. |
+| `watch` | `name`, `command`, `interval_s` (≥60) | Register a deterministic watch (§7). Lasts `watch_ttl_s` (default 4h); re-upserting the name renews it. `unwatch(name)`, `list_watches()`. |
 | `schedule_wakeup` | `in_seconds` or `at` (RFC3339), `note`, `cron?` | Self-wakeup (§7). `cancel_schedule(id)`. |
 | `run_background` | `command`, `name?` | Queue a long-running shell command in the bot's cwd with `env_passthrough`. Returns a job id immediately; does not block the turn. Use when Bash/a tool is expected to exceed ~60s. |
 | `list_background` | — | This bot's recent/active jobs: id, status, short summary. |
@@ -239,7 +240,20 @@ One goroutine in `ccc listen`:
   Hash stdout; if changed since `last_hash`,
   enqueue a turn on the bot with `source=watch` and an input containing the
   watch name, the previous and new output (diffed, truncated to ~8 KB). Zero
-  tokens while nothing changes.
+  tokens while nothing changes. A watch lives `watch_ttl_s` (default 4h,
+  matching the background-job safety cap) from `created_at`; when that
+  elapses, ccc deletes it and enqueues `source=system` on the bot that set
+  it so it can put the watch back. Re-upserting the same name restarts the
+  clock. Legacy rows with a zero `created_at` expire immediately on upgrade.
+  Routines (named cron on `schedules`) do not expire. `watch_ttl_s=0`
+  disables expiry.
+- **Idle session rotation**: an idle bot whose last turn ended more than
+  `idle_compact_s` ago (default 1h, Claude's prompt-cache TTL) has its
+  `session_id` cleared. Same effect as `/new`. Waiting bots (parked
+  `ask_owner`) and running bots are skipped. The runner also checks this at
+  the start of a turn, so a watch that fires after the cache TTL does not
+  rebuild a cold fat session. A silent 🧹 lands in the topic when the
+  scheduler rotates. `idle_compact_s=0` disables it.
 - **Schedules**: enqueue a turn with `source=schedule` and the note when
   `fire_at` passes; recurring via cron expression.
 - **Background jobs**: every second, claim queued `background_jobs` (cap: 8
@@ -672,11 +686,11 @@ the previous turn are already older than the window, so the wait is zero; and
 the total wait is capped at four windows. `ccc config set debounce_ms 0` turns
 it off.
 
-`debounce_ms`, `compaction_model` and `maintenance_hour` are **config.json keys,
-not a Telegram command**. An earlier draft added `/set` for them; it was removed
-because a knob nobody remembers is worse than a default that is right, and three
-keys did not justify a command, a whitelist and an owner-only branch. `ccc config`
-prints each one with the default in force; `ccc config set` validates the range.
+`debounce_ms`, `compaction_model`, `maintenance_hour`, `idle_compact_s` and
+`watch_ttl_s` are **config.json keys, not a Telegram command**. An earlier
+draft added `/set` for them; it was removed because a knob nobody remembers
+is worse than a default that is right. `ccc config` prints each one with the
+default in force; `ccc config set` validates the range.
 
 **14.19 `/usage` reads `turns.usage_json`, and the cost is folded into it.** The
 `result` event reports `total_cost_usd` NEXT TO `usage`, not inside it, so the
@@ -785,3 +799,17 @@ Telegram. `/cancel` (including `/cancel@bot`) aborts the wait. Turns via
 The CLI mints a `thread_id` (like agy's `conversation_id`); later turns
 `codex exec resume <id>`. No ccc MCP; teammates are `ccc tell`. Verified
 against Codex CLI 0.133.0.
+
+**14.29 Idle sessions rotate, and watches expire.** A day of CCC-only work on
+the work VM showed the expensive pattern: a bot's conversation grows to
+hundreds of thousands of tokens, Claude's prompt cache is 1h ephemeral, and
+the next turn after that (a user ping or a watch fire) rewrites the prefix
+as `cache_creation`. So an idle bot whose last turn ended more than
+`idle_compact_s` ago (default 1h) has `session_id` cleared — `/new`, no
+model call. Waiting bots (unanswered `ask_owner`) are skipped so the
+answer still has the question. Watches are the other leak: they are
+change-detectors for a finite job (a PR's CI, a deploy), not standing
+monitors. After `watch_ttl_s` (default 4h) the watch is deleted and the
+bot that set it is woken (`source=system`) to re-set it. Re-upserting the
+same name restarts the clock. Routines do not expire. Both knobs are
+config.json keys; 0 disables.

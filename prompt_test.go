@@ -29,6 +29,9 @@ func TestRenderSystemPromptCarriesIdentityAndRoster(t *testing.T) {
 	if !strings.Contains(got, "run_background") {
 		t.Error("system prompt does not describe background jobs")
 	}
+	if !strings.Contains(got, "4 hours") {
+		t.Error("system prompt does not say watches expire")
+	}
 	if strings.Contains(got, "spawn_bot") {
 		t.Error("system prompt must not offer spawn_bot")
 	}

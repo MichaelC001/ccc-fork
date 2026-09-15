@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const version = "3.0.0"
@@ -31,6 +32,8 @@ type Config struct {
 	DebounceMS      *int   `json:"debounce_ms,omitempty"`      // ms an idle bot waits for more messages (default 2500; 0 disables)
 	CompactionModel string `json:"compaction_model,omitempty"` // model the memory compaction turn runs on (default haiku)
 	MaintenanceHour *int   `json:"maintenance_hour,omitempty"` // local hour the daily maintenance job runs at (default 4)
+	IdleCompactS    *int   `json:"idle_compact_s,omitempty"`   // seconds a session may sit idle before /new (default 3600; 0 disables)
+	WatchTTLS       *int   `json:"watch_ttl_s,omitempty"`      // seconds a watch lives before it is cancelled (default 14400; 0 disables)
 }
 
 // TelegramMessage represents a Telegram message.
@@ -306,7 +309,8 @@ func withDefaultNote(value string, isDefault bool) string {
 // configKeys are the keys `ccc config` understands. Secrets are never printed
 // back (DESIGN §12): the bot token reads as "configured".
 var configKeys = []string{"bot_token", "chat_id", "group_id", "model", "data_dir", "env_passthrough", "relay_url",
-	"transcription_lang", "default_profile", "default_engine", "debounce_ms", "compaction_model", "maintenance_hour"}
+	"transcription_lang", "default_profile", "default_engine", "debounce_ms", "compaction_model", "maintenance_hour",
+	"idle_compact_s", "watch_ttl_s"}
 
 func configGet(config *Config, key string) (string, error) {
 	switch key {
@@ -339,6 +343,10 @@ func configGet(config *Config, key string) (string, error) {
 		return withDefaultNote(compactionModel(config), strings.TrimSpace(config.CompactionModel) == ""), nil
 	case "maintenance_hour":
 		return withDefaultNote(fmt.Sprint(maintenanceHour(config)), config.MaintenanceHour == nil), nil
+	case "idle_compact_s":
+		return withDefaultNote(fmt.Sprint(int(idleCompact(config)/time.Second)), config.IdleCompactS == nil), nil
+	case "watch_ttl_s":
+		return withDefaultNote(fmt.Sprint(int(watchTTL(config)/time.Second)), config.WatchTTLS == nil), nil
 	}
 	return "", fmt.Errorf("unknown config key %q (known: %s)", key, strings.Join(configKeys, ", "))
 }
@@ -403,6 +411,18 @@ func configSet(config *Config, key, value string) error {
 			return err
 		}
 		config.MaintenanceHour = &n
+	case "idle_compact_s":
+		n, err := parseRange(key, value, 0, maxIdleCompactS)
+		if err != nil {
+			return err
+		}
+		config.IdleCompactS = &n
+	case "watch_ttl_s":
+		n, err := parseRange(key, value, 0, maxWatchTTLS)
+		if err != nil {
+			return err
+		}
+		config.WatchTTLS = &n
 	default:
 		return fmt.Errorf("unknown config key %q (known: %s)", key, strings.Join(configKeys, ", "))
 	}

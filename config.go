@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // cfgMu serializes every load→mutate→save cycle on the shared config file (see
@@ -123,8 +124,12 @@ const (
 	defaultDebounceMS      = 2500
 	defaultCompactionModel = "haiku"
 	defaultMaintenanceHour = 4
+	defaultIdleCompactS    = 3600  // 1h: Claude's prompt-cache TTL, so we rotate before a cold rewrite
+	defaultWatchTTLS       = 14400 // 4h: same safety cap as background jobs
 	// maxDebounceMS keeps a typo (debounce_ms = 250000) from parking every bot.
-	maxDebounceMS = 60000
+	maxDebounceMS   = 60000
+	maxIdleCompactS = 24 * 3600
+	maxWatchTTLS    = 7 * 24 * 3600
 )
 
 // debounceMS is how long an idle bot waits for more messages before it starts a
@@ -168,6 +173,41 @@ func maintenanceHour(c *Config) int {
 		return h
 	}
 	return defaultMaintenanceHour
+}
+
+// idleCompact is how long a bot's conversation may sit unused before ccc
+// rotates it (the same as /new: memories stay, the transcript does not).
+// 0 disables. The default matches Claude's 1h prompt-cache TTL: resuming a
+// cold fat session re-charges the whole history as cache_creation.
+func idleCompact(c *Config) time.Duration {
+	n := defaultIdleCompactS
+	if c != nil && c.IdleCompactS != nil {
+		n = *c.IdleCompactS
+	}
+	if n <= 0 {
+		return 0
+	}
+	if n > maxIdleCompactS {
+		n = maxIdleCompactS
+	}
+	return time.Duration(n) * time.Second
+}
+
+// watchTTL is how long a watch lives before ccc cancels it and wakes the bot
+// that set it. 0 disables. Routines (named cron on the schedules table) are
+// not watches and do not expire.
+func watchTTL(c *Config) time.Duration {
+	n := defaultWatchTTLS
+	if c != nil && c.WatchTTLS != nil {
+		n = *c.WatchTTLS
+	}
+	if n <= 0 {
+		return 0
+	}
+	if n > maxWatchTTLS {
+		n = maxWatchTTLS
+	}
+	return time.Duration(n) * time.Second
 }
 
 // expandPath expands ~ to home directory

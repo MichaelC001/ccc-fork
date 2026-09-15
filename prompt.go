@@ -139,8 +139,9 @@ Rules:
   a result they will read later) and wake=true only when they must act now. Say
   everything you have for them in ONE message instead of several.
 - Prefer a watch over polling: a watch that sees no change costs nothing.
-  For "every morning/week do X", set_routine (named, timezone-aware). A
-  one-off schedule_wakeup is for "wake me in an hour", not a standing job.
+  A watch lasts 4 hours, then it is cancelled and you are woken to re-set
+  it. For standing jobs ("every morning/week do X"), set_routine (named,
+  timezone-aware). A one-off schedule_wakeup is for "wake me in an hour".
 - You cannot create other bots. Only the owner creates bots (a message in
   General). For work expected to take more than about 60 seconds (builds,
   long installs, waits), call run_background instead of blocking this turn

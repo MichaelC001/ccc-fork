@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Tests for the bootstrap config file and the wire types. Everything the v2
@@ -172,6 +173,8 @@ func TestConfigCommandTuningKnobs(t *testing.T) {
 		"debounce_ms":      "2500 (default)",
 		"compaction_model": "haiku (default)",
 		"maintenance_hour": "4 (default)",
+		"idle_compact_s":   "3600 (default)",
+		"watch_ttl_s":      "14400 (default)",
 	} {
 		got, err := configGet(fresh, key)
 		if err != nil {
@@ -182,7 +185,7 @@ func TestConfigCommandTuningKnobs(t *testing.T) {
 		}
 	}
 
-	for _, kv := range [][2]string{{"debounce_ms", "0"}, {"compaction_model", "sonnet"}, {"maintenance_hour", "22"}} {
+	for _, kv := range [][2]string{{"debounce_ms", "0"}, {"compaction_model", "sonnet"}, {"maintenance_hour", "22"}, {"idle_compact_s", "0"}, {"watch_ttl_s", "7200"}} {
 		if err := configCommand([]string{"set", kv[0], kv[1]}); err != nil {
 			t.Fatalf("config set %s %s: %v", kv[0], kv[1], err)
 		}
@@ -201,8 +204,14 @@ func TestConfigCommandTuningKnobs(t *testing.T) {
 	if maintenanceHour(config) != 22 {
 		t.Errorf("maintenance_hour = %d, want 22", maintenanceHour(config))
 	}
+	if idleCompact(config) != 0 {
+		t.Errorf("idle_compact_s = %s, want 0 (disabled)", idleCompact(config))
+	}
+	if watchTTL(config) != 2*time.Hour {
+		t.Errorf("watch_ttl_s = %s, want 2h", watchTTL(config))
+	}
 
-	for _, kv := range [][2]string{{"debounce_ms", "-1"}, {"debounce_ms", "600000"}, {"maintenance_hour", "25"}, {"maintenance_hour", "x"}} {
+	for _, kv := range [][2]string{{"debounce_ms", "-1"}, {"debounce_ms", "600000"}, {"maintenance_hour", "25"}, {"maintenance_hour", "x"}, {"idle_compact_s", "-1"}, {"watch_ttl_s", "x"}} {
 		if err := configCommand([]string{"set", kv[0], kv[1]}); err == nil {
 			t.Errorf("config set %s %s should have been rejected", kv[0], kv[1])
 		}

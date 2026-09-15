@@ -47,7 +47,7 @@ the Telegram UX.
 | **Engine** | Which CLI an **account** runs: `claude`, `grok` / `grok-build`, or `antigravity` / `agy`. Set when you add the account (`/account add <identity> <engine>`). A bot's turns pick a healthy account from that engine's pool. `/engine` is a secondary way to assign a bot onto another pool. |
 | **Account** | One login for one engine. Claude = `CLAUDE_CONFIG_DIR`. Grok = isolated `GROK_HOME`. Antigravity = isolated `HOME` (`~/.gemini`). One ccc process can hold several Claude emails + several Grok logins + several agy logins at once. Failover stays inside the same engine. |
 | **Memory** | Durable facts in three scopes: `user` (about you, shared by all bots), `project` (about one code base) and `bot` (private). |
-| **Watch** | A command re-run on an interval. The bot is woken **only when the output changes**, with a diff. Nothing changing costs nothing. |
+| **Watch** | A command re-run on an interval. The bot is woken **only when the output changes**, with a diff. Nothing changing costs nothing. Lives 4 hours, then it is cancelled and the bot is woken to re-set it. Standing jobs are routines. |
 | **Schedule** | A wakeup at a time, or on a cron expression. |
 | **Background job** | A long shell command in the same topic. The bot stays responsive; it is woken when the job finishes. |
 
@@ -279,7 +279,9 @@ Every bot has these tools, and uses them without being told:
 - `notify_owner` / `ask_owner` — reach you; `ask_owner` renders inline buttons
   and the bot's turn ends until you answer.
 - `watch` / `unwatch` / `list_watches` — a command re-run on an interval that
-  wakes the bot only when its output changes.
+  wakes the bot only when its output changes. Lasts `watch_ttl_s` (default 4 h),
+  then it is cancelled and the bot is woken to re-set it. Standing jobs are
+  `set_routine`.
 - `schedule_wakeup` / `cancel_schedule` — one-off (or unnamed cron) wakeups.
 - `set_routine` / `list_routines` / `cancel_routine` — named recurring work,
   timezone-aware (default `Europe/Madrid`), ⏰ in the topic when it fires.
@@ -310,6 +312,11 @@ byte-stable from turn to turn (the roster and icon list are sorted, nothing that
 changes per turn is in it), so the API's prompt cache covers the conversation
 and only the new message is charged as fresh input. `/usage` reports the cache
 hit ratio per bot — if it drops, something started varying the prompt.
+
+**Idle sessions are rotated.** After `idle_compact_s` (default 1 h) without a
+turn, ccc does the same as `/new`: memories stay, the conversation does not.
+Claude's prompt cache expires on that same horizon; resuming a cold fat session
+would re-charge the whole history. A silent 🧹 lands in the topic.
 
 **Bots are told not to wake each other for nothing.** `send_to_bot(wake=true)`
 starts a turn on the recipient; the system prompt tells them to use
@@ -349,12 +356,16 @@ defaults are meant to be right, and `ccc config` prints what is in force.
 | `debounce_ms` | 2500 | How long an idle bot waits for more messages before starting a turn. 0 disables it. |
 | `compaction_model` | `haiku` | The cheap model the memory compaction runs on. An unknown name falls back to the instance model. |
 | `maintenance_hour` | 4 | Local hour the daily job runs at. A machine that was off catches up when it wakes. |
+| `idle_compact_s` | 3600 | Seconds a conversation may sit unused before it is rotated (`/new`). 0 disables. |
+| `watch_ttl_s` | 14400 | Seconds a watch lives before it is cancelled and the bot is woken. 0 disables. Routines do not expire. |
 
 ```bash
 ccc config                              # every key, with the defaults in force
 ccc config set debounce_ms 0
 ccc config set compaction_model sonnet
 ccc config set maintenance_hour 22
+ccc config set idle_compact_s 3600
+ccc config set watch_ttl_s 14400
 ```
 
 ### Access control

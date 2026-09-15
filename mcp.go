@@ -633,7 +633,7 @@ type setProjectIn struct {
 func (s *mcpServer) registerAutomation(server *mcp.Server) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "watch",
-		Description: "Re-run a command on an interval and wake you ONLY when its output changes. Costs nothing while nothing changes.",
+		Description: "Re-run a command on an interval and wake you ONLY when its output changes. Costs nothing while nothing changes. Lasts 4 hours, then it is cancelled and you are woken to re-set it. For standing jobs use set_routine.",
 	}, s.watch)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "unwatch",
@@ -698,7 +698,12 @@ func (s *mcpServer) watch(_ context.Context, _ *mcp.CallToolRequest, in watchIn)
 	if err != nil {
 		return toolErr("%v", err), nil, nil
 	}
-	return text("watching %q every %ds; you will be woken when the output changes", w.Name, w.IntervalS), nil, nil
+	ttl := watchTTL(s.config)
+	if ttl <= 0 {
+		return text("watching %q every %ds; you will be woken when the output changes", w.Name, w.IntervalS), nil, nil
+	}
+	return text("watching %q every %ds for up to %s; you will be woken when the output changes, and again if it expires so you can re-set it. For standing jobs use set_routine",
+		w.Name, w.IntervalS, humanDuration(ttl)), nil, nil
 }
 
 func (s *mcpServer) unwatch(_ context.Context, _ *mcp.CallToolRequest, in unwatchIn) (*mcp.CallToolResult, any, error) {
@@ -730,7 +735,7 @@ func (s *mcpServer) listWatchesTool(_ context.Context, _ *mcp.CallToolRequest, _
 		if !w.Enabled {
 			state = "disabled"
 		}
-		fmt.Fprintf(&sb, "%s [%s, every %ds, %s]: %s\n", w.Name, state, w.IntervalS, last, w.Command)
+		fmt.Fprintf(&sb, "%s [%s, every %ds, %s, %s]: %s\n", w.Name, state, w.IntervalS, last, watchExpiryLabel(w, time.Now(), watchTTL(s.config)), w.Command)
 	}
 	return text("%s", strings.TrimRight(sb.String(), "\n")), nil, nil
 }

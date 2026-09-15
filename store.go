@@ -140,6 +140,9 @@ type Project struct {
 }
 
 // Watch is a deterministic command re-run on an interval (Phase 2b).
+// CreatedAt is the TTL clock: watches are temporary (DESIGN §7). Calling
+// watch again with the same name renews it. Routines (named cron) do not
+// expire; they live on the schedules table.
 type Watch struct {
 	ID         int64 `gorm:"primaryKey"`
 	BotID      int64 `gorm:"index;not null"`
@@ -150,6 +153,7 @@ type Watch struct {
 	LastOutput string
 	LastRunAt  *time.Time
 	Enabled    bool
+	CreatedAt  time.Time
 }
 
 // Schedule is a self-wakeup (Phase 2b). A non-empty Name makes it a routine:

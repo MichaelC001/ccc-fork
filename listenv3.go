@@ -1450,8 +1450,9 @@ func (in *instance) handleWatchesCommand(msg *TelegramMessage, b *Bot, rest stri
 		if !w.Enabled {
 			state = " (disabled)"
 		}
-		fmt.Fprintf(&sb, "• <b>%s</b>%s — every %ds, last %s\n  <code>%s</code>\n",
-			htmlEscape(w.Name), state, w.IntervalS, last, htmlEscape(truncate(w.Command, 200)))
+		fmt.Fprintf(&sb, "• <b>%s</b>%s — every %ds, last %s, %s\n  <code>%s</code>\n",
+			htmlEscape(w.Name), state, w.IntervalS, last, watchExpiryLabel(w, time.Now(), watchTTL(in.config())),
+			htmlEscape(truncate(w.Command, 200)))
 	}
 	sb.WriteString("\nCancel one with /watches cancel &lt;name&gt;")
 	in.reply(msg, sb.String())
