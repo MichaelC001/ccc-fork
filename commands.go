@@ -335,7 +335,7 @@ func isMacOS() bool {
 // ---------------------------------------------------------------------------
 
 func printHelp() {
-	fmt.Printf(`ccc - a team of Claude, Grok or Antigravity bots in one Telegram forum group (v%s)
+	fmt.Printf(`ccc - Crew Command Center: a team of Claude, Grok or Antigravity bots in one Telegram forum group (v%s)
 
 USAGE:
     ccc listen              Run the instance (normally done by the service)

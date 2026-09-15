@@ -9,10 +9,11 @@ why.
 
 ## 1. What ccc v3 is
 
-ccc is a **team of generic Claude bots living in one Telegram forum group**,
-driven by `claude -p` as a stateless runner, with ccc owning everything the
-runner does not: bot identity, persistent memory, inter-bot messaging,
-scheduling, account (profile) management, access control, and the Telegram UX.
+ccc (**Crew Command Center**) is a **team of bots living in one Telegram forum
+group**, driven by a coding CLI as a stateless runner (Claude Code by default;
+Grok Build and Antigravity too), with ccc owning everything the runner does
+not: bot identity, persistent memory, inter-bot messaging, scheduling, account
+(profile) management, access control, and the Telegram UX.
 
 The experience target is Jairo's `grok-bot`: you talk to a topic like you talk
 to a person. No commands in the normal flow, no ceremony, no terminal.

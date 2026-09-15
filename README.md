@@ -1,8 +1,8 @@
 # ccc
 
-> A team of Claude bots living in one Telegram forum group. Each topic is a bot
-> with its own role, memory and workspace; you talk to it like you talk to a
-> person.
+**Crew Command Center** — a team of Claude, Grok or Antigravity bots living in
+one Telegram forum group. Each topic is a bot with its own role, memory and
+workspace; you talk to it like you talk to a person.
 
 [![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go)](https://go.dev)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -11,10 +11,11 @@
 
 ## What ccc is
 
-A **topic is a bot**, not a session. Each bot has a name, a free-text role you
-set with `/role`, its own working directory, its own conversation and a
-memory shared with the rest of the team. You send it a message; it does the work
-and answers in the topic. There are no commands in the normal flow.
+Crew Command Center: a **topic is a bot**, not a session. Each bot has a name, a
+free-text role you set with `/role`, its own working directory, its own
+conversation and a memory shared with the rest of the team. You send it a
+message; it does the work and answers in the topic. There are no commands in
+the normal flow.
 
 Under the hood ccc drives a coding CLI as a **stateless runner**. The default
 engine is Claude Code: every message is one `claude -p` process with a session
