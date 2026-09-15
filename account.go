@@ -290,7 +290,8 @@ func (in *instance) handleAccountCommand(msg *TelegramMessage, rest string) {
 const accountAddUsage = "Usage: /account add &lt;identity&gt; &lt;engine&gt;\n" +
 	"<code>/account add you@example.com claude</code>\n" +
 	"<code>/account add work grok</code>\n" +
-	"<code>/account add lab agy</code>"
+	"<code>/account add lab agy</code>\n" +
+	"<code>/account add openai codex</code>"
 
 // parseAccountAdd reads `/account add` arguments. Engine is part of add, not a
 // later `/engine` flip. Accepted shapes:
@@ -301,6 +302,7 @@ const accountAddUsage = "Usage: /account add &lt;identity&gt; &lt;engine&gt;\n" 
 //	work grok
 //	grok work
 //	lab agy / antigravity lab
+//	openai codex / codex openai
 func parseAccountAdd(arg string) (identity, engine string, err error) {
 	arg = strings.TrimSpace(arg)
 	if arg == "" {
@@ -323,7 +325,7 @@ func parseAccountAdd(arg string) (identity, engine string, err error) {
 	if e, ok := knownEngineName(second); ok {
 		return first, e, nil
 	}
-	return "", "", fmt.Errorf("unknown engine %q (use claude, grok or antigravity)", second)
+	return "", "", fmt.Errorf("unknown engine %q (use claude, grok, antigravity or codex)", second)
 }
 
 var errAccountAddUsage = fmt.Errorf("usage")

@@ -28,8 +28,8 @@ on purpose). One ccc instance never talks to more than one Telegram bot.
 | Concept | Definition |
 |---|---|
 | **Instance** | One `ccc listen` process on one machine, bound to one Telegram bot token and one forum group. Instance-level config: model, env passthrough, default profile, data dir. |
-| **Profile** | One account for one engine (see `profiles.go`). Claude = one `CLAUDE_CONFIG_DIR`. Grok = isolated `GROK_HOME`. Antigravity = isolated HOME/`GEMINI_HOME`. Engine is set when the account is added. Same-engine accounts are interchangeable at turn granularity (§4). One instance may mix engines. |
-| **Bot** | One forum topic. Identity = `name` + `role` (free text set with `/role`) + its own memory scope + an **engine** derived from the default account (or `default_engine`). Turns pick a healthy account of that engine. `/engine` is a secondary pool assignment. Claude bots share MCP tools. Grok/Antigravity bots spawn that CLI and do not get ccc MCP. Optional per-bot `cwd` (default: `<data_dir>/bots/<name>/workspace`). |
+| **Profile** | One account for one engine (see `profiles.go`). Claude = one `CLAUDE_CONFIG_DIR`. Grok = isolated `GROK_HOME`. Antigravity = isolated HOME/`GEMINI_HOME`. Codex = isolated `CODEX_HOME`. Engine is set when the account is added. Same-engine accounts are interchangeable at turn granularity (§4). One instance may mix engines. |
+| **Bot** | One forum topic. Identity = `name` + `role` (free text set with `/role`) + its own memory scope + an **engine** derived from the default account (or `default_engine`) + an optional **model** override. Turns pick a healthy account of that engine. `/engine` is a secondary pool assignment. `/model` in the topic overrides that bot; `/model <engine> <slug>` sets the instance default for the engine. Claude bots share MCP tools. Grok/Antigravity/Codex bots spawn that CLI and do not get ccc MCP. Optional per-bot `cwd` (default: `<data_dir>/bots/<name>/workspace`). |
 | **Session** | The Claude Code conversation behind a bot: a UUID ccc mints and resumes. A bot has exactly one live session; `/new` rotates it. |
 | **Turn** | One `claude -p` process: input = one user/bot/system/background message (plus context envelope), output = streamed events until `result`. At most one turn per bot at a time; further inputs queue (FIFO) and are delivered together on the next turn. A background job is **not** a turn: it must not hold `turns.status=running`. |
 | **Background job** | A long-running shell command owned by a bot, started with `run_background`. It runs in the bot's cwd with `env_passthrough` while the topic stays responsive. Completion enqueues a `source=background` turn. |
@@ -354,7 +354,7 @@ older than 90 days.
 | `/watches`, `/schedules` | topic | List and cancel. |
 | `/bots` | anywhere | Table of bots, status, last activity. |
 | `/account` | anywhere | Status card per account (engine + health) with buttons; subcommands `status`, `add <identity> <engine>`, `login`, `remove`, `default`. |
-| `/model [name]` | anywhere | Show/set the instance model. |
+| `/model [engine] [slug]` | anywhere | Show/set models. In a bot topic, one slug overrides that bot. Two args (`/model grok grok-4`) set the instance default for that engine. `/model default` clears. |
 | `/access` | anywhere | Pairing/allowlist management (below). Owner only. |
 | `/watches`, `/schedules` | topic | List and cancel (also listed above). |
 | `/setgroup` | group | Bind the instance to this forum group. Owner only, and the headless alternative to `ccc setgroup`. |
@@ -756,3 +756,18 @@ same input on the same session UUID. Live background jobs ping ▶️;
 a job that fails (except an explicit cancel) pings ❌ immediately, because
 the `source=background` wake is another turn and would be equally silent
 if listen died again.
+
+**14.27 Model is per engine, and per bot.** A single instance `model` field
+was a Claude leftover: passing `sonnet` to grok/agy/codex is a turn failure.
+`config.models` is a map of engine → slug; the legacy `model` field is still
+the Claude default. `/model <slug>` in a bot topic writes `bots.model` (an
+override). `/model <engine> <slug>` sets the instance default. The account
+does not carry a model — engine is the account's job.
+
+**14.28 Codex is a fourth engine.** Same isolation pattern as Grok
+(`CODEX_HOME` under `<data_dir>/accounts/codex/<id>`), login via
+`codex login --device-auth`, turns via `codex exec --json` with
+`--sandbox danger-full-access` and `--dangerously-bypass-approvals-and-sandbox`.
+The CLI mints a `thread_id` (like agy's `conversation_id`); later turns
+`codex exec resume <id>`. No ccc MCP; teammates are `ccc tell`. Verified
+against Codex CLI 0.133.0.

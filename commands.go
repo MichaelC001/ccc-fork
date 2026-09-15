@@ -247,6 +247,15 @@ func doctor(fix bool) {
 		fmt.Println("   Install Antigravity CLI to ~/.local/bin/agy, then: /account add lab agy")
 	}
 
+	fmt.Print("codex............. ")
+	if p, err := resolveEngineBin(engineCodex); err == nil {
+		fmt.Printf("✅ %s (optional; /account add <id> codex)\n", p)
+	} else {
+		fmt.Println("— not found (optional; needed for Codex accounts)")
+		fmt.Println("   Install Codex CLI onto PATH, then: /account add openai codex")
+		fmt.Println("   (isolated CODEX_HOME; ccc drives codex login --device-auth)")
+	}
+
 	if !doctorProfiles(fix) {
 		allGood = false
 	}
@@ -279,7 +288,7 @@ func doctor(fix bool) {
 			allGood = false
 		}
 		fmt.Printf("  %-14s %s\n", "data_dir", dataDir(config))
-		fmt.Printf("  %-14s %s\n", "model", firstNonEmpty(instanceModel(config), "(claude default)"))
+		fmt.Printf("  %-14s %s\n", "model", renderInstanceModels(config))
 	}
 
 	fmt.Print("service........... ")
@@ -335,7 +344,7 @@ func isMacOS() bool {
 // ---------------------------------------------------------------------------
 
 func printHelp() {
-	fmt.Printf(`ccc - Crew Command Center: a team of Claude, Grok or Antigravity bots in one Telegram forum group (v%s)
+	fmt.Printf(`ccc - Crew Command Center: a team of Claude, Grok, Antigravity or Codex bots in one Telegram forum group (v%s)
 
 USAGE:
     ccc listen              Run the instance (normally done by the service)
@@ -368,7 +377,7 @@ TELEGRAM (in the forum group):
     /engine                 assign this bot to an engine's account pool
     /bots /status /usage                                        anywhere
     /memory stats|restore <id>                                  memory upkeep
-    /account add <id> <engine> /access /model /setgroup         owner only
+    /account add <id> <engine> /access /model [engine] <slug> /setgroup  owner only
 
 FLAGS:
     -h, --help              Show this help

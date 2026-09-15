@@ -40,7 +40,7 @@ const defaultProfileName = "default"
 type Profile struct {
 	// Name is the config-map key; it is not stored inside the object.
 	Name string `json:"-"`
-	// Engine is claude, grok or antigravity. Empty means Claude so existing
+	// Engine is claude, grok, antigravity or codex. Empty means Claude so existing
 	// config.json entries stay backward compatible.
 	Engine string `json:"engine,omitempty"`
 	// ConfigDir is the isolated home for this account. Claude: CLAUDE_CONFIG_DIR
@@ -333,6 +333,12 @@ func engineHome(p Profile) string {
 		}
 		home, _ := os.UserHomeDir() // safe-ignore: empty home yields a relative .grok path, same fallback as implicitProfile
 		return filepath.Join(home, ".grok")
+	case engineCodex:
+		if p.ConfigDir != "" {
+			return p.ConfigDir
+		}
+		home, _ := os.UserHomeDir() // safe-ignore: empty home yields a relative .codex path
+		return filepath.Join(home, ".codex")
 	case engineAntigravity:
 		if p.ConfigDir != "" {
 			return p.ConfigDir
@@ -898,6 +904,8 @@ func isStaleTokenError(s string) bool {
 // grokAuthJSON is $GROK_HOME/auth.json — the file `grok login` writes.
 func grokAuthJSON(p Profile) string { return filepath.Join(engineHome(p), "auth.json") }
 
+func codexAuthJSON(p Profile) string { return filepath.Join(engineHome(p), "auth.json") }
+
 // agyOAuthToken is the file-store token agy writes when
 // GEMINI_FORCE_FILE_STORAGE=true (headless / no keyring).
 func agyOAuthToken(p Profile) string {
@@ -914,6 +922,8 @@ func profileLoggedIn(p Profile) (loggedIn bool, account string, err error) {
 		return grokLoggedIn(p)
 	case engineAntigravity:
 		return agyLoggedIn(p)
+	case engineCodex:
+		return codexLoggedIn(p)
 	}
 	// `auth status --json` exits 1 for a logged-out config dir while still
 	// printing its JSON, so the payload is authoritative and the exit code is
@@ -942,6 +952,22 @@ func profileLoggedIn(p Profile) (loggedIn bool, account string, err error) {
 // invents credentials.
 func grokLoggedIn(p Profile) (bool, string, error) {
 	data, err := os.ReadFile(grokAuthJSON(p))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, "", nil
+		}
+		return false, "", err
+	}
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return false, "", nil
+	}
+	return true, accountHintFromJSON(data), nil
+}
+
+// codexLoggedIn reports whether $CODEX_HOME/auth.json exists. `codex login`
+// writes it; ccc never invents credentials.
+func codexLoggedIn(p Profile) (bool, string, error) {
+	data, err := os.ReadFile(codexAuthJSON(p))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, "", nil

@@ -10,13 +10,14 @@ import (
 )
 
 // Engines a bot can run on. Claude Code is the default and the only engine
-// that gets the ccc MCP server and the Claude account pool. Grok Build and
-// Antigravity are first-class alternatives: same Telegram topic, same
-// envelope, their own CLI and session flags.
+// that gets the ccc MCP server and the Claude account pool. Grok Build,
+// Antigravity and Codex are first-class alternatives: same Telegram topic,
+// same envelope, their own CLI and session flags.
 const (
 	engineClaude      = "claude"
 	engineGrok        = "grok"
 	engineAntigravity = "antigravity"
+	engineCodex       = "codex"
 )
 
 // streamKind selects how spawn consumes stdout. Claude and Grok share the
@@ -28,6 +29,7 @@ type streamKind string
 const (
 	streamClaudeMessages streamKind = "claude-messages"
 	streamAgy            streamKind = "agy"
+	streamCodex          streamKind = "codex"
 	streamText           streamKind = "text"
 )
 
@@ -42,8 +44,10 @@ func parseEngine(s string) (string, error) {
 		return engineGrok, nil
 	case engineAntigravity, "agy":
 		return engineAntigravity, nil
+	case engineCodex:
+		return engineCodex, nil
 	default:
-		return "", fmt.Errorf("unknown engine %q (use claude, grok or antigravity)", s)
+		return "", fmt.Errorf("unknown engine %q (use claude, grok, antigravity or codex)", s)
 	}
 }
 
@@ -96,6 +100,8 @@ func engineLabel(engine string) string {
 		return "Grok Build"
 	case engineAntigravity:
 		return "Antigravity"
+	case engineCodex:
+		return "Codex"
 	default:
 		return "Claude Code"
 	}
@@ -107,6 +113,8 @@ func engineLoginHint(engine string) string {
 		return "add a Grok account with /account add <identity> grok (isolated GROK_HOME; drives grok login --device-auth)"
 	case engineAntigravity:
 		return "add an Antigravity account with /account add <identity> agy (isolated HOME; drives agy auth login)"
+	case engineCodex:
+		return "add a Codex account with /account add <identity> codex (isolated CODEX_HOME; drives codex login --device-auth)"
 	default:
 		return "add a Claude account with /account add you@example.com claude"
 	}
@@ -126,6 +134,11 @@ func grokBin() string {
 // agyBin is the Antigravity CLI. LookPath first, then ~/.local/bin/agy.
 func agyBin() string {
 	return lookPathOrHome("agy", filepath.Join(".local", "bin", "agy"))
+}
+
+// codexBin is the OpenAI Codex CLI. LookPath first, then ~/.local/bin/codex.
+func codexBin() string {
+	return lookPathOrHome("codex", filepath.Join(".local", "bin", "codex"))
 }
 
 func lookPathOrHome(name, homeRel string) string {
@@ -151,6 +164,8 @@ func engineBin(engine string) string {
 		return grokBin()
 	case engineAntigravity:
 		return agyBin()
+	case engineCodex:
+		return codexBin()
 	default:
 		return claudeBin()
 	}
@@ -176,6 +191,8 @@ func resolveEngineBin(engine string) (string, error) {
 		return "", fmt.Errorf("grok CLI not found (%s)", engineLoginHint(engineGrok))
 	case engineAntigravity:
 		return "", fmt.Errorf("agy CLI not found (%s)", engineLoginHint(engineAntigravity))
+	case engineCodex:
+		return "", fmt.Errorf("codex CLI not found (%s)", engineLoginHint(engineCodex))
 	default:
 		return "", fmt.Errorf("%s CLI not found", engine)
 	}
@@ -272,6 +289,45 @@ func agyTurnArgs(model, conversationID string, resume bool) []string {
 	return args
 }
 
+// codexTurnArgs is the headless flag set for OpenAI Codex (`codex exec`).
+//
+// Verified against Codex CLI 0.133.0 (`codex exec --help` / `codex exec resume
+// --help`) and the non-interactive docs (JSONL on stdout, resume by thread id).
+//
+//	exec --json                 JSONL events on stdout (thread.started,
+//	                            item.completed, turn.completed, …).
+//	--sandbox danger-full-access
+//	--dangerously-bypass-approvals-and-sandbox
+//	                            unattended tools, same posture as grok
+//	                            --always-approve / agy --dangerously-skip-permissions.
+//	--skip-git-repo-check       bot workspaces are not always git repos.
+//	-m / --model                per-engine / per-bot model; omitted to accept
+//	                            Codex's default.
+//	resume <id>                 later turns; first turn omits it so Codex mints
+//	                            a thread_id (captured from the stream).
+//
+// No --system-prompt: the system prompt is prepended to the user prompt
+// (buildTurn), same as agy. MCP is omitted (no inline --mcp-config); teammates
+// are `ccc tell`.
+func codexTurnArgs(model, sessionID, prompt string, resume bool) []string {
+	args := []string{
+		"exec",
+		"--json",
+		"--sandbox", "danger-full-access",
+		"--dangerously-bypass-approvals-and-sandbox",
+		"--skip-git-repo-check",
+	}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	if resume && sessionID != "" {
+		args = append(args, "resume", sessionID, prompt)
+	} else {
+		args = append(args, prompt)
+	}
+	return args
+}
+
 // turnSpec is everything spawn needs to exec one engine.
 type turnSpec struct {
 	Engine string
@@ -284,7 +340,7 @@ type turnSpec struct {
 // buildTurn picks the binary, flags, env and stream parser for one turn.
 // Claude's arg list is the existing claudeTurnArgs (unchanged). The prompt
 // is always the last value, carried by each CLI's print/single flag.
-func buildTurn(engine string, p Profile, cfg *Config, mcpCfg, sessionID, sysPrompt, envelope string, resume bool) (turnSpec, error) {
+func buildTurn(engine string, p Profile, cfg *Config, mcpCfg, sessionID, sysPrompt, envelope, model string, resume bool) (turnSpec, error) {
 	engine, err := parseEngine(engine)
 	if err != nil {
 		return turnSpec{}, err
@@ -293,7 +349,6 @@ func buildTurn(engine string, p Profile, cfg *Config, mcpCfg, sessionID, sysProm
 	if err != nil {
 		return turnSpec{}, err
 	}
-	model := instanceModel(cfg)
 	spec := turnSpec{Engine: engine, Bin: bin, Env: engineEnv(cfg, engine, p)}
 	switch engine {
 	case engineGrok:
@@ -309,6 +364,13 @@ func buildTurn(engine string, p Profile, cfg *Config, mcpCfg, sessionID, sysProm
 			prompt = strings.TrimSpace(sysPrompt) + "\n\n" + envelope
 		}
 		spec.Args = append(agyTurnArgs(model, sessionID, resume), "--print", prompt)
+	case engineCodex:
+		spec.Stream = streamCodex
+		prompt := envelope
+		if strings.TrimSpace(sysPrompt) != "" {
+			prompt = strings.TrimSpace(sysPrompt) + "\n\n" + envelope
+		}
+		spec.Args = codexTurnArgs(model, sessionID, prompt, resume)
 	default:
 		spec.Stream = streamClaudeMessages
 		spec.Args = append(claudeTurnArgs(model, sysPrompt, mcpCfg, sessionID, resume), envelope)
@@ -372,6 +434,8 @@ func isolatedEngineVar(engine, name string) bool {
 	switch engine {
 	case engineGrok:
 		return name == "GROK_HOME"
+	case engineCodex:
+		return name == "CODEX_HOME"
 	case engineAntigravity:
 		switch name {
 		case "HOME", "GEMINI_HOME", "GEMINI_FORCE_FILE_STORAGE",
@@ -390,6 +454,8 @@ func applyEngineIsolation(env []string, engine string, p Profile) []string {
 	switch engine {
 	case engineGrok:
 		return setEnvValue(env, "GROK_HOME", home)
+	case engineCodex:
+		return setEnvValue(env, "CODEX_HOME", home)
 	case engineAntigravity:
 		env = setEnvValue(env, "HOME", home)
 		env = setEnvValue(env, "GEMINI_HOME", filepath.Join(home, ".gemini"))
@@ -427,7 +493,7 @@ func setEnvValue(env []string, name, value string) []string {
 }
 
 func engineAuthPrefix(name string) bool {
-	for _, p := range []string{"XAI_", "GROK_", "GEMINI_", "GOOGLE_", "AGY_", "ANTIGRAVITY_"} {
+	for _, p := range []string{"XAI_", "GROK_", "GEMINI_", "GOOGLE_", "AGY_", "ANTIGRAVITY_", "OPENAI_", "CODEX_"} {
 		if strings.HasPrefix(name, p) {
 			return true
 		}
@@ -551,4 +617,152 @@ func consumeAgyEvent(line []byte, res *streamResult, prog *progress) bool {
 		}
 	}
 	return true
+}
+
+// ---------------------------------------------------------------------------
+// Codex JSONL
+// ---------------------------------------------------------------------------
+
+// consumeCodexEvent folds one `codex exec --json` line. Codex 0.133 emits
+// typed events (`thread.started`, `item.completed`, `turn.completed`) and
+// older builds used JSON-RPC `method` envelopes. Both shapes are accepted.
+func consumeCodexEvent(line []byte, res *streamResult, prog *progress) bool {
+	var ev struct {
+		Type     string          `json:"type"`
+		ThreadID string          `json:"thread_id"`
+		Method   string          `json:"method"`
+		Delta    string          `json:"delta"`
+		Message  string          `json:"message"`
+		Usage    json.RawMessage `json:"usage"`
+		Item     struct {
+			Type    string          `json:"type"`
+			Text    string          `json:"text"`
+			Command string          `json:"command"`
+			Name    string          `json:"name"`
+			Input   json.RawMessage `json:"input"`
+		} `json:"item"`
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+		Params json.RawMessage `json:"params"`
+	}
+	if err := json.Unmarshal(line, &ev); err != nil {
+		return false
+	}
+	kind := ev.Type
+	if kind == "" {
+		kind = ev.Method
+	}
+	if kind == "" {
+		return false
+	}
+	if ev.ThreadID != "" {
+		res.SessionID = ev.ThreadID
+	}
+	if sid := jsonString(ev.Params, "thread_id"); sid != "" {
+		res.SessionID = sid
+	}
+	switch kind {
+	case "thread.started", "thread/started":
+		if ev.ThreadID != "" {
+			res.SessionID = ev.ThreadID
+		}
+	case "item.started", "item/started", "item.updated", "item/updated":
+		name := firstNonEmpty(ev.Item.Name, firstNonEmpty(ev.Item.Type, ev.Item.Command))
+		if name != "" && prog != nil {
+			prog.set(summarizeTool(name, ev.Item.Input))
+		}
+	case "item.agentMessage.delta", "item/agentMessage/delta", "agent_message.delta":
+		if prog != nil && strings.TrimSpace(ev.Delta) != "" {
+			prog.set("writing a reply")
+		}
+	case "item.completed", "item/completed":
+		itemType := strings.ToLower(ev.Item.Type)
+		if strings.Contains(itemType, "agent") || itemType == "message" || itemType == "agentmessage" {
+			if t := strings.TrimSpace(ev.Item.Text); t != "" {
+				res.Text = t
+			}
+		}
+		if ev.Item.Command != "" && prog != nil {
+			prog.set("running " + truncate(ev.Item.Command, 40))
+		}
+	case "turn.completed", "turn/completed":
+		if len(ev.Usage) > 0 {
+			res.UsageJSON = mergeUsage(ev.Usage, 0)
+		}
+		if t := jsonString(ev.Params, "message"); t != "" && res.Text == "" {
+			res.Text = t
+		}
+	case "error", "turn.failed", "turn/failed":
+		res.IsError = true
+		msg := firstNonEmpty(ev.Error.Message, firstNonEmpty(ev.Message, ev.Item.Text))
+		if msg != "" {
+			res.Text = msg
+		}
+	}
+	return true
+}
+
+func jsonString(raw json.RawMessage, key string) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var m map[string]any
+	if json.Unmarshal(raw, &m) != nil {
+		return ""
+	}
+	v, _ := m[key].(string)
+	return v
+}
+
+// resolveModel is the slug a turn actually passes: a per-bot override, else
+// the instance default for that engine, else (Claude only) the legacy
+// config.model field. Empty means "let the CLI pick".
+func resolveModel(cfg *Config, engine, botModel string) string {
+	if s := strings.TrimSpace(botModel); s != "" {
+		return s
+	}
+	engine, err := parseEngine(engine)
+	if err != nil {
+		engine = engineClaude
+	}
+	if cfg != nil && cfg.Models != nil {
+		if s := strings.TrimSpace(cfg.Models[engine]); s != "" {
+			return s
+		}
+	}
+	if engine == engineClaude && cfg != nil {
+		return strings.TrimSpace(cfg.Model)
+	}
+	return ""
+}
+
+// setEngineModel writes the instance default for one engine. Claude also
+// mirrors into the legacy config.model field so `ccc config get model` and
+// existing installs keep working.
+func setEngineModel(cfg *Config, engine, slug string) {
+	if cfg == nil {
+		return
+	}
+	engine, err := parseEngine(engine)
+	if err != nil {
+		return
+	}
+	slug = strings.TrimSpace(slug)
+	if slug == "" {
+		if cfg.Models != nil {
+			delete(cfg.Models, engine)
+		}
+		if engine == engineClaude {
+			cfg.Model = ""
+		}
+		return
+	}
+	if cfg.Models == nil {
+		cfg.Models = map[string]string{}
+	}
+	cfg.Models[engine] = slug
+	if engine == engineClaude {
+		cfg.Model = slug
+	}
 }

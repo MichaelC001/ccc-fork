@@ -623,7 +623,8 @@ func (r *Runner) sessionFor(b *Bot) (string, bool) {
 	if strings.TrimSpace(b.SessionID) != "" {
 		return b.SessionID, true
 	}
-	if botEngine(b) == engineAntigravity {
+	switch botEngine(b) {
+	case engineAntigravity, engineCodex:
 		return "", false
 	}
 	return newUUID(), false
@@ -691,8 +692,8 @@ func (s *streamResult) failureText() string {
 	return strings.Join(parts, "\n")
 }
 
-// spawn runs one engine process (`claude -p`, `grok --single`, or `agy --print`)
-// and consumes its event stream.
+// spawn runs one engine process (`claude -p`, `grok --single`, `agy --print`
+// or `codex exec`) and consumes its event stream.
 func (r *Runner) spawn(p Profile, b *Bot, t *Turn, sessionID string, resume bool, envelope string, prog *progress) *streamResult {
 	res := &streamResult{}
 	cfg := r.config()
@@ -711,7 +712,8 @@ func (r *Runner) spawn(p Profile, b *Bot, t *Turn, sessionID string, resume bool
 	if botEngine(b) == engineClaude {
 		mcpCfg = r.mcpConfigJSON(b.ID, t.ID)
 	}
-	spec, err := buildTurn(botEngine(b), p, cfg, mcpCfg, sessionID, sysPrompt, envelope, resume)
+	model := resolveModel(cfg, botEngine(b), b.Model)
+	spec, err := buildTurn(botEngine(b), p, cfg, mcpCfg, sessionID, sysPrompt, envelope, model, resume)
 	if err != nil {
 		res.spawnErr = err
 		return res
@@ -805,6 +807,8 @@ func consumeTurnEvent(kind streamKind, line []byte, res *streamResult, prog *pro
 	switch kind {
 	case streamAgy:
 		return consumeAgyEvent(line, res, prog)
+	case streamCodex:
+		return consumeCodexEvent(line, res, prog)
 	case streamText:
 		return false
 	default:
@@ -967,6 +971,7 @@ func classifyFailure(text string, exitCode int) string {
 		strings.Contains(l, "not logged in") ||
 		strings.Contains(l, "please run `claude login`") ||
 		strings.Contains(l, "please run `grok login`") ||
+		strings.Contains(l, "please run `codex login`") ||
 		strings.Contains(l, "authentication required") ||
 		strings.Contains(l, "not authenticated") ||
 		strings.Contains(l, "invalid api key") ||
@@ -1104,10 +1109,7 @@ func botEnv(config *Config, p Profile) []string {
 }
 
 func instanceModel(config *Config) string {
-	if config == nil {
-		return ""
-	}
-	return strings.TrimSpace(config.Model)
+	return resolveModel(config, engineClaude, "")
 }
 
 // mcpConfigJSON is the inline --mcp-config value: one stdio server, this

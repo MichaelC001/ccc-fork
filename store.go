@@ -36,8 +36,9 @@ type Bot struct {
 	Role        string
 	Cwd         string
 	SessionID   string
-	Engine      string `gorm:"not null;default:claude"` // claude|grok|antigravity
-	Status      string `gorm:"not null;default:idle"`   // idle|running|waiting|disabled
+	Engine      string `gorm:"not null;default:claude"` // claude|grok|antigravity|codex
+	Model       string // optional per-bot override; empty = instance default for the engine
+	Status      string `gorm:"not null;default:idle"` // idle|running|waiting|disabled
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 	ArchivedAt  *time.Time
@@ -223,7 +224,7 @@ type BackgroundJob struct {
 	Status          string `gorm:"index;not null"` // queued|running|done|failed
 	Kind            string // "shell"
 	Command         string
-	PID             int `gorm:"column:pid"`
+	PID             int        `gorm:"column:pid"`
 	Deadline        *time.Time // started_at + 4h; supervisor-enforced, survives listen restart
 	ExitCode        *int
 	Output          string

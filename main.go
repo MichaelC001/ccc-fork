@@ -22,7 +22,8 @@ type Config struct {
 	Profiles          map[string]*Profile `json:"profiles,omitempty"`           // identity -> account (engine + isolated home)
 	DefaultProfile    string              `json:"default_profile,omitempty"`    // default account; new bots inherit its engine unless default_engine is set
 	DataDir           string              `json:"data_dir,omitempty"`           // runtime root (default ~/.local/share/ccc)
-	Model             string              `json:"model,omitempty"`              // model every bot runs on (default: claude's own)
+	Model             string              `json:"model,omitempty"`              // legacy Claude instance model; prefer Models["claude"]
+	Models            map[string]string   `json:"models,omitempty"`             // per-engine default model slugs
 	DefaultEngine     string              `json:"default_engine,omitempty"`     // engine assigned to new bots (default: claude)
 	EnvPassthrough    []string            `json:"env_passthrough,omitempty"`    // extra env var names bots inherit (DESIGN §3.1)
 	// Tuning knobs. They are pointers where 0 is a meaningful value, so an
@@ -319,7 +320,7 @@ func configGet(config *Config, key string) (string, error) {
 	case "group_id":
 		return fmt.Sprint(config.GroupID), nil
 	case "model":
-		return firstNonEmpty(config.Model, "(claude default)"), nil
+		return renderInstanceModels(config), nil
 	case "data_dir":
 		return dataDir(config), nil
 	case "env_passthrough":

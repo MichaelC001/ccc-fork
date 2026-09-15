@@ -357,7 +357,7 @@ func TestModelCommand(t *testing.T) {
 	}
 
 	in.handleMessage(ownerMessage(0, "/model"))
-	if !strings.Contains(strings.Join(api.texts(""), "\n"), "claude default") {
+	if !strings.Contains(strings.Join(api.texts(""), "\n"), "claude=default") {
 		t.Error("/model with no argument should show the current model")
 	}
 
@@ -376,6 +376,25 @@ func TestModelCommand(t *testing.T) {
 	in.handleMessage(ownerMessage(0, "/model default"))
 	if got := in.config().Model; got != "" {
 		t.Errorf("/model default should clear it, got %q", got)
+	}
+
+	in.handleMessage(ownerMessage(0, "/model grok grok-4"))
+	if got := in.config().Models[engineGrok]; got != "grok-4" {
+		t.Errorf("grok model = %q", got)
+	}
+	if got := in.config().Model; got != "" {
+		t.Errorf("setting grok must not rewrite the Claude model, got %q", got)
+	}
+
+	b, err := in.createBot("dev", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.handleMessage(ownerMessage(b.TopicID, "/model haiku"))
+	var bot Bot
+	in.db.First(&bot, b.ID)
+	if bot.Model != "haiku" {
+		t.Errorf("bot model = %q, want haiku", bot.Model)
 	}
 }
 
@@ -425,6 +444,8 @@ func TestParseAccountAdd(t *testing.T) {
 		{"lab agy", "lab", engineAntigravity, true},
 		{"antigravity lab", "lab", engineAntigravity, true},
 		{"lab antigravity", "lab", engineAntigravity, true},
+		{"openai codex", "openai", engineCodex, true},
+		{"codex openai", "openai", engineCodex, true},
 		{"", "", "", false},
 		{"grok", "", "", false},
 		{"work not-a-cli", "", "", false},

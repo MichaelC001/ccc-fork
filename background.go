@@ -621,11 +621,11 @@ func (s *scheduler) enqueueBackgroundWake(j *BackgroundJob) {
 	// still runs so the model can react, but the owner must not depend on
 	// that turn (it dies if listen restarts again). Cancels are quiet: the
 	// owner already asked for them.
-	if j.Status == jobFailed && j.Error != "cancelled" {
-		s.in.notifyTopic(b.TopicID, renderJobFailedNotice(j))
-	}
 	if _, err := s.in.runner.Enqueue(b.ID, sourceBackground, renderBackgroundWake(j), 0); err != nil {
 		hookLog("background %d: enqueue failed: %v", j.ID, err)
+	}
+	if j.Status == jobFailed && j.Error != "cancelled" {
+		s.in.notifyTopic(b.TopicID, renderJobFailedNotice(j))
 	}
 }
 

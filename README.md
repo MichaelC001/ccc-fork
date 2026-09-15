@@ -380,26 +380,35 @@ An approved user can talk to the bots. They cannot use `/account`, `/access`,
 ## Engines and accounts
 
 Engine is a property of an **account**, set when you add it. One ccc process
-can mix several Claude emails, several Grok logins and several Antigravity
-logins. A bot's turns pick a healthy account from the pool that matches what
-that bot runs on. New bots inherit the default account's engine (or
-`default_engine` if you set one). `/engine` only assigns a bot onto another
-already-registered pool — it is not the way you introduce an engine.
+can mix several Claude emails, several Grok logins, several Antigravity
+logins and several Codex logins. A bot's turns pick a healthy account from
+the pool that matches what that bot runs on. New bots inherit the default
+account's engine (or `default_engine` if you set one). `/engine` only assigns
+a bot onto another already-registered pool — it is not the way you introduce
+an engine.
+
+The **model** is not a property of the account. `/model <slug>` in a bot's
+topic overrides that bot; `/model <engine> <slug>` in General (or a DM) sets
+the instance default for that engine. Empty means the CLI's own default.
 
 | Engine | Add account | Isolated home | Binary | Session | MCP |
 |---|---|---|---|---|---|
 | **Claude Code** | `/account add you@x.com claude` | `CLAUDE_CONFIG_DIR` under `<data_dir>/profiles/` | `claude` | ccc mints a UUID; `--session-id` then `--resume` | ccc MCP (`remember`, `send_to_bot`, …) |
 | **Grok Build** | `/account add work grok` | `GROK_HOME` = `<data_dir>/accounts/grok/<id>` (`auth.json`) | `grok` (`~/.grok/bin/grok`) | ccc mints a UUID; `--session-id` then `--resume` | not wired — teammates via `ccc tell` (🤝 in both topics) |
 | **Antigravity** | `/account add lab agy` | isolated `HOME` + `GEMINI_HOME` + `GEMINI_FORCE_FILE_STORAGE` under `<data_dir>/accounts/antigravity/<id>` | `agy` (`~/.local/bin/agy`) | first turn lets `agy` mint a `conversation_id`; later turns pass `--conversation` | not wired — teammates via `ccc tell` (🤝 in both topics) |
+| **Codex** | `/account add openai codex` | `CODEX_HOME` = `<data_dir>/accounts/codex/<id>` (`auth.json`) | `codex` (PATH / `~/.local/bin/codex`) | first turn lets Codex mint a `thread_id`; later turns `codex exec resume <id>` | not wired — teammates via `ccc tell` (🤝 in both topics) |
 
 ```
 /account add you@example.com claude
 /account add work grok
 /account add lab antigravity
+/account add openai codex
 /account                         # mixed list: identity, engine, health
 
 /engine                          # which pool this bot uses
 /engine grok                     # assign this bot to the Grok pool (secondary)
+/model grok grok-4               # instance default for that engine
+/model gpt-5.4                   # this bot (in its topic)
 
 ccc config set default_engine grok    # optional override for new bots
 ccc config get default_engine

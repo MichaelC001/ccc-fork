@@ -19,6 +19,7 @@ func TestParseEngineAliasesAndDefault(t *testing.T) {
 		{"grok-build", engineGrok, false},
 		{"agy", engineAntigravity, false},
 		{"antigravity", engineAntigravity, false},
+		{"codex", engineCodex, false},
 		{"carbon-copy-cloner", "", true},
 		{"chatgpt", "", true},
 	}
@@ -105,12 +106,13 @@ func TestBuildTurnDispatchesEngines(t *testing.T) {
 	writeFakeCLI(t, dir, "claude", "")
 	writeFakeCLI(t, dir, "grok", "")
 	writeFakeCLI(t, dir, "agy", "")
+	writeFakeCLI(t, dir, "codex", "")
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	cfg := &Config{Model: "sonnet"}
 	p := implicitProfile()
 
-	claude, err := buildTurn(engineClaude, p, cfg, `{"mcpServers":{}}`, "sid-1", "SYS", "hello", false)
+	claude, err := buildTurn(engineClaude, p, cfg, `{"mcpServers":{}}`, "sid-1", "SYS", "hello", "sonnet", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +127,7 @@ func TestBuildTurnDispatchesEngines(t *testing.T) {
 		t.Errorf("claude prompt should stay a trailing positional, got %q", claude.Args[len(claude.Args)-1])
 	}
 
-	grok, err := buildTurn(engineGrok, p, cfg, "MUST-NOT-APPEAR", "sid-2", "SYS", "hello", false)
+	grok, err := buildTurn(engineGrok, p, cfg, "MUST-NOT-APPEAR", "sid-2", "SYS", "hello", "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,11 +141,14 @@ func TestBuildTurnDispatchesEngines(t *testing.T) {
 	if strings.Contains(joined, "MUST-NOT-APPEAR") {
 		t.Error("grok received the Claude MCP config")
 	}
+	if strings.Contains(joined, "sonnet") {
+		t.Error("grok must not inherit the Claude instance model")
+	}
 	if filepath.Base(grok.Bin) != "grok" {
 		t.Errorf("grok bin = %q", grok.Bin)
 	}
 
-	agy, err := buildTurn(engineAntigravity, p, cfg, "", "", "SYS", "hello", false)
+	agy, err := buildTurn(engineAntigravity, p, cfg, "", "", "SYS", "hello", "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +164,7 @@ func TestBuildTurnDispatchesEngines(t *testing.T) {
 		t.Error("first agy turn must not resume")
 	}
 
-	resumed, err := buildTurn(engineAntigravity, p, cfg, "", "conv-1", "SYS", "hello", true)
+	resumed, err := buildTurn(engineAntigravity, p, cfg, "", "conv-1", "SYS", "hello", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,19 +172,47 @@ func TestBuildTurnDispatchesEngines(t *testing.T) {
 		t.Errorf("agy resume args = %v", resumed.Args)
 	}
 
-	alias, err := buildTurn("grok-build", p, cfg, "", "sid", "SYS", "hi", true)
+	alias, err := buildTurn("grok-build", p, cfg, "", "sid", "SYS", "hi", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if alias.Engine != engineGrok || !strings.Contains(strings.Join(alias.Args, " "), "--resume sid") {
 		t.Errorf("grok-build alias did not dispatch: %+v", alias)
 	}
+
+	codex, err := buildTurn(engineCodex, p, cfg, "MUST-NOT-APPEAR", "", "SYS", "hello", "gpt-5.4", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined = strings.Join(codex.Args, " ")
+	if codex.Engine != engineCodex || codex.Stream != streamCodex {
+		t.Errorf("codex spec = %+v", codex)
+	}
+	for _, want := range []string{"exec", "--json", "--sandbox danger-full-access", "--model gpt-5.4", "hello"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("codex args missing %q: %v", want, codex.Args)
+		}
+	}
+	if strings.Contains(joined, "resume") {
+		t.Error("first codex turn must not resume")
+	}
+	if strings.Contains(joined, "MUST-NOT-APPEAR") {
+		t.Error("codex received the Claude MCP config")
+	}
+
+	codexResume, err := buildTurn(engineCodex, p, cfg, "", "thread-1", "SYS", "hello", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(codexResume.Args, " "), "resume thread-1") {
+		t.Errorf("codex resume args = %v", codexResume.Args)
+	}
 }
 
 func TestBuildTurnClaudeArgsMatchClaudeTurnArgs(t *testing.T) {
 	// The dispatch layer must not drift from the verified Claude flag set.
 	want := append(claudeTurnArgs("sonnet", "SYS", `{"mcpServers":{}}`, "sid", false), "hello")
-	got, err := buildTurn(engineClaude, implicitProfile(), &Config{Model: "sonnet"}, `{"mcpServers":{}}`, "sid", "SYS", "hello", false)
+	got, err := buildTurn(engineClaude, implicitProfile(), &Config{Model: "sonnet"}, `{"mcpServers":{}}`, "sid", "SYS", "hello", "sonnet", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,6 +229,9 @@ func TestResolveEngineBinMissing(t *testing.T) {
 	}
 	if _, err := resolveEngineBin(engineAntigravity); err == nil {
 		t.Error("expected a missing agy binary to be an error")
+	}
+	if _, err := resolveEngineBin(engineCodex); err == nil {
+		t.Error("expected a missing codex binary to be an error")
 	}
 }
 
@@ -258,6 +294,16 @@ func TestEngineEnvNeverSetsClaudeConfigDir(t *testing.T) {
 		t.Error("agy isolation must not invent a Claude config dir")
 	}
 
+	codexP := Profile{Name: "openai", Engine: engineCodex, ConfigDir: "/tmp/codex-home"}
+	t.Setenv("CODEX_HOME", "/tmp/parent-codex")
+	codexIso := strings.Join(engineEnv(cfg, engineCodex, codexP), "\n")
+	if !strings.Contains(codexIso, "CODEX_HOME=/tmp/codex-home") {
+		t.Errorf("registered codex account must pin CODEX_HOME:\n%s", codexIso)
+	}
+	if strings.Contains(codexIso, "/tmp/parent-codex") {
+		t.Error("parent CODEX_HOME must not leak into a registered codex account")
+	}
+
 	claude := strings.Join(engineEnv(cfg, engineClaude, p), "\n")
 	if !strings.Contains(claude, "CLAUDE_CONFIG_DIR=/tmp/claude-profile") {
 		t.Error("Claude must still get its profile config dir")
@@ -290,6 +336,74 @@ func TestConsumeAgyEventCollectsResultAndSession(t *testing.T) {
 	}
 }
 
+func TestConsumeCodexEventCollectsThreadAndMessage(t *testing.T) {
+	res := &streamResult{}
+	lines := []string{
+		`{"type":"thread.started","thread_id":"thread-xyz"}`,
+		`{"type":"item.started","item":{"type":"command_execution","command":"go test"}}`,
+		`{"type":"item.completed","item":{"type":"agent_message","text":"all green"}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":3}}`,
+	}
+	for _, l := range lines {
+		if !consumeCodexEvent([]byte(l), res, nil) {
+			t.Errorf("codex line should parse: %s", l)
+		}
+	}
+	if res.SessionID != "thread-xyz" || res.Text != "all green" || res.IsError {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+
+	rpc := &streamResult{}
+	consumeCodexEvent([]byte(`{"method":"thread/started","params":{"thread_id":"from-params"}}`), rpc, nil)
+	if rpc.SessionID != "from-params" {
+		t.Errorf("rpc thread id = %q", rpc.SessionID)
+	}
+	errRes := &streamResult{}
+	consumeCodexEvent([]byte(`{"type":"error","error":{"message":"please run `+"`codex login`"+`"}}`), errRes, nil)
+	if !errRes.IsError || !strings.Contains(errRes.Text, "codex login") {
+		t.Errorf("error event = %+v", errRes)
+	}
+}
+
+func TestResolveModelPrecedence(t *testing.T) {
+	cfg := &Config{Model: "sonnet", Models: map[string]string{engineGrok: "grok-4", engineClaude: "opus"}}
+	if got := resolveModel(cfg, engineClaude, ""); got != "opus" {
+		t.Errorf("claude instance = %q, want opus (Models wins over legacy Model)", got)
+	}
+	if got := resolveModel(cfg, engineClaude, "haiku"); got != "haiku" {
+		t.Errorf("bot override = %q, want haiku", got)
+	}
+	if got := resolveModel(cfg, engineGrok, ""); got != "grok-4" {
+		t.Errorf("grok = %q", got)
+	}
+	if got := resolveModel(cfg, engineCodex, ""); got != "" {
+		t.Errorf("unset engine must be empty so the CLI picks, got %q", got)
+	}
+	if got := resolveModel(&Config{Model: "sonnet"}, engineGrok, ""); got != "" {
+		t.Errorf("legacy Model must not leak onto grok, got %q", got)
+	}
+}
+
+func TestCodexTurnArgsMintAndResume(t *testing.T) {
+	first := strings.Join(codexTurnArgs("gpt-5.4", "", "do the thing", false), " ")
+	for _, want := range []string{
+		"exec", "--json", "--sandbox danger-full-access",
+		"--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check",
+		"--model gpt-5.4", "do the thing",
+	} {
+		if !strings.Contains(first, want) {
+			t.Errorf("missing %q in: %s", want, first)
+		}
+	}
+	if strings.Contains(first, "resume") {
+		t.Error("a first turn must not pass resume")
+	}
+	resume := strings.Join(codexTurnArgs("", "thread-1", "continue", true), " ")
+	if !strings.Contains(resume, "resume thread-1 continue") {
+		t.Errorf("resume args = %s", resume)
+	}
+}
+
 func TestConsumeTurnEventDispatches(t *testing.T) {
 	claude := &streamResult{}
 	if !consumeTurnEvent(streamClaudeMessages, []byte(`{"type":"result","result":"hi","is_error":false}`), claude, nil) {
@@ -304,6 +418,13 @@ func TestConsumeTurnEventDispatches(t *testing.T) {
 	}
 	if agy.Text != "yo" {
 		t.Errorf("agy text = %q", agy.Text)
+	}
+	codex := &streamResult{}
+	if !consumeTurnEvent(streamCodex, []byte(`{"type":"thread.started","thread_id":"t1"}`), codex, nil) {
+		t.Fatal("codex stream line should parse")
+	}
+	if codex.SessionID != "t1" {
+		t.Errorf("codex session = %q", codex.SessionID)
 	}
 }
 

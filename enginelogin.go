@@ -26,6 +26,8 @@ func loginCommandLabel(p Profile) string {
 		return "<code>grok login --device-auth</code>"
 	case engineAntigravity:
 		return "<code>agy auth login</code>"
+	case engineCodex:
+		return "<code>codex login --device-auth</code>"
 	default:
 		return "<code>claude auth login</code>"
 	}
@@ -34,7 +36,7 @@ func loginCommandLabel(p Profile) string {
 // runAccountLogin dispatches the PTY login for this account's engine.
 func runAccountLogin(ctx context.Context, start ptyStarter, p Profile, prompter loginPrompter) (string, error) {
 	switch profileEngine(p) {
-	case engineGrok, engineAntigravity:
+	case engineGrok, engineAntigravity, engineCodex:
 		return runIsolatedLoginFlow(ctx, start, p, prompter)
 	default:
 		return runLoginFlow(ctx, start, p, prompter)
@@ -135,6 +137,9 @@ func loginBinArgs(p Profile) (string, []string, error) {
 	case engineAntigravity:
 		bin, err := resolveEngineBin(engineAntigravity)
 		return bin, []string{"auth", "login"}, err
+	case engineCodex:
+		bin, err := resolveEngineBin(engineCodex)
+		return bin, []string{"login", "--device-auth"}, err
 	default:
 		return "", nil, errors.New("not an isolated-engine login")
 	}

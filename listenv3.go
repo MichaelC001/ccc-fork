@@ -755,7 +755,11 @@ func (in *instance) handleCommand(msg *TelegramMessage, text string, inGroup boo
 		in.handleAccountCommand(msg, rest)
 		return
 	case "/model":
-		in.handleModelCommand(msg, rest)
+		var b *Bot
+		if inGroup && topicID != 0 {
+			b, _ = botByTopic(in.db, topicID)
+		}
+		in.handleModelCommand(msg, rest, b)
 		return
 	case "/setgroup":
 		in.handleSetGroupCommand(msg)
@@ -1100,7 +1104,7 @@ func (in *instance) renderStatus() string {
 	var nBots int64
 	in.db.Model(&Bot{}).Where("archived_at IS NULL").Count(&nBots)
 	fmt.Fprintf(&sb, "bots: %d · running: %d · queued: %d\n", nBots, running, queued)
-	fmt.Fprintf(&sb, "model: %s\n", firstNonEmpty(instanceModel(cfg), "claude default"))
+	fmt.Fprintf(&sb, "models: %s\n", htmlEscape(renderInstanceModels(cfg)))
 	if e := defaultEngine(cfg); e != engineClaude {
 		fmt.Fprintf(&sb, "default engine: %s\n", e)
 	}
@@ -1219,7 +1223,7 @@ func (in *instance) handleEngineCommand(msg *TelegramMessage, b *Bot, rest strin
 		return
 	}
 	if err := in.db.Model(&Bot{}).Where("id = ?", b.ID).
-		Updates(map[string]any{"engine": engine, "session_id": ""}).Error; err != nil {
+		Updates(map[string]any{"engine": engine, "session_id": "", "model": ""}).Error; err != nil {
 		in.reply(msg, "Could not update the engine: "+htmlEscape(err.Error()))
 		return
 	}
@@ -1233,24 +1237,144 @@ func (in *instance) handleEngineCommand(msg *TelegramMessage, b *Bot, rest strin
 	in.reply(msg, reply)
 }
 
-// handleModelCommand shows or sets the model every bot runs on (DESIGN §8).
-// It rotates no sessions: --model is passed on every turn, including resumes.
-func (in *instance) handleModelCommand(msg *TelegramMessage, rest string) {
-	name := strings.TrimSpace(rest)
-	if name == "" {
-		in.reply(msg, "<b>Model</b>\n<code>"+htmlEscape(firstNonEmpty(instanceModel(in.config()), "(claude default)"))+"</code>\nSet it with /model &lt;name&gt; (or /model default).")
+// handleModelCommand sets a model without rotating the session: --model is
+// passed on every turn, including resumes.
+//
+//	/model                         show this bot (if any) and instance defaults
+//	/model <slug>                  in a bot topic: that bot. In General: Claude.
+//	/model <engine> <slug>         instance default for that engine
+//	/model default                 clear the bot override, or Claude's instance default
+//	/model <engine> default        clear that engine's instance default
+//
+// Engine is a property of the account; model is not. A slug that happens to
+// be an engine name in a one-arg /model is treated as the engine, not a model.
+func (in *instance) handleModelCommand(msg *TelegramMessage, rest string, b *Bot) {
+	rest = strings.TrimSpace(rest)
+	if rest == "" {
+		in.reply(msg, renderModelStatus(in.config(), b))
 		return
 	}
-	if strings.EqualFold(name, "default") {
-		name = ""
+	first, more := splitFirstWord(rest)
+	second, extra := splitFirstWord(more)
+	if strings.TrimSpace(extra) != "" {
+		in.reply(msg, "Usage: /model [&lt;engine&gt;] &lt;slug|default&gt;")
+		return
 	}
-	updated := updateConfig(func(c *Config) bool { c.Model = name; return true })
+
+	if second != "" {
+		engine, err := parseEngine(first)
+		if err != nil {
+			in.reply(msg, htmlEscape(err.Error()))
+			return
+		}
+		slug := second
+		if strings.EqualFold(slug, "default") {
+			slug = ""
+		}
+		updated := updateConfig(func(c *Config) bool {
+			setEngineModel(c, engine, slug)
+			return true
+		})
+		if updated == nil {
+			in.reply(msg, "Could not write the configuration.")
+			return
+		}
+		in.setConfig(updated)
+		in.reply(msg, "🧠 "+htmlEscape(engineLabel(engine))+" model set to <code>"+
+			htmlEscape(firstNonEmpty(slug, "(engine default)"))+"</code>")
+		return
+	}
+
+	if strings.EqualFold(first, "default") {
+		if b != nil {
+			if err := in.db.Model(&Bot{}).Where("id = ?", b.ID).Update("model", "").Error; err != nil {
+				in.reply(msg, "Could not update the bot: "+htmlEscape(err.Error()))
+				return
+			}
+			in.reply(msg, "🧠 This bot now uses the instance default (<code>"+
+				htmlEscape(firstNonEmpty(resolveModel(in.config(), botEngine(b), ""), "(engine default)"))+
+				"</code>).")
+			return
+		}
+		updated := updateConfig(func(c *Config) bool {
+			setEngineModel(c, engineClaude, "")
+			return true
+		})
+		if updated == nil {
+			in.reply(msg, "Could not write the configuration.")
+			return
+		}
+		in.setConfig(updated)
+		in.reply(msg, "🧠 Claude model reset to <code>(engine default)</code>")
+		return
+	}
+
+	if engine, err := parseEngine(first); err == nil && first != "" {
+		slug := resolveModel(in.config(), engine, "")
+		in.reply(msg, "<b>"+htmlEscape(engineLabel(engine))+"</b>\n<code>"+
+			htmlEscape(firstNonEmpty(slug, "(engine default)"))+"</code>\nSet it with /model "+
+			htmlEscape(engine)+" &lt;slug&gt;.")
+		return
+	}
+
+	if b != nil {
+		if err := in.db.Model(&Bot{}).Where("id = ?", b.ID).Update("model", first).Error; err != nil {
+			in.reply(msg, "Could not update the bot: "+htmlEscape(err.Error()))
+			return
+		}
+		in.reply(msg, "🧠 This bot's model set to <code>"+htmlEscape(first)+"</code>")
+		return
+	}
+
+	updated := updateConfig(func(c *Config) bool {
+		setEngineModel(c, engineClaude, first)
+		return true
+	})
 	if updated == nil {
 		in.reply(msg, "Could not write the configuration.")
 		return
 	}
 	in.setConfig(updated)
-	in.reply(msg, "🧠 Model set to <code>"+htmlEscape(firstNonEmpty(name, "(claude default)"))+"</code>")
+	in.reply(msg, "🧠 Model set to <code>"+htmlEscape(first)+"</code>")
+}
+
+func renderModelStatus(cfg *Config, b *Bot) string {
+	var sb strings.Builder
+	sb.WriteString("<b>Model</b>\n")
+	if b != nil {
+		engine := botEngine(b)
+		effective := resolveModel(cfg, engine, b.Model)
+		fmt.Fprintf(&sb, "this bot (%s): <code>%s</code>", htmlEscape(engineLabel(engine)),
+			htmlEscape(firstNonEmpty(effective, "(engine default)")))
+		if strings.TrimSpace(b.Model) != "" {
+			sb.WriteString(" (override)")
+		}
+		sb.WriteByte('\n')
+	}
+	sb.WriteString("instance: ")
+	sb.WriteString(htmlEscape(renderInstanceModels(cfg)))
+	sb.WriteString("\nIn a bot topic, /model &lt;slug&gt; overrides that bot. ")
+	sb.WriteString("/model &lt;engine&gt; &lt;slug&gt; sets the instance default. /model default clears.")
+	return sb.String()
+}
+
+func renderInstanceModels(cfg *Config) string {
+	parts := []string{}
+	for _, e := range []string{engineClaude, engineGrok, engineAntigravity, engineCodex} {
+		slug := resolveModel(cfg, e, "")
+		if slug == "" && e != engineClaude && (cfg == nil || cfg.Models == nil || cfg.Models[e] == "") {
+			continue
+		}
+		label := e
+		if slug == "" {
+			slug = "default"
+		}
+		parts = append(parts, label+"="+slug)
+	}
+	if len(parts) == 0 {
+		return "claude=default"
+	}
+	return strings.Join(parts, " · ")
 }
 
 // handleSetGroupCommand binds the instance to the forum group the command was
