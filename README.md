@@ -7,6 +7,8 @@ workspace; you talk to it like you talk to a person.
 [![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go)](https://go.dev)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
+Phone client (MIT, public): [ccc-app](https://github.com/kidandcat/ccc-app) — `ccc pair`, paste the URI in the app.
+
 ---
 
 ## What ccc is
@@ -50,6 +52,17 @@ the Telegram UX.
 | **Watch** | A command re-run on an interval. The bot is woken **only when the output changes**, with a diff. Nothing changing costs nothing. Lives 4 hours, then it is cancelled and the bot is woken to re-set it. Standing jobs are routines. |
 | **Schedule** | A wakeup at a time, or on a cron expression. |
 | **Background job** | A long shell command in the same topic. The bot stays responsive; it is woken when the job finishes. |
+
+### Phone app
+
+Anyone can run `ccc listen`, install the [CCC](https://github.com/kidandcat/ccc-app) app, and pair:
+
+```
+ccc pair          # on the machine
+# paste the ccc://pair/v1?… URI in the app
+```
+
+The default hub (`wss://hub.mentasystems.com`) is a free encrypted relay. It cannot read chats. `ccc hub` runs your own.
 
 ### What a bot sees
 

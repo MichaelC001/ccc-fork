@@ -14,18 +14,25 @@ import (
 
 // runHubServer is `ccc hub [addr]`. It is a dumb encrypted pipe: it learns
 // public keys and pairing codes, never plaintext. Anyone can run one; the
-// public default is wss://hub.getccc.dev.
+// public default is wss://hub.mentasystems.com.
 
 func runHubServer(addr string) error {
 	if !strings.Contains(addr, ":") {
 		addr = ":" + addr
 	}
+	log.Printf("ccc hub listening on %s (ws /v1/ws)", addr)
+	return http.ListenAndServe(addr, newHubHandler())
+}
+
+func newHubHandler() http.Handler {
 	s := newHubRelay()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, "ok")
 	})
+	mux.HandleFunc("/privacy", serveHubPrivacy)
+	mux.HandleFunc("/privacy/", serveHubPrivacy)
 	mux.HandleFunc("/v1/ws", s.handleWS)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
@@ -33,10 +40,9 @@ func runHubServer(addr string) error {
 			return
 		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		fmt.Fprint(w, "ccc hub — encrypted relay. Clients connect at /v1/ws\n")
+		fmt.Fprint(w, "ccc hub — encrypted relay. Clients connect at /v1/ws\nprivacy: /privacy\n")
 	})
-	log.Printf("ccc hub listening on %s (ws /v1/ws)", addr)
-	return http.ListenAndServe(addr, mux)
+	return mux
 }
 
 type hubRelay struct {
