@@ -85,6 +85,17 @@ func TestReadProfileUsage(t *testing.T) {
 			t.Errorf("got 5h=%d 7d=%d, want 100 and 0", u.FiveHour, u.SevenDay)
 		}
 	})
+
+	t.Run("float percents from Claude Code 2.1.x", func(t *testing.T) {
+		p := newFixtureProfile(t, "f", `{"cachedUsageUtilization":{"utilization":{"five_hour":{"utilization":7.0},"seven_day":{"utilization":42.4}}}}`, "")
+		u := readProfileUsage(p)
+		if u.FiveHour != 7 || !u.FiveHourKnown {
+			t.Errorf("five_hour = %d (known=%v), want 7 known", u.FiveHour, u.FiveHourKnown)
+		}
+		if u.SevenDay != 42 || !u.SevenDayKnown {
+			t.Errorf("seven_day = %d (known=%v), want 42 known", u.SevenDay, u.SevenDayKnown)
+		}
+	})
 }
 
 func TestChooseProfile(t *testing.T) {

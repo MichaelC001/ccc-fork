@@ -388,9 +388,9 @@ func (s *scheduler) runDoctor(now time.Time) {
 			if accepted, known := bypassAccepted(p); known && !accepted {
 				findings = append(findings, doctorFinding{accountDisplay(p), "bypass disclaimer not accepted"})
 			}
-			// Reading the usage cache is what refreshes the numbers chooseProfile
-			// and /status use; the result is per-call, so this is the refresh.
-			readProfileUsage(p)
+			// Fetch /api/oauth/usage so /account and chooseProfile see live
+			// 5h/7d numbers. Cached 5 minutes; a failure falls back to disk.
+			refreshProfileUsage(p)
 		}
 	}
 	s.doctor.findings = findings

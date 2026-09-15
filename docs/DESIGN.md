@@ -128,6 +128,11 @@ A retried turn reuses the same session UUID: because profiles share
   running on that account (read from `turns.status = running`, §14.6), then
   name; excludes profiles in cooldown or `needs_login`. Failover never crosses
   engines (Claude↔Claude, Grok↔Grok) unless a future design documents it.
+  Claude utilization is fetched from `GET /api/oauth/usage` (5 min TTL) using
+  the profile's OAuth token (macOS keychain `Claude Code-credentials`, or
+  `<config_dir>/.credentials.json`). `.claude.json`'s `cachedUsageUtilization`
+  is a fallback: Claude Code 2.1.x often no longer writes it, which is why
+  `/account` used to show `5h ? · 7d ?`.
 - **Shared sessions**: all profiles of an instance point their `projects/` at
   the same directory (`<data_dir>/projects`, symlinked into each config dir by
   `ccc` when a profile is added; for the implicit `~/.claude` profile the

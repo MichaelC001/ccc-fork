@@ -93,7 +93,7 @@ func (in *instance) collectAccountCards() []accountCard {
 		if !ok {
 			p = pr.p
 		}
-		card := accountCard{Profile: p, State: pr.state, Usage: readProfileUsage(p),
+		card := accountCard{Profile: p, State: pr.state, Usage: refreshProfileUsage(p),
 			IsDefault: p.Name == def, Bots: busy[p.Name]}
 		card.Disclaimer, _ = bypassAccepted(p)
 		if card.State == accountOK && needsLogin[p.Name] {

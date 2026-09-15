@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -496,21 +497,33 @@ const unknownUtilization = 50
 const defaultLimitCooldown = 30 * time.Minute
 
 // usageCache mirrors the parts of <config_dir>/.claude.json ccc reads.
-// cachedUsageUtilization is written by Claude Code itself; it may be missing,
-// stale, or partially null, so every field is treated as best-effort.
+// Claude Code used to persist cachedUsageUtilization there; 2.1.x often
+// does not, so /account also fetches /api/oauth/usage (usagefetch.go).
 type usageCache struct {
 	CachedUsageUtilization struct {
-		FetchedAtMs int64 `json:"fetchedAtMs"`
-		Utilization struct {
-			FiveHour usageWindow `json:"five_hour"`
-			SevenDay usageWindow `json:"seven_day"`
-		} `json:"utilization"`
+		FetchedAtMs int64             `json:"fetchedAtMs"`
+		Utilization oauthUsagePayload `json:"utilization"`
 	} `json:"cachedUsageUtilization"`
 }
 
+// oauthUsagePayload is both the .claude.json utilization object and the
+// body of GET /api/oauth/usage. five_hour/seven_day may be null; the
+// structured `limits` array is the fallback Claude Code itself uses.
+type oauthUsagePayload struct {
+	FiveHour *usageWindow `json:"five_hour"`
+	SevenDay *usageWindow `json:"seven_day"`
+	Limits   []usageLimit `json:"limits"`
+}
+
 type usageWindow struct {
-	Utilization *int   `json:"utilization"` // 0-100, nil when unknown
-	ResetsAt    string `json:"resets_at"`   // RFC3339, "" when unknown
+	Utilization *float64 `json:"utilization"` // 0-100, nil when unknown (API sends 2.0, not 2)
+	ResetsAt    string   `json:"resets_at"`   // RFC3339, "" when unknown
+}
+
+type usageLimit struct {
+	Kind     string  `json:"kind"` // session, weekly_all, weekly_scoped
+	Percent  float64 `json:"percent"`
+	ResetsAt string  `json:"resets_at"`
 }
 
 // profileUsage is the digested usage snapshot for one profile.
@@ -522,11 +535,19 @@ type profileUsage struct {
 	FiveHourResetAt time.Time // zero when unknown
 }
 
-// readProfileUsage reads a profile's cached usage utilization. Missing or
-// unparseable data yields unknownUtilization rather than an error: selection
+// readProfileUsage is the no-network view: a fresh in-memory snapshot if
+// the doctor or /account just fetched one, else Claude Code's on-disk cache.
+// Missing data yields unknownUtilization rather than an error: chooseProfile
 // must never block on a cold cache.
 func readProfileUsage(p Profile) profileUsage {
-	u := profileUsage{FiveHour: unknownUtilization, SevenDay: unknownUtilization}
+	if u, ok := usageMemGet(p); ok {
+		return u
+	}
+	return readProfileUsageFromFile(p)
+}
+
+func readProfileUsageFromFile(p Profile) profileUsage {
+	u := unknownProfileUsage()
 	data, err := os.ReadFile(profileClaudeJSON(p))
 	if err != nil {
 		return u
@@ -535,21 +556,65 @@ func readProfileUsage(p Profile) profileUsage {
 	if json.Unmarshal(data, &c) != nil {
 		return u
 	}
-	util := c.CachedUsageUtilization.Utilization
-	if util.FiveHour.Utilization != nil {
-		u.FiveHour = clampPercent(*util.FiveHour.Utilization)
-		u.FiveHourKnown = true
-	}
-	if util.SevenDay.Utilization != nil {
-		u.SevenDay = clampPercent(*util.SevenDay.Utilization)
-		u.SevenDayKnown = true
-	}
-	if util.FiveHour.ResetsAt != "" {
-		if t, err := time.Parse(time.RFC3339, util.FiveHour.ResetsAt); err == nil {
-			u.FiveHourResetAt = t
+	return profileUsageFromPayload(c.CachedUsageUtilization.Utilization)
+}
+
+func unknownProfileUsage() profileUsage {
+	return profileUsage{FiveHour: unknownUtilization, SevenDay: unknownUtilization}
+}
+
+func profileUsageFromPayload(p oauthUsagePayload) profileUsage {
+	u := unknownProfileUsage()
+	applyWindow(&u, p.FiveHour, true)
+	applyWindow(&u, p.SevenDay, false)
+	for _, lim := range p.Limits {
+		switch lim.Kind {
+		case "session":
+			if !u.FiveHourKnown {
+				u.FiveHour = percentFromFloat(lim.Percent)
+				u.FiveHourKnown = true
+				u.FiveHourResetAt = parseResetAt(lim.ResetsAt)
+			}
+		case "weekly_all":
+			if !u.SevenDayKnown {
+				u.SevenDay = percentFromFloat(lim.Percent)
+				u.SevenDayKnown = true
+			}
 		}
 	}
 	return u
+}
+
+func applyWindow(u *profileUsage, w *usageWindow, fiveHour bool) {
+	if w == nil || w.Utilization == nil {
+		return
+	}
+	pct := percentFromFloat(*w.Utilization)
+	if fiveHour {
+		u.FiveHour = pct
+		u.FiveHourKnown = true
+		u.FiveHourResetAt = parseResetAt(w.ResetsAt)
+		return
+	}
+	u.SevenDay = pct
+	u.SevenDayKnown = true
+}
+
+func parseResetAt(s string) time.Time {
+	if s == "" {
+		return time.Time{}
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t
+	}
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t
+	}
+	return time.Time{}
+}
+
+func percentFromFloat(v float64) int {
+	return clampPercent(int(math.Round(v)))
 }
 
 func clampPercent(v int) int {

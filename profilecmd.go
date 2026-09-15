@@ -120,7 +120,7 @@ func collectProfileRows(config *Config, probeLogin bool) []profileRow {
 	for _, p := range listProfiles(config) {
 		row := profileRow{
 			Profile:      p,
-			Usage:        readProfileUsage(p),
+			Usage:        refreshProfileUsage(p),
 			RunningTurns: working[p.Name],
 			CooledUntil:  profileCooledUntil(p.Name, now),
 		}
@@ -201,7 +201,7 @@ func renderProfileTable(config *Config, probeLogin bool) string {
 			sb.WriteString(fmt.Sprintf("\n⏳ %s is on usage cooldown until %s\n", r.Profile.Name, r.CooledUntil.Format("15:04")))
 		}
 	}
-	sb.WriteString("\n* = default profile. TURNS = turns running on it right now. Utilization comes from Claude Code's own cache and may be stale.\n")
+	sb.WriteString("\n* = default profile. TURNS = turns running on it right now. Utilization is fetched from Anthropic (5 min cache).\n")
 	return sb.String()
 }
 
@@ -451,8 +451,8 @@ func doctorProfiles(fix bool) bool {
 			ok = false
 		}
 
-		u := readProfileUsage(p)
-		fmt.Printf("    usage......... 5h %s · 7d %s (Claude Code's cache, may be stale)\n",
+		u := refreshProfileUsage(p)
+		fmt.Printf("    usage......... 5h %s · 7d %s (live /api/oauth/usage, 5 min cache)\n",
 			pct(u.FiveHour, u.FiveHourKnown), pct(u.SevenDay, u.SevenDayKnown))
 	}
 	return ok
