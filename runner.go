@@ -719,7 +719,7 @@ func (r *Runner) spawn(p Profile, b *Bot, t *Turn, sessionID string, resume bool
 
 	cmd := exec.Command(spec.Bin, spec.Args...)
 	cmd.Dir = cwd
-	cmd.Env = spec.Env
+	cmd.Env = appendTurnIdentity(spec.Env, cfg, b.ID, t.ID)
 	// Own process group: /stop must reach the whole tool tree, not just claude.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 

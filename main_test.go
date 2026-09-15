@@ -39,6 +39,15 @@ func TestConfigSaveLoad(t *testing.T) {
 	}
 }
 
+func TestGetConfigPathHonorsCCCConfig(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	custom := filepath.Join(t.TempDir(), "custom.json")
+	t.Setenv("CCC_CONFIG", custom)
+	if got := getConfigPath(); got != custom {
+		t.Errorf("getConfigPath() = %q, want CCC_CONFIG %q", got, custom)
+	}
+}
+
 // A config written by ccc v2 still carries `sessions` (and other dead keys).
 // v3 must load it and ignore them rather than refusing to start.
 func TestConfigLoadToleratesLegacyKeys(t *testing.T) {

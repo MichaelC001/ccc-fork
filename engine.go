@@ -210,8 +210,8 @@ func resolveEngineBin(engine string) (string, error) {
 //
 // MCP is deliberately omitted. Grok has `grok mcp add|list|remove` and stores
 // servers in ~/.grok/config.toml (or project .grok/config.toml) — there is no
-// clean per-turn inline --mcp-config equivalent. A half-broken bridge would
-// be worse than none; ccc MCP stays Claude-only.
+// clean per-turn inline --mcp-config equivalent. Grok/agy bots message
+// teammates with `ccc tell` instead (inbox + 🤝 in both topics).
 func grokTurnArgs(model, systemPrompt, sessionID string, resume bool) []string {
 	args := []string{
 		"--always-approve",
@@ -256,6 +256,7 @@ func grokTurnArgs(model, systemPrompt, sessionID string, resume bool) []string {
 // MCP is deliberately omitted. agy reads ~/.gemini/config/mcp_config.json (or
 // a workspace file) — a global/workspace file, not a per-turn inline config.
 // Writing that file from ccc would race every other agy use on the machine.
+// Teammates are `ccc tell`, same as Grok.
 func agyTurnArgs(model, conversationID string, resume bool) []string {
 	args := []string{
 		"--output-format", "stream-json",
@@ -396,6 +397,20 @@ func applyEngineIsolation(env []string, engine string, p Profile) []string {
 		env = setEnvValue(env, "XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 		env = setEnvValue(env, "XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
 		return env
+	}
+	return env
+}
+
+// appendTurnIdentity pins the calling bot/turn so `ccc tell` (Grok/agy) and
+// `ccc mcp` children hit the same database the listener has open.
+func appendTurnIdentity(env []string, cfg *Config, botID, turnID int64) []string {
+	env = setEnvValue(env, "CCC_BOT_ID", fmt.Sprint(botID))
+	if turnID != 0 {
+		env = setEnvValue(env, "CCC_TURN_ID", fmt.Sprint(turnID))
+	}
+	env = setEnvValue(env, "CCC_CONFIG", getConfigPath())
+	if cfg != nil {
+		env = setEnvValue(env, "CCC_DB", dbPath(cfg))
 	}
 	return env
 }

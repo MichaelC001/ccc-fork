@@ -296,21 +296,12 @@ func (s *mcpServer) sendToBot(_ context.Context, _ *mcp.CallToolRequest, in send
 	if in.Wake != nil {
 		wake = *in.Wake
 	}
-	from := s.botID
-	msg := InboxMessage{ToBotID: target.ID, FromBotID: &from, Text: body, Wake: wake}
-	if err := s.db.Create(&msg).Error; err != nil {
-		return toolErr("could not queue the message: %v", err), nil, nil
-	}
 	self, err := s.bot()
-	fromName := "a bot"
-	if err == nil {
-		fromName = self.Name
+	if err != nil {
+		return toolErr("unknown bot"), nil, nil
 	}
-	mirror := fmt.Sprintf("🤝 <b>%s</b> → <b>%s</b>: %s",
-		htmlEscape(fromName), htmlEscape(target.Name), renderTelegramHTML(truncate(body, 1500)))
-	s.post(target.TopicID, mirror)
-	if err == nil && self.TopicID != target.TopicID {
-		s.post(self.TopicID, mirror)
+	if _, _, err := queueBotMessage(s.db, s.config, self, target.Name, body, wake); err != nil {
+		return toolErr("%s", err.Error()), nil, nil
 	}
 	return text("message queued for %s", target.Name), nil, nil
 }
@@ -783,10 +774,7 @@ func (s *mcpServer) spawnBot(_ context.Context, _ *mcp.CallToolRequest, in spawn
 	}
 	first := strings.TrimSpace(in.FirstMessage)
 	if first != "" {
-		// Delivered the same way any bot-to-bot message is: as an inbox row the
-		// runner turns into the child's first turn once this turn ends.
-		from := s.botID
-		if err := s.db.Create(&InboxMessage{ToBotID: child.ID, FromBotID: &from, Text: first, Wake: true}).Error; err != nil {
+		if _, _, err := queueBotMessage(s.db, s.config, parent, child.Name, first, true); err != nil {
 			return toolErr("the bot was created but its first message could not be queued: %v", err), nil, nil
 		}
 	}

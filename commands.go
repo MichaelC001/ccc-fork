@@ -356,6 +356,7 @@ COMMANDS:
     profile <cmd>           Manage accounts (list/add/remove/default/
                             login/accept-disclaimer); engine is set at add
     mcp --bot <id>          MCP server for one turn (spawned by Claude Code)
+    tell [--no-wake] <bot>  Message another bot (mirrored as 🤝 in both topics)
     send <file>             Send a file into the topic of the bot owning this directory
     relay [port]            Relay server for files over 50 MB (default port: 8080)
 

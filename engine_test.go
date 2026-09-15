@@ -199,6 +199,19 @@ func TestResolveEngineBinMissing(t *testing.T) {
 	}
 }
 
+func TestAppendTurnIdentity(t *testing.T) {
+	cfg := &Config{DataDir: t.TempDir()}
+	got := strings.Join(appendTurnIdentity(nil, cfg, 7, 9), "\n")
+	for _, want := range []string{"CCC_BOT_ID=7", "CCC_TURN_ID=9", "CCC_CONFIG=", "CCC_DB="} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in %q", want, got)
+		}
+	}
+	if !strings.Contains(got, dbPath(cfg)) {
+		t.Errorf("CCC_DB does not point at the instance db:\n%s", got)
+	}
+}
+
 func TestEngineEnvNeverSetsClaudeConfigDir(t *testing.T) {
 	t.Setenv("CCC_TEST_TOKEN", "s3cret")
 	t.Setenv("XAI_API_KEY", "xai-key")
@@ -370,6 +383,9 @@ func TestRenderSystemPromptOmitsMCPForGrok(t *testing.T) {
 	}
 	if !strings.Contains(got, "Grok Build") || !strings.Contains(got, "do NOT have the ccc MCP") {
 		t.Errorf("grok prompt should name the engine and skip MCP:\n%s", got)
+	}
+	if !strings.Contains(got, "ccc tell") {
+		t.Errorf("grok prompt should teach ccc tell:\n%s", got)
 	}
 	claude := renderSystemPrompt(promptBot{Name: "coder", Role: "writes go", Cwd: "/tmp"}, "host", nil, nil)
 	if !strings.Contains(claude, "a group of Claude bots") || !strings.Contains(claude, "remember/recall/forget") {

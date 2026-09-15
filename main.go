@@ -192,6 +192,9 @@ func main() {
 		}
 		must(handleSendFile(os.Args[2]))
 
+	case "tell":
+		must(runTellCommand(os.Args[2:]))
+
 	case "relay":
 		port := "8080"
 		if len(os.Args) >= 3 {

@@ -269,7 +269,8 @@ Every bot has these tools, and uses them without being told:
 
 - `remember` / `recall` / `forget` — durable memory in the three scopes.
 - `list_bots` / `send_to_bot` — message a teammate; the exchange is mirrored
-  into both topics as 🤝, and the recipient wakes up with it.
+  into both topics as 🤝, and the recipient wakes up with it. Grok and
+  Antigravity bots do the same with `ccc tell <Name> <text>` (`--no-wake` for FYI).
 - `notify_owner` / `ask_owner` — reach you; `ask_owner` renders inline buttons
   and the bot's turn ends until you answer.
 - `watch` / `unwatch` / `list_watches` — a command re-run on an interval that
@@ -378,8 +379,8 @@ already-registered pool — it is not the way you introduce an engine.
 | Engine | Add account | Isolated home | Binary | Session | MCP |
 |---|---|---|---|---|---|
 | **Claude Code** | `/account add you@x.com claude` | `CLAUDE_CONFIG_DIR` under `<data_dir>/profiles/` | `claude` | ccc mints a UUID; `--session-id` then `--resume` | ccc MCP (`remember`, `send_to_bot`, …) |
-| **Grok Build** | `/account add work grok` | `GROK_HOME` = `<data_dir>/accounts/grok/<id>` (`auth.json`) | `grok` (`~/.grok/bin/grok`) | ccc mints a UUID; `--session-id` then `--resume` | not wired — Grok MCP is persistent TOML (`grok mcp add`), not a per-turn flag |
-| **Antigravity** | `/account add lab agy` | isolated `HOME` + `GEMINI_HOME` + `GEMINI_FORCE_FILE_STORAGE` under `<data_dir>/accounts/antigravity/<id>` | `agy` (`~/.local/bin/agy`) | first turn lets `agy` mint a `conversation_id`; later turns pass `--conversation` | not wired — agy MCP is `~/.gemini/config/mcp_config.json`, not a per-turn flag |
+| **Grok Build** | `/account add work grok` | `GROK_HOME` = `<data_dir>/accounts/grok/<id>` (`auth.json`) | `grok` (`~/.grok/bin/grok`) | ccc mints a UUID; `--session-id` then `--resume` | not wired — teammates via `ccc tell` (🤝 in both topics) |
+| **Antigravity** | `/account add lab agy` | isolated `HOME` + `GEMINI_HOME` + `GEMINI_FORCE_FILE_STORAGE` under `<data_dir>/accounts/antigravity/<id>` | `agy` (`~/.local/bin/agy`) | first turn lets `agy` mint a `conversation_id`; later turns pass `--conversation` | not wired — teammates via `ccc tell` (🤝 in both topics) |
 
 ```
 /account add you@example.com claude

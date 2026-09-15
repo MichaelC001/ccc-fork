@@ -49,6 +49,9 @@ func cacheDir() string {
 }
 
 func getConfigPath() string {
+	if p := strings.TrimSpace(os.Getenv("CCC_CONFIG")); p != "" {
+		return p
+	}
 	// Migrate from old path if needed
 	home, _ := os.UserHomeDir()
 	oldPath := filepath.Join(home, ".ccc.json")

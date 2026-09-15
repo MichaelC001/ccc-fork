@@ -420,6 +420,81 @@ func TestSendToBotMirrorsIntoBothTopics(t *testing.T) {
 	}
 }
 
+func TestQueueBotMessageMirrorsIntoBothTopics(t *testing.T) {
+	in, _, api := testInstance(t)
+	a, err := in.createBot("alpha", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bb, err := in.createBot("beta", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := queueBotMessage(in.db, in.cfg, a, "beta", "please review PR 12", true); err != nil {
+		t.Fatalf("queueBotMessage: %v", err)
+	}
+
+	fromTopic := fmt.Sprint(a.TopicID)
+	toTopic := fmt.Sprint(bb.TopicID)
+	seenFrom, seenTo := false, false
+	for _, c := range api.since("sendMessage") {
+		if !strings.Contains(c.Params.Get("text"), "please review PR 12") {
+			continue
+		}
+		if !strings.Contains(c.Params.Get("text"), "🤝") {
+			t.Errorf("mirror is missing the handshake mark: %q", c.Params.Get("text"))
+		}
+		switch c.Params.Get("message_thread_id") {
+		case fromTopic:
+			seenFrom = true
+		case toTopic:
+			seenTo = true
+		}
+	}
+	if !seenFrom || !seenTo {
+		t.Errorf("mirror missing (sender topic: %v, target topic: %v)", seenFrom, seenTo)
+	}
+}
+
+func TestTellCommandUsesCCCBotID(t *testing.T) {
+	in, _, api := testInstance(t)
+	if err := saveConfig(in.config()); err != nil {
+		t.Fatal(err)
+	}
+	a, err := in.createBot("alpha", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := in.createBot("beta", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("CCC_BOT_ID", fmt.Sprint(a.ID))
+	t.Setenv("CCC_DB", dbPath(in.cfg))
+	t.Setenv("CCC_CONFIG", getConfigPath())
+	if err := runTellCommand([]string{"beta", "handoff the chrome brief"}); err != nil {
+		t.Fatalf("ccc tell: %v", err)
+	}
+
+	var queued []InboxMessage
+	if err := in.db.Where("to_bot_id <> ? AND from_bot_id = ?", a.ID, a.ID).Find(&queued).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(queued) != 1 || queued[0].Text != "handoff the chrome brief" || !queued[0].Wake {
+		t.Fatalf("inbox row: %+v", queued)
+	}
+	n := 0
+	for _, c := range api.since("sendMessage") {
+		if strings.Contains(c.Params.Get("text"), "handoff the chrome brief") {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Errorf("expected 🤝 in both topics, got %d posts", n)
+	}
+}
+
 func TestSendToBotRejectsUnknownTarget(t *testing.T) {
 	in, _, _ := testInstance(t)
 	a, _ := in.createBot("alpha", "")
