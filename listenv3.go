@@ -389,6 +389,7 @@ func setBotCommandsV3(botToken string) {
 		{"command": "account", "description": "Accounts by engine (owner only)"},
 		{"command": "access", "description": "Who may talk to ccc (owner only)"},
 		{"command": "model", "description": "Show or set the model (owner only)"},
+		{"command": "cancel", "description": "Cancel an in-progress account login"},
 	}
 	for _, scope := range []map[string]any{nil, {"type": "all_group_chats"}} {
 		payload := map[string]any{"commands": commands}

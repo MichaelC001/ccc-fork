@@ -17,8 +17,9 @@ import (
 // (URL + optional user code). Success is never inferred from the TUI: a
 // login is confirmed by the credential file on disk (profileLoggedIn).
 
-// grokDeviceCodeRe matches the XXXX-XXXX user code device-auth often prints.
-var grokDeviceCodeRe = regexp.MustCompile(`\b[A-Z0-9]{4}-[A-Z0-9]{4}\b`)
+// deviceUserCodeRe is the RFC 8628 user_code device-auth CLIs print.
+// Grok uses XXXX-XXXX; Codex 0.154 prints XXXX-XXXXX (e.g. EVA2-V4DSJ).
+var deviceUserCodeRe = regexp.MustCompile(`\b[A-Z0-9]{4}-[A-Z0-9]{4,5}\b`)
 
 func loginCommandLabel(p Profile) string {
 	switch profileEngine(p) {
@@ -98,21 +99,25 @@ func runIsolatedLoginFlow(ctx context.Context, start ptyStarter, p Profile, prom
 	defer s.Close()
 
 	prompter.Progress("waiting for a login URL")
-	_, _ = s.waitFor(ctx, []string{"https://", "visit", "device", "code", "login", "auth"}, 90*time.Second) // safe-ignore: we still scrape the screen for a URL even if none of the phrases matched
+	_, _ = s.waitFor(ctx, []string{"https://", "visit", "device", "code", "login", "auth", "one-time"}, 90*time.Second) // safe-ignore: we still scrape the screen for a URL even if none of the phrases matched
 
-	url := oauthURLRe.FindString(s.screen())
-	userCode := grokDeviceCodeRe.FindString(normalizePTY(s.screen()))
+	url, userCode := extractDeviceLogin(s.screen())
+	if url != "" && userCode == "" {
+		_, _ = s.waitFor(ctx, []string{"one-time code", "Enter this"}, 20*time.Second)
+		url, userCode = extractDeviceLogin(s.screen())
+	}
+
+	// Codex (and Grok when it prints a user_code) is RFC 8628: the owner
+	// types the code on the website. Asking them to paste it into Telegram
+	// is the wrong direction and eats their next message.
+	if profileEngine(p) == engineCodex || userCode != "" {
+		prompter.ShowDeviceAuth(url, userCode)
+		return waitLoggedIn(ctx, s, p, nil)
+	}
 	if url != "" {
-		shown := url
-		if userCode != "" {
-			shown = url + "\n\nDevice code: " + userCode
-		}
-		// AskForCode blocks on the owner's next message. Device-auth often
-		// finishes in the browser with no code to paste, so we also poll the
-		// credential file and treat a Telegram message as optional PTY input.
 		codeCh := make(chan string, 1)
 		go func() {
-			code, err := prompter.AskForCode(ctx, shown)
+			code, err := prompter.AskForCode(ctx, url)
 			if err != nil || strings.TrimSpace(code) == "" {
 				return
 			}
@@ -127,6 +132,10 @@ func runIsolatedLoginFlow(ctx context.Context, start ptyStarter, p Profile, prom
 	// No URL: still poll — the CLI may already have credentials, or it may
 	// print the URL later.
 	return waitLoggedIn(ctx, s, p, nil)
+}
+
+func extractDeviceLogin(screen string) (url, userCode string) {
+	return oauthURLRe.FindString(screen), deviceUserCodeRe.FindString(normalizePTY(screen))
 }
 
 func loginBinArgs(p Profile) (string, []string, error) {

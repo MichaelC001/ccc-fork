@@ -776,7 +776,11 @@ does not carry a model — engine is the account's job.
 
 **14.28 Codex is a fourth engine.** Same isolation pattern as Grok
 (`CODEX_HOME` under `<data_dir>/accounts/codex/<id>`), login via
-`codex login --device-auth`, turns via `codex exec --json` with
+`codex login --device-auth`. That login is RFC 8628: the CLI prints a
+URL (`https://auth.openai.com/codex/device`) and a one-time user_code
+(`XXXX-XXXXX`); the owner types the code **on the page**, not back into
+Telegram. `/cancel` (including `/cancel@bot`) aborts the wait. Turns via
+`codex exec --json` with
 `--sandbox danger-full-access` and `--dangerously-bypass-approvals-and-sandbox`.
 The CLI mints a `thread_id` (like agy's `conversation_id`); later turns
 `codex exec resume <id>`. No ccc MCP; teammates are `ccc tell`. Verified

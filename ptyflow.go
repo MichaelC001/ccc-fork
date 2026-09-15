@@ -305,6 +305,10 @@ func loginEnv(p Profile) ([]string, error) {
 type loginPrompter interface {
 	AskForCode(ctx context.Context, url string) (string, error)
 	Progress(text string)
+	// ShowDeviceAuth posts a URL + one-time code the owner types on the
+	// website (RFC 8628 / Codex). It must not wait for a Telegram paste:
+	// that code never comes back to the CLI.
+	ShowDeviceAuth(url, userCode string)
 }
 
 // errLoginCancelled is returned when nobody answered with a code in time.

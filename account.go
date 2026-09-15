@@ -594,6 +594,22 @@ func (t telegramPrompter) AskForCode(ctx context.Context, url string) (string, e
 	}
 }
 
+func (t telegramPrompter) ShowDeviceAuth(url, userCode string) {
+	var sb strings.Builder
+	sb.WriteString("Open this URL, sign in, and enter the one-time code <b>on the page</b> ")
+	sb.WriteString("(do not send it here).\n\n")
+	if url != "" {
+		sb.WriteString(htmlEscape(url) + "\n\n")
+	}
+	if userCode != "" {
+		sb.WriteString("Code: <code>" + htmlEscape(userCode) + "</code>\n\n")
+	} else {
+		sb.WriteString("The CLI should show a one-time code — type that on the page.\n\n")
+	}
+	sb.WriteString("Send /cancel to abort.")
+	t.in.post(t.chatID, t.topicID, sb.String())
+}
+
 // startLogin runs the login + disclaimer flow for a profile in the background,
 // reporting into the chat it was started from.
 func (in *instance) startLogin(chatID, topicID int64, name string) {
