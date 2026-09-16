@@ -255,7 +255,7 @@ func (r *Runner) Stop(botID int64) bool {
 	return killed
 }
 
-// interruptActive SIGTERMs a running turn. timedOut is General's 30s cap;
+// interruptActive SIGTERMs a running turn. timedOut is General's 60s cap;
 // /stop passes false. The queue is not touched here (Stop drops it; a
 // timeout must not, so the injected follow-up can run).
 func (r *Runner) interruptActive(botID int64, timedOut bool) bool {
@@ -570,12 +570,46 @@ func (r *Runner) execute(b *Bot, t *Turn, input string, triggers []int64) {
 
 	// A turn that asked the owner something leaves the bot waiting; otherwise
 	// it goes back to idle and the loop drains whatever queued meanwhile.
-	if r.hasPendingQuestion(b.ID) {
+	waiting := r.hasPendingQuestion(b.ID)
+	if waiting {
 		setBotStatus(r.db, b.ID, botWaiting)
 	} else {
 		setBotStatus(r.db, b.ID, botIdle)
 	}
+	r.postOwnerSessionStatus(b, class, waiting)
 	r.deliverInbox(b.ID)
+}
+
+// ownerSessionStatus is the one-liner the owner may see for a worker turn.
+// General's own replies still go through progress.finish; workers never dump
+// transcripts into the DM (DESIGN §3.2).
+func ownerSessionStatus(class string, waiting bool) (status string, ok bool) {
+	switch class {
+	case "stopped", chiefTimeoutClass:
+		return "", false
+	case "":
+		if waiting {
+			return "waiting", true
+		}
+		return "done", true
+	default:
+		return "error", true
+	}
+}
+
+func ownerSessionStatusLine(name, status string) string {
+	return fmt.Sprintf("session %s %s", htmlEscape(name), htmlEscape(status))
+}
+
+func (r *Runner) postOwnerSessionStatus(b *Bot, class string, waiting bool) {
+	if r == nil || r.ui == nil || isGeneralBot(b) {
+		return
+	}
+	status, ok := ownerSessionStatus(class, waiting)
+	if !ok {
+		return
+	}
+	_, _ = r.ui.Post(0, ownerSessionStatusLine(b.Name, status)) // safe-ignore: a missed one-liner must not fail the turn
 }
 
 // persistChiefTimeout records the killed General turn and injects the
@@ -587,7 +621,7 @@ func (r *Runner) persistChiefTimeout(b *Bot, t *Turn, input string, end time.Tim
 		"stop_reason": truncate(chiefTimeoutInput(), 500), "session_id": b.SessionID,
 	})
 	if isChiefTimeoutFollowUp(input) {
-		prog.finish("General hit its 30s cap again and could not hand this off. Use /session.")
+		prog.finish("General hit its 60s cap again and could not hand this off. Use /session.")
 		return
 	}
 	prog.discard()

@@ -84,7 +84,7 @@ func renderSystemPrompt(b promptBot, hostname string, _ []otherBot) string {
 			sb.WriteString("  spawn_session             start a backend worker and give it a first prompt\n")
 			sb.WriteString("  tell_session              message an existing session (wakes it)\n")
 		} else {
-			sb.WriteString("  report_to_general         status update to General (the dispatcher). You cannot message other sessions.\n")
+			sb.WriteString("  report_to_general         status update to General (not posted to the owner). You cannot message other sessions.\n")
 			sb.WriteString("  archive_bot               end this session\n")
 		}
 		sb.WriteString("  get_project/set_project   notes about a code base\n")
@@ -111,10 +111,12 @@ Rules:
 - The owner talks ONLY to you. Sessions have no Telegram chat. spawn_session
   starts a backend worker, not a topic. tell_session messages an existing one.
 - When the owner asks for work, spawn_session (or tell_session if one already fits).
-  Do not do the long work yourself. You have a 30 second cap; if it fires you will
+  Do not do the long work yourself. You have a 60 second cap; if it fires you will
   get an error and MUST hand the work to a session. After spawn_session or
   tell_session you can end the turn; ccc starts the session when you finish.
-- Sessions report back to you. Relay what matters, short. You are the bridge.
+- Sessions report back to you in context (inbox), not in this chat. The owner
+  does not see those reports. Relay what matters, short; never paste a worker
+  transcript. You are the bridge.
 - Every message you get carries a <context> block with the memories and pending
   messages that fit; use recall when you need more.
 - Call remember when you learn something durable. Do not remember transient chatter.
@@ -136,7 +138,8 @@ Rules:
 - You have no Telegram chat. The owner talks ONLY to General. Keep replies
   short and concrete; no preamble, no restating the question, no markdown
   headings for one-line answers. Your output is for the transcript and for
-  General; the owner sees what you report_to_general.
+  General. The owner sees at most a one-liner of status (session done /
+  waiting / error); full reports are not posted to the chat.
 - Every message you get carries a <context> block with the memories and pending
   messages that fit; use recall when you need more.
 - Call remember when you learn something durable (a preference, a decision, how
@@ -150,8 +153,8 @@ Rules:
   it. For standing jobs ("every morning/week do X"), set_routine (named,
   timezone-aware). A one-off schedule_wakeup is for "wake me in an hour".
 - You cannot create other sessions or see the roster. Report to General with
-  report_to_general when the owner should hear (finished work, a blocker, a
-  question for the dispatcher). For work expected to take more than about 60 seconds
+  report_to_general when you finish, block, or need the dispatcher. Those
+  reports stay with General; they are not posted to the owner. For work expected to take more than about 60 seconds
   (builds, long installs, waits), call run_background instead of
   blocking this turn with Bash. list_background / get_background /
   cancel_background check or stop a job. When it finishes you are woken with

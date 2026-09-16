@@ -11,9 +11,9 @@ import (
 )
 
 // queueBotMessage is the one path a bot-to-bot message takes: an inbox row
-// plus the 🤝 mirror in both Telegram topics so the owner sees the exchange
-// whether the sender used the Claude MCP tool or `ccc tell` from Grok/agy.
-func queueBotMessage(db *gorm.DB, cfg *Config, from *Bot, toName, body string, wake bool) (*Bot, *InboxMessage, error) {
+// the target reads on its next turn. The body is not posted to Telegram —
+// the owner must not see General↔session prompts or reports (DESIGN §3.2).
+func queueBotMessage(db *gorm.DB, from *Bot, toName, body string, wake bool) (*Bot, *InboxMessage, error) {
 	body = strings.TrimSpace(body)
 	if body == "" {
 		return nil, nil, fmt.Errorf("message text is empty")
@@ -32,21 +32,7 @@ func queueBotMessage(db *gorm.DB, cfg *Config, from *Bot, toName, body string, w
 	if err := db.Create(&msg).Error; err != nil {
 		return nil, nil, fmt.Errorf("could not queue the message: %w", err)
 	}
-	postBotMirror(cfg, from, target, body)
 	return target, &msg, nil
-}
-
-func postBotMirror(cfg *Config, from, to *Bot, body string) {
-	if cfg == nil || cfg.BotToken == "" || from == nil || to == nil {
-		return
-	}
-	html := fmt.Sprintf("🤝 <b>%s</b> → <b>%s</b>: %s",
-		htmlEscape(from.Name), htmlEscape(to.Name), renderTelegramHTML(truncate(body, 1500)))
-	// Owner-facing: one copy in General (the DM) so the dispatcher traffic
-	// is visible.
-	if chat, thread, ok := destForTopic(cfg, 0); ok {
-		_, _ = sendMessageHTMLGetID(cfg, chat, thread, html) // safe-ignore: a failed mirror must not fail the send
-	}
 }
 
 // runTellCommand is `ccc tell [--no-wake] <bot> [text…]` — the Grok/agy
@@ -96,7 +82,7 @@ func runTellCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	to, _, err := queueBotMessage(db, config, from, target, body, wake)
+	to, _, err := queueBotMessage(db, from, target, body, wake)
 	if err != nil {
 		return err
 	}

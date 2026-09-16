@@ -155,7 +155,7 @@ type tellSessionIn struct {
 }
 
 type reportToGeneralIn struct {
-	Text string `json:"text" jsonschema:"status the dispatcher (and the owner) should see"`
+	Text string `json:"text" jsonschema:"status the dispatcher should see; not posted to the owner"`
 }
 
 // ---------------------------------------------------------------------------
@@ -177,7 +177,7 @@ func (s *mcpServer) register(server *mcp.Server) {
 	}, s.forget)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "notify_owner",
-		Description: "Tell the owner something. For workers this lands in General (the owner's DM). Use urgency=urgent only when it is worth an interruption.",
+		Description: "Tell the owner something worth an interruption. Do not dump a session report or transcript. Urgent also sends a direct message.",
 	}, s.notifyOwner)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "ask_owner",
@@ -218,7 +218,7 @@ func (s *mcpServer) registerCrew(server *mcp.Server) {
 	}
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "report_to_general",
-		Description: "Send a status update to General (the dispatcher). Use it when the owner should hear: finished work, a blocker, a question for the dispatcher. You cannot message other sessions.",
+		Description: "Send a status update to General (the dispatcher). Full reports stay with General; they are not posted to the owner. Use it for finished work, a blocker, or a question for the dispatcher. You cannot message other sessions.",
 	}, s.reportToGeneral)
 }
 
@@ -333,7 +333,7 @@ func (s *mcpServer) sendToBot(_ context.Context, _ *mcp.CallToolRequest, in send
 	if err != nil {
 		return toolErr("unknown bot"), nil, nil
 	}
-	if _, _, err := queueBotMessage(s.db, s.config, self, target.Name, body, wake); err != nil {
+	if _, _, err := queueBotMessage(s.db, self, target.Name, body, wake); err != nil {
 		return toolErr("%s", err.Error()), nil, nil
 	}
 	return text("message queued for %s", target.Name), nil, nil
@@ -369,7 +369,7 @@ func (s *mcpServer) spawnSession(_ context.Context, _ *mcp.CallToolRequest, in s
 	if err != nil {
 		return toolErr("unknown bot"), nil, nil
 	}
-	if _, _, err := queueBotMessage(s.db, s.config, self, b.Name, prompt, true); err != nil {
+	if _, _, err := queueBotMessage(s.db, self, b.Name, prompt, true); err != nil {
 		return toolErr("started %s but could not queue the first prompt: %s", b.Name, err.Error()), nil, nil
 	}
 	return text("started session %q; it will run when this turn ends. Reports come back here; tell_session to message it.", b.Name), nil, nil
@@ -394,7 +394,7 @@ func (s *mcpServer) tellSession(_ context.Context, _ *mcp.CallToolRequest, in te
 	if err != nil {
 		return toolErr("unknown bot"), nil, nil
 	}
-	if _, _, err := queueBotMessage(s.db, s.config, self, target.Name, body, true); err != nil {
+	if _, _, err := queueBotMessage(s.db, self, target.Name, body, true); err != nil {
 		return toolErr("%s", err.Error()), nil, nil
 	}
 	return text("queued for %s; it will run when this turn ends", target.Name), nil, nil
@@ -416,7 +416,7 @@ func (s *mcpServer) reportToGeneral(_ context.Context, _ *mcp.CallToolRequest, i
 	if err != nil {
 		return toolErr("unknown bot"), nil, nil
 	}
-	if _, _, err := queueBotMessage(s.db, s.config, self, chief.Name, body, true); err != nil {
+	if _, _, err := queueBotMessage(s.db, self, chief.Name, body, true); err != nil {
 		return toolErr("%s", err.Error()), nil, nil
 	}
 	return text("reported to General; it will run when this turn ends"), nil, nil

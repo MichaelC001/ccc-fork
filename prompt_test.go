@@ -213,8 +213,11 @@ func TestSystemPromptTeachesBackgroundInsteadOfSpawn(t *testing.T) {
 	if strings.Contains(got, "Spawn a bot") || strings.Contains(got, "spawn_bot") || strings.Contains(got, "send_to_bot") {
 		t.Errorf("the system prompt still offers spawning or messaging teammates:\n%s", got)
 	}
-	if strings.Contains(got, "30 second") {
-		t.Error("the 30s cap is General-only; workers must not see it")
+	if strings.Contains(got, "30 second") || strings.Contains(got, "60 second cap") {
+		t.Error("the General turn cap is General-only; workers must not see it")
+	}
+	if strings.Contains(got, "the owner sees what you report_to_general") {
+		t.Error("workers must not be told that reports land in the owner's chat")
 	}
 }
 

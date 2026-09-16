@@ -84,8 +84,8 @@ func TestRecoverAfterRestartReportsInterruptedTurns(t *testing.T) {
 	if !strings.Contains(got.Params.Get("text"), "dev") {
 		t.Errorf("retry ping should name the session: %s", got.Params.Get("text"))
 	}
-	if !strings.Contains(got.Params.Get("text"), "ship the fix") {
-		t.Errorf("retry ping missing the input: %s", got.Params.Get("text"))
+	if strings.Contains(got.Params.Get("text"), "ship the fix") {
+		t.Errorf("retry ping must not dump the turn input: %s", got.Params.Get("text"))
 	}
 }
 

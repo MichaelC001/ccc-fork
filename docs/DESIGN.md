@@ -104,9 +104,12 @@ added to the user's triggering message. Tool call payloads are never dumped
 into the chat; `thinking` is never shown.
 
 Backend workers do not post progress or final answers to Telegram. The owner
-hears from them via `report_to_general`, `notify_owner`, `ask_owner`, idle
-reminders, and job pings — all of which land in General. The phone hub still
-sees every turn.
+does not see General↔session messages (prompts, reports, transcripts). At
+most a one-liner of status lands in the DM (`session <name> done|waiting|error`)
+when a worker turn ends. Full reports stay in General's inbox for the
+dispatcher to read and summarize. `notify_owner`, `ask_owner`, idle
+reminders and job pings still reach the owner. The phone hub still sees
+every turn.
 
 ### 3.3 Post-turn
 
@@ -139,7 +142,7 @@ A retried turn reuses the same session UUID: because profiles share
 
 ### 3.5 General turn timeout
 
-The dispatcher (topic id 0) has a **30 second cap** on each turn. Other
+The dispatcher (topic id 0) has a **60 second cap** on each turn. Other
 sessions do not. When the cap fires, ccc SIGTERMs the engine process
 (without dropping the queue — this is not `/stop`) and enqueues a
 `source=system` turn whose input is an error: this work is too long for
@@ -223,7 +226,7 @@ home (Codex also gets per-turn `exec -c`). Identity is `--bot`/`--turn` or
 | `remember` | `scope` (user\|project\|bot), `key`, `text`, `project_path?` | Upsert a memory. `bot` scope is this session (not a persona). |
 | `recall` | `query`, `scope?`, `limit?` | Full-text (SQLite FTS5) search over memories visible to this session: all `user`, all `project`, own session. Returns key+text+scope. |
 | `forget` | `scope`, `key`, `project_path?` | Delete one memory. |
-| `notify_owner` | `text`, `urgency` (normal\|urgent) | Post in General (the DM), labelled with the session name. |
+| `notify_owner` | `text`, `urgency` (normal\|urgent) | Post in General (the DM), labelled with the session name. Interruptions only — not a report dump. |
 | `ask_owner` | `question`, `options?` (≤4 strings) | Post question with inline buttons (or free text if no options) in General. Returns immediately with `{"status":"asked"}`; the session should end its turn. The answer arrives as the next input (`source=user`, prefixed `Answer to "<question>": …`) via a button tap or a reply-to that question in the DM. Free text in the DM is always General. |
 | `set_name` | `name` | Rename this session: validate (§8 `/name`), update `bots.name`. Rotates the conversation (§14.14). `/name` in the DM only hits General, which refuses. No topic icon. |
 | `watch` | `name`, `command`, `interval_s` (≥60) | Register a deterministic watch (§7). Lasts `watch_ttl_s` (default 4h); re-upserting the name renews it. `unwatch(name)`, `list_watches()`. |
@@ -238,12 +241,12 @@ home (Codex also gets per-turn `exec -c`). Identity is `--bot`/`--turn` or
 | `list_sessions` | — | **General only.** Live workers: name, status, last output. |
 | `spawn_session` | `prompt`, `name?` | **General only.** Create a backend worker (no Telegram topic) and queue the prompt (wakes after this turn). |
 | `tell_session` | `session`, `text` | **General only.** Inbox + wake a live worker. |
-| `report_to_general` | `text` | **Workers only.** Inbox + wake General. |
+| `report_to_general` | `text` | **Workers only.** Inbox + wake General. Not posted to the owner. |
 
 All tools validate the calling bot from the `--bot` flag; tool inputs coming
 from the model are data, never instructions to ccc.
 
-Topic icons are not used. Session liveness is General's 30s cap (§3.5) and
+Topic icons are not used. Session liveness is General's 60s cap (§3.5) and
 the 10-minute idle reminder (§7).
 
 Only General can create other sessions (`spawn_session`). Workers
@@ -474,7 +477,7 @@ replies short for chat, prefer ask_owner over guessing on architecture…)
 ```
 
 General's prompt is a dispatcher variant: the owner's DM, `spawn_session` /
-`tell_session` / `list_sessions`, no `set_name` / `archive_bot`, and the 30s
+`tell_session` / `list_sessions`, no `set_name` / `archive_bot`, and the 60s
 cap (§3.5). It is still byte-stable (no live roster in the prompt).
 
 **Envelope** (prepended to every input, because system-prompt changes are
@@ -679,7 +682,7 @@ Telegram forum topic to keep in sync.
 
 **14.16 Topic icons are gone.** They were a status indicator on the old
 forum topic (and a large, order-unstable blob in the system prompt).
-General's 30s cap and the 10-minute idle reminder in General replace that.
+General's 60s cap and the 10-minute idle reminder in General replace that.
 
 **14.17 Sessions have no role onboarding.** A session is a backend worker.
 General is the dispatcher (not a launcher). `/session <prompt>` (and
@@ -842,9 +845,11 @@ forum-group model (one topic per session) was the original v3 UX and is
 gone. The owner talks only to General in the bot's 1:1 DM. Group messages
 are ignored. `spawn_session` and `/session` create a backend worker
 (`TopicID = -id`). Worker progress and final answers stay off Telegram;
-the owner hears via `report_to_general`, `notify_owner`, `ask_owner`, idle
-reminders and job pings, all of which land in the DM. There is no
-`group_id`, `/setgroup`, or forum topic API. `isGeneralBot` stays
+the owner does not see General↔session prompts or reports. At most a
+one-liner of status (`session <name> done|waiting|error`) lands in the DM
+when a worker turn ends. Full reports stay in General's inbox.
+`notify_owner`, `ask_owner`, idle reminders and job pings still reach the
+owner. There is no `group_id`, `/setgroup`, or forum topic API. `isGeneralBot` stays
 `TopicID == 0`. The `topic_id` column is the session key, not a Telegram
 forum id; leftover positive ids from old installs identify those rows and
 have no Telegram destination.

@@ -15,10 +15,11 @@ Phone client (MIT, public): [ccc-app](https://github.com/kidandcat/ccc-app) — 
 The bot's **1:1 DM is General**, the dispatcher: you talk to it, it sees
 live sessions, and it can start a backend worker (`spawn_session`) or message
 one (`tell_session`). Sessions live in the backend — no Telegram topic. It
-has a 30s cap — longer work must go to a session. Idle sessions waiting on
+has a 60s cap — longer work must go to a session. Idle sessions waiting on
 you get a short reminder in General every 10 minutes. `/session <prompt>`
 still starts a worker without going through General. Sessions report only
-to General (`report_to_general`). There is no role, no `/role`, no «what
+to General (`report_to_general`); those reports are not posted to the DM
+(at most a one-liner of status). There is no role, no `/role`, no «what
 should I be?» interview.
 
 Under the hood ccc drives a coding CLI as a **stateless runner**. The default
@@ -47,7 +48,7 @@ the Telegram UX.
 | | |
 |---|---|
 | **Instance** | One `ccc listen` process on one machine, bound to one Telegram bot token. The owner's DM is General. |
-| **Session** | A backend worker. A name, a working directory, an engine and a conversation. The owner never writes into a session chat; reports come to General. |
+| **Session** | A backend worker. A name, a working directory, an engine and a conversation. The owner never writes into a session chat; reports come to General (not dumped into the DM). |
 | **Turn** | One engine process (`claude -p`, `grok --single`, or `agy --print`): one input, one answer. One turn per session at a time; messages that arrive meanwhile are folded into the next turn. |
 | **Engine** | Which CLI an **account** runs: `claude`, `grok` / `grok-build`, or `antigravity` / `agy`. Set when you add the account (`/account add <identity> <engine>`). A session's turns pick a healthy account from that engine's pool. `/engine` is a secondary way to assign a session onto another pool. |
 | **Account** | One login for one engine. Claude = `CLAUDE_CONFIG_DIR`. Grok = isolated `GROK_HOME`. Antigravity = isolated `HOME` (`~/.gemini`). One ccc process can hold several Claude emails + several Grok logins + several agy logins at once. Failover stays inside the same engine. |
@@ -223,7 +224,7 @@ back here. There is no worker topic to talk in.
 
 | Where | What happens |
 |---|---|
-| Text in the **DM** (General) | A turn of the dispatcher (30s cap). It sees live sessions and can spawn or tell them. Idle workers waiting on you get a reminder here every 10 minutes. |
+| Text in the **DM** (General) | A turn of the dispatcher (60s cap). It sees live sessions and can spawn or tell them. Idle workers waiting on you get a reminder here every 10 minutes. |
 | `/session <prompt>` | Starts a backend worker named after the first line, first turn = that prompt. |
 | A photo or document | Saved into General's `inbox/`, with the path passed in the message. |
 | A voice note | Transcribed if the `voice` build is installed, else the file path is passed. |
@@ -232,7 +233,8 @@ back here. There is no worker topic to talk in.
 While a General turn runs, one progress message in the DM is edited in place
 (no Telegram notification). The answer is posted when the turn finishes — that
 is the ping you get — and your message gets a ✅. Workers report back through
-General (`report_to_general`).
+General (`report_to_general`); the DM gets at most a one-liner of status,
+not the report.
 
 ### Commands
 
@@ -277,8 +279,8 @@ use `ccc routine` there). Grok calls them through `search_tool` / `use_tool`.
 
 - `remember` / `recall` / `forget` — durable memory in `user` and `project`
   (plus a leftover per-session scope).
-- `notify_owner` / `ask_owner` — reach you; `ask_owner` renders inline buttons
-  and the turn ends until you answer.
+- `notify_owner` / `ask_owner` — reach you (interruptions, not report dumps);
+  `ask_owner` renders inline buttons and the turn ends until you answer.
 - `watch` / `unwatch` / `list_watches` — a command re-run on an interval that
   wakes the session only when its output changes. Lasts `watch_ttl_s` (default 4 h),
   then it is cancelled and the session is woken to re-set it. Standing jobs are
@@ -291,7 +293,8 @@ use `ccc routine` there). Grok calls them through `search_tool` / `use_tool`.
   — start a long shell command without blocking the turn (builds, installs,
   waits). The session is woken with the result when it finishes.
 - **General only:** `list_sessions`, `spawn_session`, `tell_session`.
-- **Workers only:** `report_to_general` — the only way a session talks back.
+- **Workers only:** `report_to_general` — the only way a session talks back
+  (inbox for General; not posted to the DM).
 - `archive_bot` — end this session.
 - `get_project` / `set_project` — shared notes about a code base.
 - `set_name` — rename this session.

@@ -390,7 +390,7 @@ func TestReplyToQuestionCountsAsAnswer(t *testing.T) {
 	}
 }
 
-func TestSendToBotMirrorsIntoGeneral(t *testing.T) {
+func TestSendToBotDoesNotDumpIntoTelegram(t *testing.T) {
 	in, _, api := testInstance(t)
 	a, err := in.createBot("alpha", "")
 	if err != nil {
@@ -417,23 +417,18 @@ func TestSendToBotMirrorsIntoGeneral(t *testing.T) {
 	if len(queued) != 1 || queued[0].FromBotID == nil || *queued[0].FromBotID != a.ID {
 		t.Fatalf("inbox row not written correctly: %+v", queued)
 	}
-
-	n := 0
-	for _, c := range api.since("sendMessage") {
-		if !strings.Contains(c.Params.Get("text"), "please review PR 12") {
-			continue
-		}
-		n++
-		if c.Params.Get("message_thread_id") != "" {
-			t.Errorf("backend mirror should land in General, got thread %q", c.Params.Get("message_thread_id"))
-		}
+	if queued[0].Text != "please review PR 12" {
+		t.Fatalf("full body must stay in the inbox: %+v", queued)
 	}
-	if n != 1 {
-		t.Errorf("want 1 General mirror, got %d", n)
+
+	for _, c := range api.since("sendMessage") {
+		if strings.Contains(c.Params.Get("text"), "please review PR 12") || strings.Contains(c.Params.Get("text"), "🤝") {
+			t.Errorf("session traffic must not be posted to Telegram: %q", c.Params.Get("text"))
+		}
 	}
 }
 
-func TestQueueBotMessageMirrorsIntoGeneral(t *testing.T) {
+func TestQueueBotMessageDoesNotDumpIntoTelegram(t *testing.T) {
 	in, _, api := testInstance(t)
 	a, err := in.createBot("alpha", "")
 	if err != nil {
@@ -443,25 +438,14 @@ func TestQueueBotMessageMirrorsIntoGeneral(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, err := queueBotMessage(in.db, in.cfg, a, "beta", "please review PR 12", true); err != nil {
+	if _, _, err := queueBotMessage(in.db, a, "beta", "please review PR 12", true); err != nil {
 		t.Fatalf("queueBotMessage: %v", err)
 	}
 
-	n := 0
 	for _, c := range api.since("sendMessage") {
-		if !strings.Contains(c.Params.Get("text"), "please review PR 12") {
-			continue
+		if strings.Contains(c.Params.Get("text"), "please review PR 12") || strings.Contains(c.Params.Get("text"), "🤝") {
+			t.Errorf("session traffic must not be posted to Telegram: %q", c.Params.Get("text"))
 		}
-		n++
-		if !strings.Contains(c.Params.Get("text"), "🤝") {
-			t.Errorf("mirror is missing the handshake mark: %q", c.Params.Get("text"))
-		}
-		if c.Params.Get("message_thread_id") != "" {
-			t.Errorf("backend mirror should land in General, got thread %q", c.Params.Get("message_thread_id"))
-		}
-	}
-	if n != 1 {
-		t.Errorf("want 1 General mirror, got %d", n)
 	}
 }
 
@@ -492,14 +476,10 @@ func TestTellCommandUsesCCCBotID(t *testing.T) {
 	if len(queued) != 1 || queued[0].Text != "handoff the chrome brief" || !queued[0].Wake {
 		t.Fatalf("inbox row: %+v", queued)
 	}
-	n := 0
 	for _, c := range api.since("sendMessage") {
-		if strings.Contains(c.Params.Get("text"), "handoff the chrome brief") {
-			n++
+		if strings.Contains(c.Params.Get("text"), "handoff the chrome brief") || strings.Contains(c.Params.Get("text"), "🤝") {
+			t.Errorf("ccc tell must not dump the body into Telegram: %q", c.Params.Get("text"))
 		}
-	}
-	if n != 1 {
-		t.Errorf("expected 🤝 in General, got %d posts", n)
 	}
 }
 

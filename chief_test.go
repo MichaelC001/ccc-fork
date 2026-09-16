@@ -51,10 +51,15 @@ func TestSpawnSessionIsChiefOnly(t *testing.T) {
 	if len(queued) != 1 || queued[0].Text != "fix the deploy" || !queued[0].Wake {
 		t.Fatalf("first prompt not queued: %+v", queued)
 	}
+	for _, c := range api.since("sendMessage") {
+		if strings.Contains(c.Params.Get("text"), "fix the deploy") || strings.Contains(c.Params.Get("text"), "🤝") {
+			t.Errorf("spawn_session must not dump the prompt into Telegram: %q", c.Params.Get("text"))
+		}
+	}
 }
 
 func TestTellSessionIsChiefOnly(t *testing.T) {
-	in, _, _ := testInstance(t)
+	in, _, api := testInstance(t)
 	alpha, _ := in.createBot("alpha", "")
 	beta, _ := in.createBot("beta", "")
 	s := &mcpServer{db: in.db, config: in.cfg, botID: alpha.ID}
@@ -83,10 +88,15 @@ func TestTellSessionIsChiefOnly(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("chief tell failed: %+v", res.Content)
 	}
+	for _, c := range api.since("sendMessage") {
+		if strings.Contains(c.Params.Get("text"), "ship it") || strings.Contains(c.Params.Get("text"), "🤝") {
+			t.Errorf("tell_session must not dump the message into Telegram: %q", c.Params.Get("text"))
+		}
+	}
 }
 
 func TestReportToGeneralIsWorkerOnly(t *testing.T) {
-	in, _, _ := testInstance(t)
+	in, _, api := testInstance(t)
 	chief, err := in.ensureGeneralBot()
 	if err != nil {
 		t.Fatal(err)
@@ -116,6 +126,88 @@ func TestReportToGeneralIsWorkerOnly(t *testing.T) {
 	in.db.Where("to_bot_id = ?", chief.ID).Find(&queued)
 	if len(queued) != 1 || queued[0].Text != "build green" {
 		t.Fatalf("report inbox: %+v", queued)
+	}
+	for _, c := range api.since("sendMessage") {
+		if strings.Contains(c.Params.Get("text"), "build green") || strings.Contains(c.Params.Get("text"), "🤝") {
+			t.Errorf("report_to_general must not dump the report into Telegram: %q", c.Params.Get("text"))
+		}
+	}
+}
+
+func TestNotifyOwnerStillPostsToTelegram(t *testing.T) {
+	in, _, api := testInstance(t)
+	w, err := in.createBot("deployer", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &mcpServer{db: in.db, config: in.cfg, botID: w.ID}
+	res, _, err := s.notifyOwner(t.Context(), nil, notifyOwnerIn{Text: "deploy is down"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Fatalf("notify_owner failed: %+v", res.Content)
+	}
+	found := false
+	for _, c := range api.since("sendMessage") {
+		if strings.Contains(c.Params.Get("text"), "deploy is down") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("notify_owner must still reach the owner")
+	}
+}
+
+func TestOwnerSessionStatusOneLiner(t *testing.T) {
+	if got, ok := ownerSessionStatus("", false); !ok || got != "done" {
+		t.Errorf("idle success = %q ok=%v, want done", got, ok)
+	}
+	if got, ok := ownerSessionStatus("", true); !ok || got != "waiting" {
+		t.Errorf("pending question = %q ok=%v, want waiting", got, ok)
+	}
+	if got, ok := ownerSessionStatus(errFatal, false); !ok || got != "error" {
+		t.Errorf("failure = %q ok=%v, want error", got, ok)
+	}
+	if _, ok := ownerSessionStatus("stopped", false); ok {
+		t.Error("/stop should not ping the owner")
+	}
+	if _, ok := ownerSessionStatus(chiefTimeoutClass, false); ok {
+		t.Error("General timeout should not ping as a session status")
+	}
+	if got := ownerSessionStatusLine("deployer", "done"); got != "session deployer done" {
+		t.Errorf("line = %q", got)
+	}
+}
+
+func TestPostOwnerSessionStatusSkipsGeneral(t *testing.T) {
+	in, _, _ := testInstance(t)
+	ui := &fakeUI{}
+	r := newRunner(in.db, in.cfg, ui)
+	chief, err := in.ensureGeneralBot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.postOwnerSessionStatus(chief, "", false)
+	if len(ui.posts) != 0 {
+		t.Errorf("General must not post a session status one-liner, got %v", ui.posts)
+	}
+
+	w, err := in.createBot("deployer", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.postOwnerSessionStatus(w, "", false)
+	if len(ui.posts) != 1 || ui.posts[0] != "session deployer done" {
+		t.Errorf("worker done = %v, want one-liner", ui.posts)
+	}
+	r.postOwnerSessionStatus(w, "", true)
+	if ui.posts[len(ui.posts)-1] != "session deployer waiting" {
+		t.Errorf("worker waiting = %v", ui.posts)
+	}
+	r.postOwnerSessionStatus(w, errFatal, false)
+	if ui.posts[len(ui.posts)-1] != "session deployer error" {
+		t.Errorf("worker error = %v", ui.posts)
 	}
 }
 
@@ -188,8 +280,11 @@ func TestChiefPromptIsByteStable(t *testing.T) {
 	if !strings.Contains(first, "spawn_session") || !strings.Contains(first, "dispatcher") {
 		t.Errorf("chief prompt missing dispatcher tools:\n%s", first)
 	}
-	if !strings.Contains(first, "30 second") {
-		t.Errorf("chief prompt must mention the 30s cap:\n%s", first)
+	if !strings.Contains(first, "60 second") {
+		t.Errorf("chief prompt must mention the 60s cap:\n%s", first)
+	}
+	if !strings.Contains(first, "does not see those reports") {
+		t.Errorf("chief prompt must not dump session reports to the owner:\n%s", first)
 	}
 }
 
@@ -231,9 +326,9 @@ func TestDestForTopic(t *testing.T) {
 	}
 }
 
-func TestChiefTimeoutIsThirtySecondsForGeneralOnly(t *testing.T) {
-	if d := chiefTimeoutFor(&Bot{TopicID: 0}); d != 30*time.Second {
-		t.Errorf("General timeout = %s, want 30s", d)
+func TestChiefTimeoutIsSixtySecondsForGeneralOnly(t *testing.T) {
+	if d := chiefTimeoutFor(&Bot{TopicID: 0}); d != 60*time.Second {
+		t.Errorf("General timeout = %s, want 60s", d)
 	}
 	if d := chiefTimeoutFor(&Bot{TopicID: 1}); d != 0 {
 		t.Errorf("worker timeout = %s, want none", d)

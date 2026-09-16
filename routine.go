@@ -127,8 +127,7 @@ func cancelRoutine(db *gorm.DB, botID int64, name string) (bool, error) {
 }
 
 func (s *scheduler) postRoutineFired(b *Bot, sc Schedule) {
-	html := fmt.Sprintf("⏰ <b>%s</b> routine <code>%s</code>\n%s",
-		htmlEscape(b.Name), htmlEscape(sc.Name), renderTelegramHTML(truncate(sc.Note, 1500)))
+	html := fmt.Sprintf("⏰ routine <code>%s</code>", htmlEscape(sc.Name))
 	s.in.notifyBot(b, html)
 }
 

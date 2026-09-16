@@ -38,8 +38,8 @@ func markBackendTopic(db *gorm.DB, b *Bot) error {
 }
 
 // chiefTurnTimeout caps one General turn. Workers have no such cap. Tests may
-// shorten it so they do not wait 30s.
-var chiefTurnTimeout = 30 * time.Second
+// shorten it so they do not wait 60s.
+var chiefTurnTimeout = 60 * time.Second
 
 const (
 	chiefTimeoutClass  = "chief_timeout"
@@ -53,10 +53,10 @@ func chiefTimeoutFor(b *Bot) time.Duration {
 	return chiefTurnTimeout
 }
 
-// chiefTimeoutInput is injected as the next General turn when the 30s cap
+// chiefTimeoutInput is injected as the next General turn when the 60s cap
 // fires. It is an error the dispatcher must act on, not a silent kill.
 func chiefTimeoutInput() string {
-	return "Error: this work is too long for General (30s cap). " +
+	return "Error: this work is too long for General (60s cap). " +
 		"You MUST pass it to a session with spawn_session (new) or tell_session (existing). " +
 		"Do not continue the work yourself."
 }

@@ -331,11 +331,9 @@ func requeueInterruptedTurn(db *gorm.DB, id int64) error {
 }
 
 func renderRetriedTurn(t *Turn) string {
-	msg := "▶️ Retrying turn interrupted by restart."
-	if summary := strings.TrimSpace(t.Input); summary != "" {
-		msg += "\n<code>" + htmlEscape(truncate(summary, 400)) + "</code>"
-	}
-	return msg
+	// One-liner only: do not dump the turn input (often a General→session prompt).
+	_ = t
+	return "▶️ Retrying turn interrupted by restart."
 }
 
 // linkSharedProjects makes every profile resolve transcripts from the same
