@@ -264,7 +264,7 @@ func allModels() []any {
 	return []any{
 		&Bot{}, &Turn{}, &InboxMessage{}, &Memory{}, &MemoryArchive{}, &Project{},
 		&Watch{}, &Schedule{}, &Question{}, &Access{}, &Setting{}, &BackgroundJob{},
-		&HubDevice{}, &HubPairCode{},
+		&HubDevice{}, &HubPairCode{}, &HubFile{},
 	}
 }
 
@@ -400,6 +400,21 @@ type HubDevice struct {
 	Name     string
 	PairedAt time.Time
 	LastSeen *time.Time
+}
+
+// HubFile is a file the phone sent or that send_file offered to paired phones.
+// The bytes live on disk at Path; the hub only forwards chunks.
+type HubFile struct {
+	ID        int64 `gorm:"primaryKey"`
+	BotID     int64 `gorm:"index;not null"`
+	TurnID    int64 `gorm:"index"`
+	Name      string
+	MIME      string
+	Size      int64
+	Path      string
+	Direction string `gorm:"index"` // in (phone→machine) | out (machine→phone)
+	PushedAt  *time.Time
+	CreatedAt time.Time
 }
 
 func liveBots(db *gorm.DB) ([]Bot, error) {

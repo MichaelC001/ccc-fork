@@ -93,14 +93,32 @@ type hubBotInfo struct {
 // websocket is 1 MiB; a 512 KiB JPEG plus JSON/NaCl/base64 still fits.
 const hubImageMaxBytes = 512 * 1024
 
+// Files larger than the websocket frame go as 96 KiB chunks. Telegram's bot
+// upload cap is 50 MB; we use the same ceiling so send_file and the phone match.
+const (
+	hubFileMaxBytes   = 50 * 1024 * 1024
+	hubFileInlineMax  = 400 * 1024
+	hubChunkBytes     = 96 * 1024
+	hubFileDir        = "hub_files"
+	hubFileDirUploads = "hub_uploads"
+)
+
+type hubFileInfo struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+	MIME string `json:"mime"`
+	Size int64  `json:"size"`
+}
+
 type hubTurnInfo struct {
-	ID       int64  `json:"id"`
-	Source   string `json:"source"`
-	Input    string `json:"input"`
-	Output   string `json:"output"`
-	Status   string `json:"status"`
-	At       string `json:"at"`
-	Progress string `json:"progress,omitempty"`
+	ID       int64         `json:"id"`
+	Source   string        `json:"source"`
+	Input    string        `json:"input"`
+	Output   string        `json:"output"`
+	Status   string        `json:"status"`
+	At       string        `json:"at"`
+	Progress string        `json:"progress,omitempty"`
+	Files    []hubFileInfo `json:"files,omitempty"`
 }
 
 type hubHello struct {

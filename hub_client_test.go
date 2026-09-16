@@ -64,6 +64,159 @@ func TestHubSendImageLandsInInbox(t *testing.T) {
 	}
 }
 
+func TestHubSendFileLandsInInbox(t *testing.T) {
+	h, in, runner, _ := testHub(t)
+	b, err := in.createBot("chat", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("hello-apk-bytes")
+	params, _ := json.Marshal(map[string]any{
+		"bot_id": b.ID,
+		"text":   "install this",
+		"file": map[string]any{
+			"mime": "application/vnd.android.package-archive",
+			"name": "ccc.apk",
+			"data": base64.StdEncoding.EncodeToString(payload),
+		},
+	})
+	res := h.dispatch(hubRPC{Kind: "req", ID: "1", Method: "send", Params: params})
+	if !res.OK {
+		t.Fatalf("send: %s", res.Error)
+	}
+	last, ok := runner.last()
+	if !ok {
+		t.Fatal("nothing enqueued")
+	}
+	if !strings.Contains(last.Text, "ccc.apk") || !strings.Contains(last.Text, "install this") {
+		t.Errorf("enqueue text %q", last.Text)
+	}
+	got, err := os.ReadFile(filepath.Join(b.Cwd, "inbox", "ccc.apk"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(payload) {
+		t.Error("saved file does not match")
+	}
+	var files []HubFile
+	in.db.Find(&files)
+	if len(files) != 1 || files[0].Name != "ccc.apk" || files[0].Direction != "in" {
+		t.Fatalf("hub file row = %+v", files)
+	}
+	hist := h.dispatch(hubRPC{Kind: "req", ID: "2", Method: "history", Params: mustJSON(map[string]any{"bot_id": b.ID})})
+	var turns []hubTurnInfo
+	if err := json.Unmarshal(hist.Body, &turns); err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 1 || len(turns[0].Files) != 1 || turns[0].Files[0].Name != "ccc.apk" {
+		t.Fatalf("history files = %+v", turns)
+	}
+}
+
+func TestHubChunkedUploadAndDownload(t *testing.T) {
+	h, in, runner, _ := testHub(t)
+	b, _ := in.createBot("chat", "")
+	payload := make([]byte, hubChunkBytes+7)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+	begin := h.dispatch(hubRPC{Kind: "req", ID: "1", Method: "put_begin", Params: mustJSON(map[string]any{
+		"bot_id": b.ID, "name": "blob.bin", "size": len(payload),
+	})})
+	if !begin.OK {
+		t.Fatalf("begin: %s", begin.Error)
+	}
+	var started struct {
+		UploadID string `json:"upload_id"`
+		N        int    `json:"n"`
+	}
+	json.Unmarshal(begin.Body, &started)
+	if started.N != 2 || started.UploadID == "" {
+		t.Fatalf("begin body %+v", started)
+	}
+	for i := 0; i < started.N; i++ {
+		start := i * hubChunkBytes
+		end := start + hubChunkBytes
+		if end > len(payload) {
+			end = len(payload)
+		}
+		res := h.dispatch(hubRPC{Kind: "req", ID: "c", Method: "put_chunk", Params: mustJSON(map[string]any{
+			"upload_id": started.UploadID,
+			"i":         i,
+			"data":      base64.StdEncoding.EncodeToString(payload[start:end]),
+		})})
+		if !res.OK {
+			t.Fatalf("chunk %d: %s", i, res.Error)
+		}
+	}
+	commit := h.dispatch(hubRPC{Kind: "req", ID: "2", Method: "put_commit", Params: mustJSON(map[string]any{
+		"upload_id": started.UploadID, "text": "here",
+	})})
+	if !commit.OK {
+		t.Fatalf("commit: %s", commit.Error)
+	}
+	if _, ok := runner.last(); !ok {
+		t.Fatal("commit must enqueue")
+	}
+	got, err := os.ReadFile(filepath.Join(b.Cwd, "inbox", "blob.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(payload) {
+		t.Fatal("roundtrip mismatch")
+	}
+	var row HubFile
+	if err := in.db.Where("name = ?", "blob.bin").First(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	var rebuilt []byte
+	n := chunkCount(row.Size)
+	for i := 0; i < n; i++ {
+		res := h.dispatch(hubRPC{Kind: "req", ID: "g", Method: "get_chunk", Params: mustJSON(map[string]any{
+			"file_id": row.ID, "i": i,
+		})})
+		if !res.OK {
+			t.Fatalf("get %d: %s", i, res.Error)
+		}
+		var chunk struct {
+			Data string `json:"data"`
+		}
+		json.Unmarshal(res.Body, &chunk)
+		part, err := base64.StdEncoding.DecodeString(chunk.Data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rebuilt = append(rebuilt, part...)
+	}
+	if string(rebuilt) != string(payload) {
+		t.Fatal("download mismatch")
+	}
+}
+
+func TestRecordOutgoingFileIsOfferedToPhones(t *testing.T) {
+	h, in, _, _ := testHub(t)
+	b, _ := in.createBot("chat", "")
+	path := filepath.Join(t.TempDir(), "out.apk")
+	if err := os.WriteFile(path, []byte("apk"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := recordOutgoingFile(in.db, b.ID, 0, path, "out.apk", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.flushOutgoingFiles()
+	var fresh HubFile
+	in.db.First(&fresh, f.ID)
+	if fresh.PushedAt == nil {
+		t.Fatal("flush must mark the file pushed")
+	}
+}
+
+func mustJSON(v any) json.RawMessage {
+	b, _ := json.Marshal(v)
+	return b
+}
+
 func TestHubSendImageTooLarge(t *testing.T) {
 	h, in, runner, _ := testHub(t)
 	b, _ := in.createBot("chat", "")

@@ -33,6 +33,9 @@ type hubClient struct {
 
 	progMu sync.Mutex
 	prog   map[int64]string // live progress line per bot, for phones that reopen a chat
+
+	upMu    sync.Mutex
+	uploads map[string]*hubUpload
 }
 
 func instanceDisplayName(cfg *Config) string {
@@ -71,6 +74,7 @@ func startHubClient(in *instance) *hubClient {
 		}
 	}
 	go hc.loop()
+	go hc.fileLoop()
 	listenLog("hub: identity %s via %s", id.ID()[:12], hc.url)
 	return hc
 }
@@ -367,6 +371,14 @@ func (h *hubClient) dispatch(rpc hubRPC) hubRPC {
 		h.rpcHistory(rpc.Params, &out)
 	case "send":
 		h.rpcSend(rpc.Params, &out)
+	case "put_begin":
+		h.rpcPutBegin(rpc.Params, &out)
+	case "put_chunk":
+		h.rpcPutChunk(rpc.Params, &out)
+	case "put_commit":
+		h.rpcPutCommit(rpc.Params, &out)
+	case "get_chunk":
+		h.rpcGetChunk(rpc.Params, &out)
 	case "archive":
 		h.rpcArchive(rpc.Params, &out)
 	case "unarchive":
@@ -429,12 +441,18 @@ func (h *hubClient) rpcHistory(params json.RawMessage, out *hubRPC) {
 	h.in.db.Where("bot_id = ?", p.BotID).Order("id DESC").Limit(p.Limit).Find(&turns)
 	list := make([]hubTurnInfo, 0, len(turns))
 	live := h.progressOf(p.BotID)
+	ids := make([]int64, 0, len(turns))
+	for i := range turns {
+		ids = append(ids, turns[i].ID)
+	}
+	files := h.filesForTurns(p.BotID, ids)
 	for i := len(turns) - 1; i >= 0; i-- {
 		t := turns[i]
 		list = append(list, hubTurnInfo{
 			ID: t.ID, Source: t.Source, Input: t.Input, Output: t.Output,
 			Status: t.Status, At: t.CreatedAt.UTC().Format(time.RFC3339),
 			Progress: liveProgress(t.Status, live),
+			Files:    files[t.ID],
 		})
 	}
 	out.Body, _ = json.Marshal(list)
@@ -449,12 +467,38 @@ func (h *hubClient) rpcSend(params json.RawMessage, out *hubRPC) {
 			Name string `json:"name"`
 			Data string `json:"data"`
 		} `json:"image"`
+		File *struct {
+			MIME string `json:"mime"`
+			Name string `json:"name"`
+			Data string `json:"data"`
+		} `json:"file"`
 	}
 	_ = json.Unmarshal(params, &p)
 	p.Text = strings.TrimSpace(p.Text)
 	b, err := botByID(h.in.db, p.BotID)
 	if err != nil || b.ArchivedAt != nil {
 		out.OK, out.Error = false, "unknown bot"
+		return
+	}
+	if p.File != nil && strings.TrimSpace(p.File.Data) != "" {
+		data, err := decodeHubBytes(p.File.Data)
+		if err != nil || len(data) == 0 {
+			out.OK, out.Error = false, "bad file"
+			return
+		}
+		if len(data) > hubFileInlineMax {
+			out.OK, out.Error = false, "file too large for inline send"
+			return
+		}
+		name := p.File.Name
+		if strings.TrimSpace(name) == "" {
+			name = "file"
+		}
+		if err := h.in.ingestOwnerBytes(b, data, name, p.Text); err != nil {
+			out.OK, out.Error = false, err.Error()
+			return
+		}
+		out.Body, _ = json.Marshal(map[string]any{"queued": true, "bot": b.Name, "file": true})
 		return
 	}
 	if p.Image != nil && strings.TrimSpace(p.Image.Data) != "" {

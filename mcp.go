@@ -172,7 +172,7 @@ func (s *mcpServer) register(server *mcp.Server) {
 	}, s.setName)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "send_file",
-		Description: "Send a file from this machine into your Telegram topic (max 50 MB).",
+		Description: "Send a file from this machine to the owner: Telegram topic and paired phones (max 50 MB).",
 	}, s.sendFile)
 	s.registerAutomation(server)
 }
@@ -427,17 +427,28 @@ func (s *mcpServer) sendFile(_ context.Context, _ *mcp.CallToolRequest, in sendF
 		return toolErr("%s is a directory", abs), nil, nil
 	}
 	if info.Size() > sendFileMaxBytes {
-		return toolErr("%s is %d bytes, over the 50 MB Telegram limit", abs, info.Size()), nil, nil
+		return toolErr("%s is %d bytes, over the 50 MB limit", abs, info.Size()), nil, nil
 	}
 	b, err := s.bot()
 	if err != nil {
 		return toolErr("unknown bot"), nil, nil
 	}
-	if s.config.BotToken == "" || s.config.GroupID == 0 {
-		return text("(no Telegram configured; %s not sent)", abs), nil, nil
+	stored := abs
+	if dst, copyErr := copyToHubFiles(s.config, abs); copyErr == nil {
+		stored = dst
 	}
-	if err := sendFile(s.config, s.config.GroupID, b.TopicID, abs, in.Caption); err != nil {
-		return toolErr("send failed: %v", err), nil, nil
+	if _, err := recordOutgoingFile(s.db, b.ID, s.turnID, stored, filepath.Base(abs), info.Size()); err != nil {
+		hookLog("hub file row: %v", err)
+	}
+	var tgErr error
+	if s.config.BotToken != "" && s.config.GroupID != 0 {
+		tgErr = sendFile(s.config, s.config.GroupID, b.TopicID, abs, in.Caption)
+	}
+	if tgErr != nil {
+		return toolErr("offered to phones; Telegram send failed: %v", tgErr), nil, nil
+	}
+	if s.config.BotToken == "" || s.config.GroupID == 0 {
+		return text("offered %s to paired phones (no Telegram configured)", filepath.Base(abs)), nil, nil
 	}
 	return text("sent %s", filepath.Base(abs)), nil, nil
 }

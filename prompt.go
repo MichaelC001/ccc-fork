@@ -71,7 +71,7 @@ func renderSystemPrompt(b promptBot, hostname string, _ []otherBot, iconEmoji []
 		sb.WriteString("  remember/recall/forget    persistent memory (scopes: user, project, session)\n")
 		sb.WriteString("  notify_owner/ask_owner    reach the owner in Telegram\n")
 		sb.WriteString("  set_name                  rename this session and set its topic icon\n")
-		sb.WriteString("  send_file                 send a file into this Telegram topic\n")
+		sb.WriteString("  send_file                 send a file into this Telegram topic and to paired phones\n")
 		sb.WriteString("  watch/unwatch/list_watches  re-run a command and wake this session only when its output changes\n")
 		sb.WriteString("  schedule_wakeup/cancel_schedule  one-off (or unnamed cron) wakeup\n")
 		sb.WriteString("  set_routine/list_routines/cancel_routine  named recurring work, timezone-aware, ⏰ in this topic\n")

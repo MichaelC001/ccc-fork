@@ -756,11 +756,34 @@ func (in *instance) ingestOwnerBytes(b *Bot, data []byte, filename, caption stri
 	}
 	caption = strings.TrimSpace(caption)
 	if caption == "" {
-		caption = "The owner sent an image."
+		if strings.HasPrefix(mimeForName(name), "image/") {
+			caption = "The owner sent an image."
+		} else {
+			caption = "The owner sent a file."
+		}
 	}
-	_, err := in.runner.Enqueue(b.ID, sourceUser, fmt.Sprintf("%s It is saved at %s", caption, path), 0)
-	return err
+	turn, err := in.runner.Enqueue(b.ID, sourceUser, fmt.Sprintf("%s It is saved at %s", caption, path), 0)
+	if err != nil {
+		return err
+	}
+	turnID := int64(0)
+	if turn != nil {
+		turnID = turn.ID
+	}
+	_ = in.db.Create(&HubFile{
+		BotID:     b.ID,
+		TurnID:    turnID,
+		Name:      name,
+		MIME:      mimeForName(name),
+		Size:      int64(len(data)),
+		Path:      path,
+		Direction: "in",
+		PushedAt:  ptrTime(time.Now()),
+	}).Error
+	return nil
 }
+
+func ptrTime(t time.Time) *time.Time { return &t }
 
 // sanitizeFileName strips path separators from a Telegram-provided file name:
 // the name comes from the world, and it is used to build a path.
