@@ -13,7 +13,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"unicode"
 
 	"gorm.io/gorm"
 )
@@ -379,7 +378,7 @@ func linkSharedProjects(cfg *Config) {
 
 func setBotCommandsV3(botToken string) {
 	commands := []map[string]string{
-		{"command": "name", "description": "Show or set this session's name: /name <name> [emoji]"},
+		{"command": "name", "description": "Show or set this session's name: /name <name>"},
 		{"command": "new", "description": "Start a fresh conversation (memory kept)"},
 		{"command": "stop", "description": "Stop the running turn and drop the queue"},
 		{"command": "cwd", "description": "Show or set this session's working directory"},
@@ -1021,12 +1020,11 @@ func (in *instance) handleMemoryRestore(msg *TelegramMessage, arg string) {
 		n, htmlEscape(label), id))
 }
 
-// handleNameCommand implements `/name [<name>] [emoji]` (DESIGN §8): show or
-// change the session name. The name is the topic title and part of the system
-// prompt, so setting it renames the topic and rotates the conversation
-// (DESIGN §14.14). A trailing emoji also sets the topic icon.
+// handleNameCommand implements `/name [<name>]` (DESIGN §8): show or change
+// the session name. The name is the topic title and part of the system prompt,
+// so setting it renames the topic and rotates the conversation (DESIGN §14.14).
 func (in *instance) handleNameCommand(msg *TelegramMessage, b *Bot, rest string) {
-	raw, emoji := splitNameEmoji(rest)
+	raw := strings.TrimSpace(rest)
 	if raw == "" {
 		in.reply(msg, "<b>Name</b>\n"+htmlEscape(b.Name))
 		return
@@ -1036,7 +1034,6 @@ func (in *instance) handleNameCommand(msg *TelegramMessage, b *Bot, rest string)
 		in.reply(msg, "Cannot rename: "+htmlEscape(err.Error()))
 		return
 	}
-	iconID, iconNote := resolveTopicIcon(in.db, in.config(), emoji)
 	old := b.Name
 	if name != old {
 		if err := renameBot(in.db, in.config(), b, name); err != nil {
@@ -1053,39 +1050,11 @@ func (in *instance) handleNameCommand(msg *TelegramMessage, b *Bot, rest string)
 	}
 	// The row is the source of truth, so a Telegram hiccup leaves the title
 	// stale rather than the rename undone; say so instead of failing silently.
-	if err := editForumTopic(in.config(), b.TopicID, name, iconID); err != nil {
+	if err := editForumTopic(in.config(), b.TopicID, name); err != nil {
 		hookLog("edit topic %d: %v", b.TopicID, err)
 		reply += "\n⚠️ The topic could not be updated: " + htmlEscape(err.Error())
 	}
-	if iconNote != "" {
-		reply += "\n⚠️ " + htmlEscape(iconNote)
-	}
 	in.reply(msg, reply)
-}
-
-// splitNameEmoji splits "<name> [emoji]". A trailing field made only of
-// pictographic runes is the icon; a lone one is still the name, because /name
-// is about the name first.
-func splitNameEmoji(rest string) (name, emoji string) {
-	fields := strings.Fields(rest)
-	if len(fields) > 1 && isEmojiOnly(fields[len(fields)-1]) {
-		return strings.Join(fields[:len(fields)-1], " "), fields[len(fields)-1]
-	}
-	return strings.TrimSpace(rest), ""
-}
-
-// isEmojiOnly reports whether s is made only of pictographic runes: no letters,
-// no digits and nothing from the ASCII/Latin range.
-func isEmojiOnly(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, r := range s {
-		if r < 0x2000 || unicode.IsLetter(r) || unicode.IsDigit(r) {
-			return false
-		}
-	}
-	return true
 }
 
 // handleTopicRename follows a rename made in Telegram itself (the

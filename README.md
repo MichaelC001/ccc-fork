@@ -249,7 +249,7 @@ the turn finishes — that is the ping you get — and your message gets a ✅.
 
 | Command | Effect |
 |---|---|
-| `/name [name] [emoji]` | Show or set the session's name. It renames the topic, sets the topic icon and starts a fresh conversation (the name is in the system prompt). Names are unique; renaming the topic in Telegram renames the session too. |
+| `/name [name]` | Show or set the session's name. It renames the topic and starts a fresh conversation (the name is in the system prompt). Names are unique; renaming the topic in Telegram renames the session too. |
 | `/new` | Fresh conversation. Memories are kept. |
 | `/stop` | Kill the running turn and drop the queue. |
 | `/cwd [path]` | Show or set the session's working directory. |
@@ -304,9 +304,7 @@ use `ccc routine` there). Grok calls them through `search_tool` / `use_tool`.
 - **Workers only:** `report_to_general` — the only way a session talks back.
 - `archive_bot` — end this session and close its topic.
 - `get_project` / `set_project` — shared notes about a code base.
-- `set_name` — rename this session and set its topic icon. The icon must be one of the
-  emoji Telegram allows for forum topics; the tool lists them, and an emoji
-  outside the set leaves the icon unchanged.
+- `set_name` — rename this session (and the forum topic, when there is one).
 - `send_file` — send a file into this topic (refuses credential paths).
 
 ### What it costs, and what keeps it small

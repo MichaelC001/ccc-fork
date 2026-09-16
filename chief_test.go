@@ -170,8 +170,8 @@ func TestArchiveAndRenameRefuseGeneral(t *testing.T) {
 
 func TestChiefPromptIsByteStable(t *testing.T) {
 	b := promptBot{Name: "General", Cwd: "/tmp", Chief: true}
-	first := renderSystemPrompt(b, "host", []otherBot{{Name: "a"}}, []string{"🚀"})
-	second := renderSystemPrompt(b, "host", []otherBot{{Name: "b"}}, []string{"📝"})
+	first := renderSystemPrompt(b, "host", []otherBot{{Name: "a"}})
+	second := renderSystemPrompt(b, "host", []otherBot{{Name: "b"}})
 	if first != second {
 		t.Errorf("chief system prompt is not byte-stable")
 	}

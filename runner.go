@@ -754,8 +754,7 @@ func (r *Runner) spawn(p Profile, b *Bot, t *Turn, sessionID string, resume bool
 		return res
 	}
 	sysPrompt := renderSystemPrompt(
-		promptBot{Name: b.Name, Role: b.Role, Cwd: cwd, Engine: botEngine(b), Chief: isGeneralBot(b)}, hostnameOrUnknown(), botRoster(r.db, b.ID),
-		topicIconEmoji(topicIcons(r.db, r.config())))
+		promptBot{Name: b.Name, Role: b.Role, Cwd: cwd, Engine: botEngine(b), Chief: isGeneralBot(b)}, hostnameOrUnknown(), botRoster(r.db, b.ID))
 	engine := botEngine(b)
 	mcpCfg := ""
 	if engine == engineClaude {

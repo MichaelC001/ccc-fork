@@ -51,11 +51,6 @@ func newFakeBotAPI(t *testing.T) *fakeBotAPI {
 			f.nextTop++
 			body = fmt.Sprintf(`{"ok":true,"result":{"message_thread_id":%d,"name":%q}}`,
 				f.nextTop, r.Form.Get("name"))
-		case "getForumTopicIconStickers":
-			// The real set is ~30 stickers; two is enough to exercise the
-			// lookup, the fallback and the "not available" path.
-			body = `{"ok":true,"result":[{"custom_emoji_id":"icon-rocket","emoji":"🚀"},` +
-				`{"custom_emoji_id":"icon-memo","emoji":"📝"}]}`
 		case "getFile":
 			body = `{"ok":true,"result":{"file_path":"documents/blob.bin"}}`
 		case "sendMessage", "editMessageText":
@@ -162,8 +157,6 @@ func testInstance(t *testing.T) (*instance, *fakeRunner, *fakeBotAPI) {
 	// through loadConfig/saveConfig, so the tests get their own HOME.
 	isolateConfigEnv(t)
 	t.Setenv("HOME", t.TempDir())
-	// The topic-icon cache is process-wide; each test gets its own fake API.
-	resetTopicIconCache()
 	api := newFakeBotAPI(t)
 	dir := t.TempDir()
 	cfg := &Config{BotToken: "TESTTOKEN", ChatID: 42, GroupID: -100777, DataDir: dir}
@@ -642,7 +635,7 @@ func TestNameCommandRenamesTheBotAndTheTopic(t *testing.T) {
 		t.Errorf("/name did not show the current name: %v", texts)
 	}
 
-	in.handleMessage(ownerMessage(b.TopicID, "/name shipper 🚀"))
+	in.handleMessage(ownerMessage(b.TopicID, "/name shipper"))
 
 	after, err := botByID(in.db, b.ID)
 	if err != nil {
@@ -667,8 +660,8 @@ func TestNameCommandRenamesTheBotAndTheTopic(t *testing.T) {
 	if got := edits[0].Params.Get("message_thread_id"); got != fmt.Sprint(b.TopicID) {
 		t.Errorf("renamed topic %s, want %d", got, b.TopicID)
 	}
-	if got := edits[0].Params.Get("icon_custom_emoji_id"); got != "icon-rocket" {
-		t.Errorf("icon id = %q, want the id 🚀 maps to", got)
+	if got := edits[0].Params.Get("icon_custom_emoji_id"); got != "" {
+		t.Errorf("topic icons are unused; got icon id %q", got)
 	}
 }
 
@@ -702,29 +695,6 @@ func TestNameCommandRejectsACollision(t *testing.T) {
 	joined := strings.Join(api.texts(fmt.Sprint(b.TopicID)), "\n")
 	if !strings.Contains(joined, "alpha") {
 		t.Errorf("the rejection should say which bot holds the name: %q", joined)
-	}
-}
-
-func TestNameCommandReportsAnUnavailableIcon(t *testing.T) {
-	in, _, api := testInstance(t)
-	b, err := in.createBot("worker", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	in.handleMessage(ownerMessage(b.TopicID, "/name shipper 🦄"))
-
-	after, _ := botByID(in.db, b.ID)
-	if after.Name != "shipper" {
-		t.Errorf("name = %q: an unavailable icon must not block the rename", after.Name)
-	}
-	edits := api.since("editForumTopic")
-	if len(edits) != 1 || edits[0].Params.Get("icon_custom_emoji_id") != "" {
-		t.Errorf("an emoji Telegram does not offer must leave the icon alone: %v", edits)
-	}
-	joined := strings.Join(api.texts(fmt.Sprint(b.TopicID)), "\n")
-	if !strings.Contains(joined, "🦄") || !strings.Contains(joined, "🚀") {
-		t.Errorf("the reply should name the rejected emoji and the available ones: %q", joined)
 	}
 }
 
@@ -810,7 +780,7 @@ func TestTellSessionFollowsTheRename(t *testing.T) {
 	}
 }
 
-func TestSetNameToolRenamesAndSetsTheIcon(t *testing.T) {
+func TestSetNameToolRenamesTheTopic(t *testing.T) {
 	in, _, api := testInstance(t)
 	b, err := in.createBot("worker", "")
 	if err != nil {
@@ -818,7 +788,7 @@ func TestSetNameToolRenamesAndSetsTheIcon(t *testing.T) {
 	}
 	s := &mcpServer{db: in.db, config: in.cfg, botID: b.ID}
 
-	res, _, err := s.setName(t.Context(), nil, setNameIn{Name: "shipper", Emoji: "📝"})
+	res, _, err := s.setName(t.Context(), nil, setNameIn{Name: "shipper"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -830,9 +800,11 @@ func TestSetNameToolRenamesAndSetsTheIcon(t *testing.T) {
 		t.Errorf("name = %q, want shipper", after.Name)
 	}
 	edits := api.since("editForumTopic")
-	if len(edits) != 1 || edits[0].Params.Get("name") != "shipper" ||
-		edits[0].Params.Get("icon_custom_emoji_id") != "icon-memo" {
+	if len(edits) != 1 || edits[0].Params.Get("name") != "shipper" {
 		t.Errorf("set_name did not update the topic correctly: %v", edits)
+	}
+	if got := edits[0].Params.Get("icon_custom_emoji_id"); got != "" {
+		t.Errorf("set_name must not set a topic icon, got %q", got)
 	}
 
 	// A taken name is a tool error, not a silent no-op.

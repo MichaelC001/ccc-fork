@@ -604,7 +604,7 @@ func (h *hubClient) rpcRename(params json.RawMessage, out *hubRPC) {
 			return
 		}
 	}
-	if err := editForumTopic(h.in.config(), b.TopicID, name, ""); err != nil {
+	if err := editForumTopic(h.in.config(), b.TopicID, name); err != nil {
 		hookLog("hub rename topic %d: %v", b.TopicID, err)
 	}
 	out.Body, _ = json.Marshal(map[string]any{"name": name, "old": old})

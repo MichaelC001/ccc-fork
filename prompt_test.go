@@ -12,10 +12,9 @@ func TestRenderSystemPromptCarriesIdentity(t *testing.T) {
 		promptBot{Name: "deployer", Cwd: "/srv/fecha"},
 		"jairo.local",
 		[]otherBot{{Name: "watcher", Role: "watches CI"}},
-		[]string{"🚀", "📝"},
 	)
 	for _, want := range []string{"deployer", "jairo.local", "/srv/fecha",
-		"set_name", "🚀", "session"} {
+		"set_name", "session"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("system prompt is missing %q:\n%s", want, got)
 		}
@@ -44,10 +43,13 @@ func TestRenderSystemPromptCarriesIdentity(t *testing.T) {
 	if strings.Contains(got, "Other bots") || strings.Contains(got, "watches CI") {
 		t.Errorf("system prompt must not list other sessions as teammates:\n%s", got)
 	}
+	if strings.Contains(got, "Topic icons") || strings.Contains(got, "topic icon") {
+		t.Errorf("system prompt must not talk about topic icons:\n%s", got)
+	}
 }
 
 func TestRenderSystemPromptHasNoRoleCeremony(t *testing.T) {
-	got := renderSystemPrompt(promptBot{Name: "fresh", Cwd: "/tmp"}, "host", nil, nil)
+	got := renderSystemPrompt(promptBot{Name: "fresh", Cwd: "/tmp"}, "host", nil)
 	if strings.Contains(got, "/role") || strings.Contains(got, "no specific role") {
 		t.Errorf("a new session must not be told to pick a role:\n%s", got)
 	}
@@ -185,12 +187,10 @@ func TestEnvelopeDoesNotOnboardANewSession(t *testing.T) {
 func TestSystemPromptIsByteStableAcrossTurns(t *testing.T) {
 	b := promptBot{Name: "deployer", Cwd: "/srv/fecha"}
 	first := renderSystemPrompt(b, "jairo.local",
-		[]otherBot{{Name: "watcher", Role: "watches CI"}, {Name: "archivist", Role: "keeps notes"}},
-		[]string{"🚀", "📝"})
+		[]otherBot{{Name: "watcher", Role: "watches CI"}, {Name: "archivist", Role: "keeps notes"}})
 	// Same facts, different leftover roster order — the roster is not rendered.
 	second := renderSystemPrompt(b, "jairo.local",
-		[]otherBot{{Name: "archivist", Role: "keeps notes"}, {Name: "watcher", Role: "watches CI"}},
-		[]string{"📝", "🚀"})
+		[]otherBot{{Name: "archivist", Role: "keeps notes"}, {Name: "watcher", Role: "watches CI"}})
 	if first != second {
 		t.Errorf("the system prompt changed between turns:\n--- first ---\n%s\n--- second ---\n%s", first, second)
 	}
@@ -204,7 +204,7 @@ func TestSystemPromptIsByteStableAcrossTurns(t *testing.T) {
 
 // The prompt tells the session how to do long work without spawning teammates.
 func TestSystemPromptTeachesBackgroundInsteadOfSpawn(t *testing.T) {
-	got := renderSystemPrompt(promptBot{Name: "a", Cwd: "/tmp"}, "host", nil, nil)
+	got := renderSystemPrompt(promptBot{Name: "a", Cwd: "/tmp"}, "host", nil)
 	for _, want := range []string{"run_background", "source=background", "60 seconds", "You cannot create other sessions"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("the system prompt does not teach background jobs (%q):\n%s", want, got)
@@ -219,7 +219,7 @@ func TestSystemPromptTeachesBackgroundInsteadOfSpawn(t *testing.T) {
 }
 
 func TestSystemPromptHasNoWakeDiscipline(t *testing.T) {
-	got := renderSystemPrompt(promptBot{Name: "a", Cwd: "/tmp"}, "host", nil, nil)
+	got := renderSystemPrompt(promptBot{Name: "a", Cwd: "/tmp"}, "host", nil)
 	if strings.Contains(got, "wake=false") || strings.Contains(got, "wake=true") {
 		t.Errorf("wake discipline is a crew-of-bots leftover:\n%s", got)
 	}

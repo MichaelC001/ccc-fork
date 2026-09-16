@@ -1,14 +1,12 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -430,150 +428,6 @@ func archivedBots(db *gorm.DB) ([]Bot, error) {
 	var bots []Bot
 	err := db.Where("archived_at IS NOT NULL").Order("archived_at DESC").Find(&bots).Error
 	return bots, err
-}
-
-// ---------------------------------------------------------------------------
-// Forum topic icons
-// ---------------------------------------------------------------------------
-
-// Topic icons are the emoji Telegram shows beside a topic title. They are not
-// free-form: editForumTopic only accepts a custom-emoji id out of
-// getForumTopicIconStickers. The list is identical for every bot and changes
-// rarely, so ccc caches it in memory and in the settings table and refreshes it
-// once a day — a stale list is much better than a rename that fails.
-const (
-	settingTopicIcons = "topic_icons"
-	topicIconsTTL     = 24 * time.Hour
-)
-
-type topicIconCache struct {
-	FetchedAt time.Time          `json:"fetched_at"`
-	Stickers  []TopicIconSticker `json:"stickers"`
-}
-
-var topicIconMem struct {
-	mu    sync.Mutex
-	cache topicIconCache
-}
-
-// resetTopicIconCache drops the in-memory copy. Only the tests need it: the
-// cache is process-wide and they each run against their own fake Bot API.
-func resetTopicIconCache() {
-	topicIconMem.mu.Lock()
-	topicIconMem.cache = topicIconCache{}
-	topicIconMem.mu.Unlock()
-}
-
-// topicIcons returns the emoji usable as topic icons, hitting Telegram at most
-// once a day. It never fails: when the fetch fails the last known list is
-// returned (possibly empty, which simply means "leave icons alone").
-func topicIcons(db *gorm.DB, config *Config) []TopicIconSticker {
-	topicIconMem.mu.Lock()
-	defer topicIconMem.mu.Unlock()
-	now := time.Now()
-	if len(topicIconMem.cache.Stickers) > 0 && now.Sub(topicIconMem.cache.FetchedAt) < topicIconsTTL {
-		return topicIconMem.cache.Stickers
-	}
-	if db != nil {
-		var stored topicIconCache
-		if raw := getSetting(db, settingTopicIcons, ""); raw != "" {
-			if err := json.Unmarshal([]byte(raw), &stored); err == nil {
-				topicIconMem.cache = stored
-				if len(stored.Stickers) > 0 && now.Sub(stored.FetchedAt) < topicIconsTTL {
-					return stored.Stickers
-				}
-			}
-		}
-	}
-	if config == nil || config.BotToken == "" {
-		return topicIconMem.cache.Stickers
-	}
-	stickers, err := fetchForumTopicIcons(config)
-	if err != nil || len(stickers) == 0 {
-		hookLog("getForumTopicIconStickers: %v", err)
-		return topicIconMem.cache.Stickers
-	}
-	topicIconMem.cache = topicIconCache{FetchedAt: now, Stickers: stickers}
-	if db != nil {
-		if raw, err := json.Marshal(topicIconMem.cache); err == nil {
-			if err := setSetting(db, settingTopicIcons, string(raw)); err != nil {
-				hookLog("cache topic icons: %v", err)
-			}
-		}
-	}
-	return stickers
-}
-
-// topicIconEmoji lists the emoji that may be used as icons, for the model and
-// for error messages.
-func topicIconEmoji(stickers []TopicIconSticker) []string {
-	out := make([]string, 0, len(stickers))
-	for _, s := range stickers {
-		if s.Emoji != "" {
-			out = append(out, s.Emoji)
-		}
-	}
-	return out
-}
-
-// matchTopicIcon picks the icon id for an emoji: an exact match first, then the
-// same emoji ignoring variation selectors and skin tones. Anything else returns
-// false, and the caller leaves the icon exactly as it was.
-func matchTopicIcon(stickers []TopicIconSticker, emoji string) (string, bool) {
-	want := strings.TrimSpace(emoji)
-	if want == "" {
-		return "", false
-	}
-	for _, s := range stickers {
-		if s.Emoji == want {
-			return s.CustomEmojiID, true
-		}
-	}
-	base := emojiBase(want)
-	if base == "" {
-		return "", false
-	}
-	for _, s := range stickers {
-		if emojiBase(s.Emoji) == base {
-			return s.CustomEmojiID, true
-		}
-	}
-	return "", false
-}
-
-// emojiBase strips the runes that only decorate an emoji — variation selectors
-// and skin-tone modifiers — so 👍 and 👍🏽 compare equal.
-func emojiBase(s string) string {
-	var b strings.Builder
-	for _, r := range s {
-		switch {
-		case r == 0xFE0E || r == 0xFE0F: // variation selectors
-		case r >= 0x1F3FB && r <= 0x1F3FF: // skin tones
-		default:
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
-}
-
-// resolveTopicIcon turns a requested emoji into an icon id, plus a note to show
-// when it is not one Telegram allows. An empty emoji is not a failure: it means
-// "keep the current icon".
-func resolveTopicIcon(db *gorm.DB, config *Config, emoji string) (iconID, note string) {
-	emoji = strings.TrimSpace(emoji)
-	if emoji == "" {
-		return "", ""
-	}
-	stickers := topicIcons(db, config)
-	if id, ok := matchTopicIcon(stickers, emoji); ok {
-		return id, ""
-	}
-	available := topicIconEmoji(stickers)
-	if len(available) == 0 {
-		return "", fmt.Sprintf("the icon was left unchanged: Telegram did not return its list of topic icons, so %s could not be checked", emoji)
-	}
-	return "", fmt.Sprintf("%s is not one of Telegram's topic icons, so the icon is unchanged. Available: %s",
-		emoji, strings.Join(available, " "))
 }
 
 // maxBotNameLen caps a bot name, in characters. A name is a topic title, the

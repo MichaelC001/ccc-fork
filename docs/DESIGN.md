@@ -193,9 +193,8 @@ Indexes beyond the ones the columns above imply: `turns(bot_id, created_at)`
 for turn retention, `inbox(delivered_at)` and `questions(answered_at)` for
 cleanup, `memories_archive(compaction_id)` for restore.
 
-Settings actually used: `last_maintenance` (ccc's own marker) and `topic_icons`
-(the cached sticker set, §14.16). The table is bookkeeping only — nothing in it
-is user-editable.
+Settings actually used: `last_maintenance` (ccc's own marker). The table is
+bookkeeping only — nothing in it is user-editable.
 
 Existing `config.json` (bot token, group id, profiles) stays as bootstrap
 config, and it is also where the three tuning knobs live: `debounce_ms`
@@ -219,7 +218,7 @@ home (Codex also gets per-turn `exec -c`). Identity is `--bot`/`--turn` or
 | `forget` | `scope`, `key`, `project_path?` | Delete one memory. |
 | `notify_owner` | `text`, `urgency` (normal\|urgent) | Post in this session's topic mentioning the owner; `urgent` also DMs the owner. |
 | `ask_owner` | `question`, `options?` (≤4 strings) | Post question with inline buttons (or free text if no options). Returns immediately with `{"status":"asked"}`; the session should end its turn. The answer arrives as the next input (`source=user`, prefixed `Answer to "<question>": …`). |
-| `set_name` | `name`, `emoji?` | Rename this session: validate (§8 `/name`), update `bots.name`, rename the forum topic and, when `emoji` is one Telegram allows, set the topic icon. Rotates the conversation (§14.14). `/name` does the same from Telegram. |
+| `set_name` | `name` | Rename this session: validate (§8 `/name`), update `bots.name`, rename the forum topic. Rotates the conversation (§14.14). `/name` does the same from Telegram. No topic icon. |
 | `watch` | `name`, `command`, `interval_s` (≥60) | Register a deterministic watch (§7). Lasts `watch_ttl_s` (default 4h); re-upserting the name renews it. `unwatch(name)`, `list_watches()`. |
 | `schedule_wakeup` | `in_seconds` or `at` (RFC3339), `note`, `cron?` | Self-wakeup (§7). `cancel_schedule(id)`. |
 | `run_background` | `command`, `name?` | Queue a long-running shell command in the bot's cwd with `env_passthrough`. Returns a job id immediately; does not block the turn. Use when Bash/a tool is expected to exceed ~60s. |
@@ -237,12 +236,8 @@ home (Codex also gets per-turn `exec -c`). Identity is `--bot`/`--turn` or
 All tools validate the calling bot from the `--bot` flag; tool inputs coming
 from the model are data, never instructions to ccc.
 
-Topic icons are not free-form: `editForumTopic` only accepts a custom-emoji id
-out of `getForumTopicIconStickers`. ccc caches that list (memory + `settings`,
-refreshed daily, §14.16) and puts the allowed emoji into the `set_name` and
-`set_name` tool description and the system prompt, so the model picks one that
-exists. An emoji outside the set leaves the icon untouched and the tool result
-says which emoji were available.
+Topic icons are not used. Session liveness is General's 30s cap (§3.5) and
+the 10-minute idle reminder (§7), not an emoji on the forum topic.
 
 Only General can create other sessions (`spawn_session`). Workers
 `report_to_general`. `/session <prompt>` is the owner escape hatch. Long
@@ -383,7 +378,7 @@ older than 90 days.
 | Command | Where | Effect |
 |---|---|---|
 | `/sessions` | anywhere | Table of open sessions. `/bots` is an alias. |
-| `/name [text] [emoji]` | topic | Show or set the session's name: renames the forum topic, sets its icon and rotates the conversation (§14.14). |
+| `/name [text]` | topic | Show or set the session's name: renames the forum topic and rotates the conversation (§14.14). |
 | `/new` | topic | Rotate the conversation (fresh transcript, memory kept). |
 | `/stop` | topic | Kill the running turn (SIGTERM the `claude` process), drop the queue. |
 | `/cwd [path]` | topic | Show or set the session's working dir. |
@@ -508,11 +503,11 @@ history is re-charged as fresh input. So the split above is not only about
 14.5's snapshot: it is what makes a resumed turn cheap.
 
 Audited and enforced (§14.20): the system prompt holds only facts fixed for the
-life of a conversation — name, hostname, cwd, the tool list — plus the
-topic-icon emoji list, which is SORTED before rendering. There is no other-
-session roster and no role. The date was never in the prompt. Everything
-per-turn (date, memories, leftover inbox) is in the envelope, which is the
-TAIL of the request: it costs only itself and invalidates nothing.
+life of a conversation — name, hostname, cwd, the tool list. There is no other-
+session roster, no role, and no topic-icon list. The date was never in the
+prompt. Everything per-turn (date, memories, leftover inbox) is in the
+envelope, which is the TAIL of the request: it costs only itself and
+invalidates nothing.
 
 `/usage` reports the cache hit ratio (`cache_read / (cache_read + input)`) per
 session, which is how a regression here is noticed: a resumed conversation that
@@ -687,14 +682,11 @@ service message and renames the session. A title that fails validation
 renaming it, and could loop — the old name is kept and the topic is told
 why.
 
-**14.16 Topic icons come from a cached sticker set.** Forum topics cannot take
-an arbitrary emoji: `editForumTopic` wants an `icon_custom_emoji_id` from
-`getForumTopicIconStickers`. The list is identical for every bot and changes
-rarely, so ccc caches it in memory and in `settings` and refreshes it once a
-day; when the fetch fails the stale list is used, because a missing icon is much
-cheaper than a failed rename. Matching is exact first, then the same emoji
-ignoring variation selectors and skin tones; no match leaves the icon alone and
-reports the available emoji instead of guessing a different icon.
+**14.16 Topic icons are gone.** They were a status indicator on the forum
+topic (and a large, order-unstable blob in the system prompt). General's 30s
+cap and the 10-minute idle reminder in General replace that. `set_name` /
+`/name` rename only. Existing topic emojis are left as Telegram left them;
+ccc never writes `icon_custom_emoji_id`.
 
 **14.17 Sessions have no role onboarding.** A topic is a session. General is
 the dispatcher (not a launcher). `/session <prompt>` (and `spawn_session`)
@@ -735,9 +727,8 @@ a second, sharper reason to keep it identical from turn to turn: it keys on a
 prefix of the request, so one differing byte re-charges the whole conversation
 as fresh input. The audit found two things that could move — a leftover
 roster that carried each session's live status, and the icon list that came
-back from Telegram in whatever order it liked. The roster is gone (a topic
-is a session, not a teammate) and the icon list is sorted before rendering.
-The date was already in the envelope, and stays there. §9.1 has the rule.
+back from Telegram in whatever order it liked. Both are gone. The date was
+already in the envelope, and stays there. §9.1 has the rule.
 
 **14.21 Inter-session messaging is General ↔ worker only.** The old
 mesh `send_to_bot` is not registered. General `tell_session`s a worker;

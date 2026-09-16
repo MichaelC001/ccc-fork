@@ -136,8 +136,7 @@ type updateInstructionsIn struct {
 }
 
 type setNameIn struct {
-	Name  string `json:"name" jsonschema:"the new title of this Telegram session and topic"`
-	Emoji string `json:"emoji,omitempty" jsonschema:"icon for your Telegram topic; must be one of the emoji listed in this tool's description"`
+	Name string `json:"name" jsonschema:"the new title of this Telegram session and topic"`
 }
 
 type sendFileIn struct {
@@ -185,10 +184,8 @@ func (s *mcpServer) register(server *mcp.Server) {
 		Description: "Ask the owner a question and END YOUR TURN. The answer arrives as your next message.",
 	}, s.askOwner)
 	mcp.AddTool(server, &mcp.Tool{
-		Name: "set_name",
-		Description: "Rename this session: the name is the title of the Telegram topic, so keep it short and unique. " +
-			"This starts a fresh conversation on your next message. " +
-			s.iconEmojiHint(),
+		Name:        "set_name",
+		Description: "Rename this session: the name is the title of the Telegram topic, so keep it short and unique. This starts a fresh conversation on your next message.",
 	}, s.setName)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "send_file",
@@ -492,17 +489,6 @@ func (s *mcpServer) updateInstructions(_ context.Context, _ *mcp.CallToolRequest
 	return toolErr("roles are gone; this session has no job description to update"), nil, nil
 }
 
-// iconEmojiHint names the emoji Telegram accepts as topic icons. It goes into
-// the tool descriptions so the model picks one that exists instead of guessing
-// and being told no.
-func (s *mcpServer) iconEmojiHint() string {
-	available := topicIconEmoji(topicIcons(s.db, s.config))
-	if len(available) == 0 {
-		return "The optional emoji sets your topic icon."
-	}
-	return "The optional emoji sets your topic icon; it must be one of: " + strings.Join(available, " ")
-}
-
 func (s *mcpServer) setName(_ context.Context, _ *mcp.CallToolRequest, in setNameIn) (*mcp.CallToolResult, any, error) {
 	b, err := s.bot()
 	if err != nil {
@@ -515,14 +501,13 @@ func (s *mcpServer) setName(_ context.Context, _ *mcp.CallToolRequest, in setNam
 	if err != nil {
 		return toolErr("%v", err), nil, nil
 	}
-	iconID, iconNote := resolveTopicIcon(s.db, s.config, in.Emoji)
 	old := b.Name
 	if name != old {
 		if err := renameBot(s.db, s.config, b, name); err != nil {
 			return toolErr("could not rename: %v", err), nil, nil
 		}
 	}
-	if err := editForumTopic(s.config, b.TopicID, name, iconID); err != nil {
+	if err := editForumTopic(s.config, b.TopicID, name); err != nil {
 		hookLog("edit topic %d: %v", b.TopicID, err)
 	}
 	if name != old {
@@ -531,9 +516,6 @@ func (s *mcpServer) setName(_ context.Context, _ *mcp.CallToolRequest, in setNam
 	out := fmt.Sprintf("renamed to %q; your next message starts a fresh conversation with it", name)
 	if name == old {
 		out = fmt.Sprintf("you were already called %q", name)
-	}
-	if iconNote != "" {
-		out += ". " + iconNote
 	}
 	return text("%s", out), nil, nil
 }

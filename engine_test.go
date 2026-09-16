@@ -497,7 +497,7 @@ func TestClassifyFailureGrokAndAgyAuth(t *testing.T) {
 func TestRenderSystemPromptGrokGetsMCP(t *testing.T) {
 	got := renderSystemPrompt(
 		promptBot{Name: "coder", Role: "writes go", Cwd: "/tmp", Engine: engineGrok},
-		"host", nil, []string{"🚀"},
+		"host", nil,
 	)
 	if !strings.Contains(got, "Grok Build") {
 		t.Errorf("grok prompt should name the engine:\n%s", got)
@@ -513,7 +513,7 @@ func TestRenderSystemPromptGrokGetsMCP(t *testing.T) {
 	}
 	chief := renderSystemPrompt(
 		promptBot{Name: "General", Cwd: "/tmp", Engine: engineGrok, Chief: true},
-		"host", nil, nil,
+		"host", nil,
 	)
 	if !strings.Contains(chief, "spawn_session") || !strings.Contains(chief, "tell_session") {
 		t.Errorf("grok chief prompt should describe dispatcher tools:\n%s", chief)
@@ -521,11 +521,11 @@ func TestRenderSystemPromptGrokGetsMCP(t *testing.T) {
 	if strings.Contains(chief, "report_to_general") {
 		t.Error("chief must not get report_to_general")
 	}
-	agy := renderSystemPrompt(promptBot{Name: "coder", Cwd: "/tmp", Engine: engineAntigravity}, "host", nil, nil)
+	agy := renderSystemPrompt(promptBot{Name: "coder", Cwd: "/tmp", Engine: engineAntigravity}, "host", nil)
 	if !strings.Contains(agy, "do NOT have the ccc MCP") || !strings.Contains(agy, "ccc routine") {
 		t.Errorf("agy should still skip MCP and teach ccc routine:\n%s", agy)
 	}
-	claude := renderSystemPrompt(promptBot{Name: "coder", Cwd: "/tmp"}, "host", nil, nil)
+	claude := renderSystemPrompt(promptBot{Name: "coder", Cwd: "/tmp"}, "host", nil)
 	if !strings.Contains(claude, "Telegram session") || !strings.Contains(claude, "remember/recall/forget") {
 		t.Error("Claude prompt should describe a session and the ccc tools")
 	}

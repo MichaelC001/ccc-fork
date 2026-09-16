@@ -42,21 +42,17 @@ type otherBot struct {
 	Role string
 }
 
-// renderSystemPrompt builds the --system-prompt text for a session. iconEmoji
-// is the set Telegram accepts as topic icons (see topicIcons): it is listed
-// here so set_name is called with an emoji that actually exists.
+// renderSystemPrompt builds the --system-prompt text for a session.
 //
 // Byte stability is a requirement, not a nicety (DESIGN §14.20). The API's
 // prompt cache keys on a PREFIX of the request, and the system prompt is the
 // very first thing in it: one character that differs between two turns of the
 // same conversation invalidates the cache for the entire conversation, and the
-// whole history is re-charged as fresh input. So everything here is either
-// fixed for the life of a session (name, machine, cwd) or sorted into a
-// deterministic order (the icon list), and nothing that moves on its own —
-// the date, usage numbers — is allowed in. The date and the live context
-// travel in the envelope instead, which is the tail of the request and costs
-// only itself.
-func renderSystemPrompt(b promptBot, hostname string, _ []otherBot, iconEmoji []string) string {
+// whole history is re-charged as fresh input. So everything here is fixed for
+// the life of a session (name, machine, cwd, tool list). The date and the live
+// context travel in the envelope instead, which is the tail of the request and
+// costs only itself.
+func renderSystemPrompt(b promptBot, hostname string, _ []otherBot) string {
 	var sb strings.Builder
 	engine := botEngine(&Bot{Engine: b.Engine})
 	hasMCP := engineHasMCP(engine)
@@ -76,7 +72,7 @@ func renderSystemPrompt(b promptBot, hostname string, _ []otherBot, iconEmoji []
 		sb.WriteString("  remember/recall/forget    persistent memory (scopes: user, project, session)\n")
 		sb.WriteString("  notify_owner/ask_owner    reach the owner in Telegram\n")
 		if !b.Chief {
-			sb.WriteString("  set_name                  rename this session and set its topic icon\n")
+			sb.WriteString("  set_name                  rename this session\n")
 		}
 		sb.WriteString("  send_file                 send a file into this Telegram topic and to paired phones\n")
 		sb.WriteString("  watch/unwatch/list_watches  re-run a command and wake this session only when its output changes\n")
@@ -94,12 +90,6 @@ func renderSystemPrompt(b promptBot, hostname string, _ []otherBot, iconEmoji []
 		sb.WriteString("  get_project/set_project   notes about a code base\n")
 		if engine == engineGrok {
 			sb.WriteString("\nGrok surfaces MCP through search_tool / use_tool. Search for \"ccc\" then call the tool.\n")
-		}
-		if !b.Chief && len(iconEmoji) > 0 {
-			icons := append([]string(nil), iconEmoji...)
-			sort.Strings(icons)
-			fmt.Fprintf(&sb, "\nTopic icons set_name accepts (Telegram allows no others): %s\n",
-				strings.Join(icons, " "))
 		}
 	} else {
 		sb.WriteString("\nTools: you have this engine's built-in tools (shell, files, search, …), which run with full\n")
