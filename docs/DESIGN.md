@@ -9,14 +9,15 @@ why.
 
 ## 1. What ccc v3 is
 
-ccc (**Crew Command Center**) is a **team of bots living in one Telegram forum
-group**, driven by a coding CLI as a stateless runner (Claude Code by default;
-Grok Build and Antigravity too), with ccc owning everything the runner does
-not: bot identity, persistent memory, inter-bot messaging, scheduling, account
-(profile) management, access control, and the Telegram UX.
+ccc is **sessions in one Telegram forum group**, driven by a coding CLI as a
+stateless runner (Claude Code by default; Grok Build and Antigravity too),
+with ccc owning everything the runner does not: session lifecycle, persistent
+memory, scheduling, account (profile) management, access control, and the
+Telegram UX.
 
-The experience target is Jairo's `grok-bot`: you talk to a topic like you talk
-to a person. No commands in the normal flow, no ceremony, no terminal.
+The experience target is Hairok's classic sessions model: you write in
+General, a topic opens, that prompt is already the first turn. A topic is a
+session. Closing the topic retires it. No role, no `/role`, no ceremony.
 
 Non-goals (explicitly dropped from v2): Claude Code background agents, the
 agents view, `claude attach` handoff, transcript scraping, the AskUserQuestion
@@ -29,7 +30,7 @@ on purpose). One ccc instance never talks to more than one Telegram bot.
 |---|---|
 | **Instance** | One `ccc listen` process on one machine, bound to one Telegram bot token and one forum group. Instance-level config: model, env passthrough, default profile, data dir. |
 | **Profile** | One account for one engine (see `profiles.go`). Claude = one `CLAUDE_CONFIG_DIR`. Grok = isolated `GROK_HOME`. Antigravity = isolated HOME/`GEMINI_HOME`. Codex = isolated `CODEX_HOME`. Engine is set when the account is added. Same-engine accounts are interchangeable at turn granularity (§4). One instance may mix engines. |
-| **Bot** | One forum topic. Identity = `name` + `role` (free text set with `/role`) + its own memory scope + an **engine** derived from the default account (or `default_engine`) + an optional **model** override. Turns pick a healthy account of that engine. `/engine` is a secondary pool assignment. `/model` in the topic overrides that bot; `/model <engine> <slug>` sets the instance default for the engine. Claude bots share MCP tools. Grok/Antigravity/Codex bots spawn that CLI and do not get ccc MCP. Optional per-bot `cwd` (default: `<data_dir>/bots/<name>/workspace`). |
+| **Session** (`bots` table) | One forum topic. Identity = `name` + an **engine** derived from the default account (or `default_engine`) + an optional **model** override. Turns pick a healthy account of that engine. `/engine` is a secondary pool assignment. `/model` in the topic overrides that session. Claude sessions share MCP tools. Grok/Antigravity/Codex sessions spawn that CLI and do not get ccc MCP. Optional per-session `cwd` (default: `<data_dir>/bots/<name>/workspace`). Role is unused leftover. Closing the topic archives the row. |
 | **Session** | The Claude Code conversation behind a bot: a UUID ccc mints and resumes. A bot has exactly one live session; `/new` rotates it. After `idle_compact_s` (default 1h) of no finished turn, ccc rotates it automatically — memories stay, the transcript does not. |
 | **Turn** | One `claude -p` process: input = one user/bot/system/background message (plus context envelope), output = streamed events until `result`. At most one turn per bot at a time; further inputs queue (FIFO) and are delivered together on the next turn. A background job is **not** a turn: it must not hold `turns.status=running`. |
 | **Background job** | A long-running shell command owned by a bot, started with `run_background`. It runs in the bot's cwd with `env_passthrough` while the topic stays responsive. Completion enqueues a `source=background` turn. |
@@ -198,15 +199,12 @@ bot/turn from its flags. Tools (all bots get all of them):
 
 | Tool | Input | Behavior |
 |---|---|---|
-| `remember` | `scope` (user\|project\|bot), `key`, `text`, `project_path?` | Upsert a memory. `bot` scope is implicitly this bot. |
-| `recall` | `query`, `scope?`, `limit?` | Full-text (SQLite FTS5) search over memories visible to this bot: all `user`, all `project`, own `bot`. Returns key+text+scope. |
+| `remember` | `scope` (user\|project\|bot), `key`, `text`, `project_path?` | Upsert a memory. `bot` scope is this session (not a persona). |
+| `recall` | `query`, `scope?`, `limit?` | Full-text (SQLite FTS5) search over memories visible to this session: all `user`, all `project`, own session. Returns key+text+scope. |
 | `forget` | `scope`, `key`, `project_path?` | Delete one memory. |
-| `list_bots` | — | Names, roles, status, topic links of all live bots. |
-| `send_to_bot` | `bot`, `text`, `wake` (default true) | Append to `inbox`; mirrored into both topics as `🤝 <from> → <to>: …`. Delivery happens post-turn (§3.3). |
-| `notify_owner` | `text`, `urgency` (normal\|urgent) | Post in this bot's topic mentioning the owner; `urgent` also DMs the owner. |
-| `ask_owner` | `question`, `options?` (≤4 strings) | Post question with inline buttons (or free text if no options). Returns immediately with `{"status":"asked"}`; the bot should end its turn. The answer arrives as the next input (`source=user`, prefixed `Answer to "<question>": …`). |
-| `update_instructions` | `role` | Replace this bot's `role`; echo the new text into the topic. `/role` does the same from Telegram. |
-| `set_name` | `name`, `emoji?` | Rename this bot: validate (§8 `/name`), update `bots.name`, rename the forum topic and, when `emoji` is one Telegram allows, set the topic icon. Rotates the session (§14.14). `/name` does the same from Telegram. |
+| `notify_owner` | `text`, `urgency` (normal\|urgent) | Post in this session's topic mentioning the owner; `urgent` also DMs the owner. |
+| `ask_owner` | `question`, `options?` (≤4 strings) | Post question with inline buttons (or free text if no options). Returns immediately with `{"status":"asked"}`; the session should end its turn. The answer arrives as the next input (`source=user`, prefixed `Answer to "<question>": …`). |
+| `set_name` | `name`, `emoji?` | Rename this session: validate (§8 `/name`), update `bots.name`, rename the forum topic and, when `emoji` is one Telegram allows, set the topic icon. Rotates the conversation (§14.14). `/name` does the same from Telegram. |
 | `watch` | `name`, `command`, `interval_s` (≥60) | Register a deterministic watch (§7). Lasts `watch_ttl_s` (default 4h); re-upserting the name renews it. `unwatch(name)`, `list_watches()`. |
 | `schedule_wakeup` | `in_seconds` or `at` (RFC3339), `note`, `cron?` | Self-wakeup (§7). `cancel_schedule(id)`. |
 | `run_background` | `command`, `name?` | Queue a long-running shell command in the bot's cwd with `env_passthrough`. Returns a job id immediately; does not block the turn. Use when Bash/a tool is expected to exceed ~60s. |
@@ -330,10 +328,12 @@ older than 90 days.
 ## 8. Telegram UX
 
 ### Conversation
-- Plain text in a bot's topic → input for that bot. No `/new` needed.
-- Plain text in the group root (General) → the **owner** creates a new bot:
-  topic named from the first line, empty role, first message dispatched.
-  `/bot <name> [role]` does the same explicitly. Bots cannot do this.
+- Plain text in a session topic → input for that session. No `/new` needed.
+- Plain text in the group root (General) → the **owner** creates a new session:
+  topic named from the first line, first message dispatched as the first turn
+  (no role interview). `/session <name>` does the same explicitly. Sessions
+  cannot create other sessions.
+- Telegram close / archive of a topic retires the session. Reopen continues it.
 - Photos/documents → saved into the bot's workspace `inbox/`, path passed in the
   message. Voice → transcribed if the `voice` build is present, else the file
   path is passed (keep the existing whisper integration).
@@ -355,7 +355,7 @@ older than 90 days.
 ### Commands
 | Command | Where | Effect |
 |---|---|---|
-| `/role [text]` | topic | Show or set the bot's role. |
+| `/sessions` | anywhere | Table of open sessions. `/bots` is an alias. |
 | `/name [text] [emoji]` | topic | Show or set the bot's name: renames the forum topic, sets its icon and rotates the session (§14.14). |
 | `/new` | topic | Rotate the session (fresh conversation, memory kept). |
 | `/stop` | topic | Kill the running turn (SIGTERM the `claude` process), drop the queue. |
@@ -443,12 +443,11 @@ never by assuming a position.
 role or template rotates the session):
 
 ```
-You are <name>, a bot in Jairo's ccc team. Role: <role>.
-You run on machine <hostname>, working dir <cwd>. Today is <date>.
-Tools: you have the ccc MCP tools (memory, messaging, scheduling, watches,
+You are a coding assistant in a Telegram session named <name>.
+You run on machine <hostname>, working dir <cwd>.
+Tools: you have the ccc MCP tools (memory, scheduling, watches,
 background jobs) plus the standard tools (Bash, Read, Edit, …) with full
-permissions. You cannot create other bots.
-Other bots: <name — role> list.
+permissions. You cannot create other sessions.
 Rules: … (owner escalation, when to remember, never print secrets, keep
 replies short for chat, prefer ask_owner over guessing on architecture…)
 ```
@@ -458,10 +457,9 @@ ignored on resume until compaction):
 
 ```
 <context>
-onboarding instruction (only while the bot has no role, §14.17)
 recent user memories (top 10 by recency/relevance to the message)
 project memories for cwd (if any)
-own bot memories (top 10)
+own session memories (top 10)
 pending inbox summary (N messages from X)
 </context>
 <message source="user|bot:<name>|watch:<name>|schedule|background">…</message>
@@ -664,14 +662,10 @@ cheaper than a failed rename. Matching is exact first, then the same emoji
 ignoring variation selectors and skin tones; no match leaves the icon alone and
 reports the available emoji instead of guessing a different icon.
 
-**14.17 A role-less bot is onboarded from the envelope, not the system prompt.**
-A bot created from a line in General starts with an empty role, and a generic
-assistant is not what the owner asked for. Every turn of a role-less bot carries
-an instruction to introduce itself, ask what it is for, and then store the answer
-with `update_instructions` and pick a name and icon with `set_name`. It lives in
-the envelope because the system prompt is frozen per conversation (14.5): from
-there it could not disappear the moment the role is set, which is exactly when
-it has to.
+**14.17 Sessions have no role onboarding.** A topic is a session. The first
+message in General is dispatched as the first engine turn with that exact
+prompt. `/role` and `update_instructions` are gone. Closing the topic archives
+the session; reopening continues it.
 
 **14.18 Inputs are debounced before a turn starts.** §2 only said further inputs
 "queue and are delivered together on the next turn", which handles a burst that

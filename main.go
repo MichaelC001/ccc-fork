@@ -61,8 +61,12 @@ type TelegramMessage struct {
 	Document       *TelegramDocument `json:"document,omitempty"`
 	Caption        string            `json:"caption,omitempty"`
 	// ForumTopicEdited is the service message Telegram posts into a topic when
-	// somebody renames it in the app. ccc follows the title with the bot's name.
+	// somebody renames it in the app. ccc follows the title with the session name.
 	ForumTopicEdited *ForumTopicEdited `json:"forum_topic_edited,omitempty"`
+	// ForumTopicClosed / ForumTopicReopened are Telegram close/reopen of a
+	// forum topic. Closing retires the session; reopening continues it.
+	ForumTopicClosed   *ForumTopicClosed   `json:"forum_topic_closed,omitempty"`
+	ForumTopicReopened *ForumTopicReopened `json:"forum_topic_reopened,omitempty"`
 }
 
 // ForumTopicEdited carries the new title of a renamed forum topic. Only the
@@ -70,6 +74,12 @@ type TelegramMessage struct {
 type ForumTopicEdited struct {
 	Name string `json:"name,omitempty"`
 }
+
+// ForumTopicClosed is Telegram's empty payload for a closed forum topic.
+type ForumTopicClosed struct{}
+
+// ForumTopicReopened is Telegram's empty payload for a reopened forum topic.
+type ForumTopicReopened struct{}
 
 type TelegramVoice struct {
 	FileID   string `json:"file_id"`

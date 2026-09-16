@@ -260,7 +260,7 @@ func (in *instance) handleAccessCommand(msg *TelegramMessage, rest string) {
 			return
 		}
 		in.reply(msg, fmt.Sprintf("✅ Allowed <b>%s</b> (<code>%d</code>).", htmlEscape(row.Display), row.TelegramUserID))
-		in.tellUser(row.TelegramUserID, "✅ You have been allowed in. Talk to the bots in the group.")
+		in.tellUser(row.TelegramUserID, "✅ You have been allowed in. Talk to the sessions in the group.")
 
 	case "add":
 		id, err := strconv.ParseInt(strings.TrimSpace(arg), 10, 64)
@@ -354,7 +354,7 @@ func (in *instance) handleAccessCallback(cb *CallbackQuery, parts []string) {
 		}
 		in.editCallbackMessage(cb, fmt.Sprintf("✅ Allowed <b>%s</b> (<code>%d</code>).",
 			htmlEscape(row.Display), row.TelegramUserID))
-		in.tellUser(row.TelegramUserID, "✅ You have been allowed in. Talk to the bots in the group.")
+		in.tellUser(row.TelegramUserID, "✅ You have been allowed in. Talk to the sessions in the group.")
 	case "block":
 		id, err := strconv.ParseInt(parts[2], 10, 64)
 		if err != nil {

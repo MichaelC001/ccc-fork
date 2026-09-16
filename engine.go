@@ -227,8 +227,8 @@ func resolveEngineBin(engine string) (string, error) {
 //
 // MCP is deliberately omitted. Grok has `grok mcp add|list|remove` and stores
 // servers in ~/.grok/config.toml (or project .grok/config.toml) — there is no
-// clean per-turn inline --mcp-config equivalent. Grok/agy bots message
-// teammates with `ccc tell` instead (inbox + 🤝 in both topics).
+// clean per-turn inline --mcp-config equivalent. Long work stays in this
+// session (run_background is Claude-only; other engines use their own tools).
 func grokTurnArgs(model, systemPrompt, sessionID string, resume bool) []string {
 	args := []string{
 		"--always-approve",

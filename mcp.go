@@ -89,7 +89,7 @@ func toolErr(format string, args ...any) *mcp.CallToolResult {
 // ---------------------------------------------------------------------------
 
 type rememberIn struct {
-	Scope       string `json:"scope" jsonschema:"where the memory belongs: user (about the owner, shared by all bots), project (about one code base) or bot (private to you)"`
+	Scope       string `json:"scope" jsonschema:"where the memory belongs: user (about the owner, shared across sessions), project (about one code base) or bot (private to this session)"`
 	Key         string `json:"key" jsonschema:"short stable identifier, e.g. deploy-target or prefers-spanish"`
 	Text        string `json:"text" jsonschema:"the fact to remember, one or two sentences"`
 	ProjectPath string `json:"project_path,omitempty" jsonschema:"absolute path of the project, required for scope=project"`
@@ -110,9 +110,9 @@ type forgetIn struct {
 type emptyIn struct{}
 
 type sendToBotIn struct {
-	Bot  string `json:"bot" jsonschema:"name of the target bot (see list_bots)"`
+	Bot  string `json:"bot" jsonschema:"name of the target session"`
 	Text string `json:"text" jsonschema:"the message"`
-	Wake *bool  `json:"wake,omitempty" jsonschema:"run the target bot now instead of waiting for its next turn (default true)"`
+	Wake *bool  `json:"wake,omitempty" jsonschema:"run the target session now instead of waiting for its next turn (default true)"`
 }
 
 type notifyOwnerIn struct {
@@ -126,11 +126,11 @@ type askOwnerIn struct {
 }
 
 type updateInstructionsIn struct {
-	Role string `json:"role" jsonschema:"your new role description, replacing the current one"`
+	Role string `json:"role" jsonschema:"ignored; role is no longer a product concept"`
 }
 
 type setNameIn struct {
-	Name  string `json:"name" jsonschema:"your new name: a short, unique handle the owner and the other bots address you by"`
+	Name  string `json:"name" jsonschema:"the new title of this Telegram session and topic"`
 	Emoji string `json:"emoji,omitempty" jsonschema:"icon for your Telegram topic; must be one of the emoji listed in this tool's description"`
 }
 
@@ -146,40 +146,28 @@ type sendFileIn struct {
 func (s *mcpServer) register(server *mcp.Server) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "remember",
-		Description: "Store a durable fact so you and the other bots still know it in future conversations.",
+		Description: "Store a durable fact so later turns in this session (and other sessions, for user/project scope) still know it.",
 	}, s.remember)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "recall",
-		Description: "Search the memories you can see: all user memories, all project memories and your own.",
+		Description: "Search the memories you can see: all user memories, all project memories and this session's own.",
 	}, s.recall)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "forget",
 		Description: "Delete one memory by scope and key.",
 	}, s.forget)
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        "list_bots",
-		Description: "List the other bots in the team with their roles and status.",
-	}, s.listBots)
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "send_to_bot",
-		Description: "Send a message to another bot. It is mirrored into both Telegram topics so the owner sees it.",
-	}, s.sendToBot)
-	mcp.AddTool(server, &mcp.Tool{
 		Name:        "notify_owner",
-		Description: "Tell the owner something in your Telegram topic. Use urgency=urgent only when it is worth an interruption.",
+		Description: "Tell the owner something in this Telegram topic. Use urgency=urgent only when it is worth an interruption.",
 	}, s.notifyOwner)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "ask_owner",
 		Description: "Ask the owner a question and END YOUR TURN. The answer arrives as your next message.",
 	}, s.askOwner)
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        "update_instructions",
-		Description: "Replace your own role description. This starts a fresh conversation on your next message.",
-	}, s.updateInstructions)
-	mcp.AddTool(server, &mcp.Tool{
 		Name: "set_name",
-		Description: "Rename yourself: the name is how the owner and the other bots address you, and the title of your " +
-			"Telegram topic, so keep it short and unique. This starts a fresh conversation on your next message. " +
+		Description: "Rename this session: the name is the title of the Telegram topic, so keep it short and unique. " +
+			"This starts a fresh conversation on your next message. " +
 			s.iconEmojiHint(),
 	}, s.setName)
 	mcp.AddTool(server, &mcp.Tool{
@@ -369,23 +357,8 @@ func (s *mcpServer) askOwner(_ context.Context, _ *mcp.CallToolRequest, in askOw
 	return text(`{"status":"asked","question_id":%d} — end your turn now; the answer arrives as your next message`, row.ID), nil, nil
 }
 
-func (s *mcpServer) updateInstructions(_ context.Context, _ *mcp.CallToolRequest, in updateInstructionsIn) (*mcp.CallToolResult, any, error) {
-	role := strings.TrimSpace(in.Role)
-	if role == "" {
-		return toolErr("update_instructions needs a role"), nil, nil
-	}
-	if len(role) > 4000 {
-		role = role[:4000]
-	}
-	b, err := s.bot()
-	if err != nil {
-		return toolErr("unknown bot"), nil, nil
-	}
-	if err := s.db.Model(&Bot{}).Where("id = ?", b.ID).Update("role", role).Error; err != nil {
-		return toolErr("could not update the role: %v", err), nil, nil
-	}
-	s.post(b.TopicID, "📝 <b>New role</b>\n"+renderTelegramHTML(truncate(role, 3000)))
-	return text("role updated; your next message starts a fresh conversation with it"), nil, nil
+func (s *mcpServer) updateInstructions(_ context.Context, _ *mcp.CallToolRequest, _ updateInstructionsIn) (*mcp.CallToolResult, any, error) {
+	return toolErr("roles are gone; this session has no job description to update"), nil, nil
 }
 
 // iconEmojiHint names the emoji Telegram accepts as topic icons. It goes into
@@ -681,7 +654,7 @@ func (s *mcpServer) registerAutomation(server *mcp.Server) {
 	}, s.cancelBackground)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "archive_bot",
-		Description: "Close a bot's topic and retire it. Defaults to yourself; use it when your job is done.",
+		Description: "End this session and close its Telegram topic. Defaults to yourself; use it when the work is done.",
 	}, s.archiveBot)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "get_project",
@@ -869,7 +842,7 @@ func (s *mcpServer) archiveBot(_ context.Context, _ *mcp.CallToolRequest, in arc
 	if err := archiveBotRow(s.db, target.ID); err != nil {
 		return toolErr("could not archive: %v", err), nil, nil
 	}
-	s.post(target.TopicID, "📦 <b>"+htmlEscape(target.Name)+"</b> archived. The topic is closed; its memories are kept.")
+	s.post(target.TopicID, "📦 Session <b>"+htmlEscape(target.Name)+"</b> ended. The topic is closed; memories are kept.")
 	if s.config != nil && s.config.BotToken != "" && s.config.GroupID != 0 {
 		if err := closeForumTopic(s.config, target.TopicID); err != nil {
 			hookLog("close topic %d: %v", target.TopicID, err)
