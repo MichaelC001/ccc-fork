@@ -419,23 +419,6 @@ func sendTypingAction(config *Config, chatID int64, threadID int64) {
 	telegramAPI(config, "sendChatAction", params)
 }
 
-// topicDeleted probes whether a forum topic still exists. It calls
-// reopenForumTopic, which is a no-op on an already-open topic (returns
-// TOPIC_NOT_MODIFIED) but returns TOPIC_ID_INVALID once the topic is deleted —
-// so it detects deletion with no visible side effect. Used to retire the
-// session behind a deleted topic.
-func topicDeleted(config *Config, topicID int64) bool {
-	params := url.Values{
-		"chat_id":           {fmt.Sprintf("%d", config.GroupID)},
-		"message_thread_id": {fmt.Sprintf("%d", topicID)},
-	}
-	resp, err := telegramAPI(config, "reopenForumTopic", params)
-	if err != nil || resp == nil || resp.OK {
-		return false
-	}
-	return strings.Contains(resp.Description, "TOPIC_ID_INVALID")
-}
-
 func splitMessage(text string, maxLen int) []string {
 	if len(text) <= maxLen {
 		return []string{text}
@@ -556,109 +539,14 @@ func downloadTelegramFile(config *Config, fileID string, destPath string) error 
 
 // destForTopic is where a session's Telegram posts go.
 //
-//	topicID == 0  General: the owner's 1:1 DM (falls back to the forum
-//	              group root if a leftover group is bound and ChatID is unset)
-//	topicID > 0   a leftover forum topic in the bound group
-//	topicID < 0   a backend-only worker: no Telegram destination
+//	topicID == 0  General: the owner's 1:1 DM
+//	topicID != 0  a backend worker: no Telegram destination
 //	              (the hub still sees the event; owner-facing pings use 0)
 func destForTopic(cfg *Config, topicID int64) (chatID, threadID int64, ok bool) {
-	if cfg == nil || cfg.BotToken == "" {
+	if cfg == nil || cfg.BotToken == "" || cfg.ChatID == 0 || topicID != 0 {
 		return 0, 0, false
 	}
-	if topicID < 0 {
-		return 0, 0, false
-	}
-	if topicID > 0 {
-		if cfg.GroupID == 0 {
-			return 0, 0, false
-		}
-		return cfg.GroupID, topicID, true
-	}
-	if cfg.ChatID != 0 {
-		return cfg.ChatID, 0, true
-	}
-	if cfg.GroupID != 0 {
-		return cfg.GroupID, 0, true
-	}
-	return 0, 0, false
-}
-
-func createForumTopic(config *Config, name string) (int64, error) {
-	if config.GroupID == 0 {
-		return 0, fmt.Errorf("no group configured. Add bot to a group with topics enabled and run: ccc setgroup")
-	}
-
-	params := url.Values{
-		"chat_id": {fmt.Sprintf("%d", config.GroupID)},
-		"name":    {name},
-	}
-
-	result, err := telegramAPI(config, "createForumTopic", params)
-	if err != nil {
-		return 0, err
-	}
-	if !result.OK {
-		return 0, fmt.Errorf("failed to create topic: %s", result.Description)
-	}
-
-	var topic TopicResult
-	if err := json.Unmarshal(result.Result, &topic); err != nil {
-		return 0, fmt.Errorf("failed to parse topic result: %w", err)
-	}
-
-	return topic.MessageThreadID, nil
-}
-
-// editForumTopic renames an existing forum topic. An empty name is omitted,
-// which is how the Bot API spells "keep the current one". Topic icons are
-// not used (idle reminders + General's timeout replaced that indicator).
-func editForumTopic(config *Config, topicID int64, name string) error {
-	if topicID <= 0 {
-		return nil
-	}
-	if config.GroupID == 0 {
-		return fmt.Errorf("no group configured")
-	}
-	if strings.TrimSpace(name) == "" {
-		return nil
-	}
-
-	params := url.Values{
-		"chat_id":           {fmt.Sprintf("%d", config.GroupID)},
-		"message_thread_id": {fmt.Sprintf("%d", topicID)},
-		"name":              {name},
-	}
-
-	result, err := telegramAPI(config, "editForumTopic", params)
-	if err != nil {
-		return err
-	}
-	if !result.OK {
-		return fmt.Errorf("failed to edit topic: %s", result.Description)
-	}
-
-	return nil
-}
-
-func deleteForumTopic(config *Config, topicID int64) error {
-	if config.GroupID == 0 {
-		return fmt.Errorf("no group configured")
-	}
-
-	params := url.Values{
-		"chat_id":           {fmt.Sprintf("%d", config.GroupID)},
-		"message_thread_id": {fmt.Sprintf("%d", topicID)},
-	}
-
-	result, err := telegramAPI(config, "deleteForumTopic", params)
-	if err != nil {
-		return err
-	}
-	if !result.OK {
-		return fmt.Errorf("failed to delete topic: %s", result.Description)
-	}
-
-	return nil
+	return cfg.ChatID, 0, true
 }
 
 // setBotCommands sets the bot commands in Telegram
@@ -758,42 +646,4 @@ func sendMessageKeyboardGetID(config *Config, chatID int64, threadID int64, text
 		return 0, nil // safe-ignore: the message went out; only its id is unknown
 	}
 	return msg.MessageID, nil
-}
-
-// reopenForumTopic reopens a closed forum topic. TOPIC_NOT_MODIFIED means it
-// was already open, which is success for unarchive.
-func reopenForumTopic(config *Config, topicID int64) error {
-	if config == nil || config.BotToken == "" || config.GroupID == 0 || topicID <= 0 {
-		return nil
-	}
-	params := url.Values{}
-	params.Set("chat_id", fmt.Sprintf("%d", config.GroupID))
-	params.Set("message_thread_id", fmt.Sprintf("%d", topicID))
-	resp, err := telegramAPI(config, "reopenForumTopic", params)
-	if err != nil {
-		return err
-	}
-	if !resp.OK && !strings.Contains(resp.Description, "TOPIC_NOT_MODIFIED") {
-		return fmt.Errorf("reopenForumTopic: %s", resp.Description)
-	}
-	return nil
-}
-
-// closeForumTopic closes a topic without deleting it, which is what archiving a
-// bot does: the conversation stays readable, but nothing new lands in it.
-func closeForumTopic(config *Config, topicID int64) error {
-	if config == nil || config.BotToken == "" || config.GroupID == 0 || topicID <= 0 {
-		return nil
-	}
-	params := url.Values{}
-	params.Set("chat_id", fmt.Sprintf("%d", config.GroupID))
-	params.Set("message_thread_id", fmt.Sprintf("%d", topicID))
-	resp, err := telegramAPI(config, "closeForumTopic", params)
-	if err != nil {
-		return err
-	}
-	if !resp.OK {
-		return fmt.Errorf("closeForumTopic: %s", resp.Description)
-	}
-	return nil
 }

@@ -154,6 +154,24 @@ func TestBackgroundJobWakesTheBotOnSuccess(t *testing.T) {
 	}
 }
 
+func TestNotifyBotPingsGeneral(t *testing.T) {
+	in, _, api := testInstance(t)
+	b, err := in.createBot("worker", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.notifyBot(b, renderJobFailedNotice(&BackgroundJob{ID: 1, Name: "boom", Error: "exit status 7"}))
+	ping, ok := sendContaining(api, "Background job")
+	if !ok {
+		chat, thread, destOK := destForTopic(in.config(), 0)
+		t.Fatalf("no ping texts=%v dest=(%d,%d,%v) cfg.ChatID=%d token=%q",
+			api.texts(""), chat, thread, destOK, in.config().ChatID, in.config().BotToken)
+	}
+	if ping.Params.Get("message_thread_id") != "" {
+		t.Errorf("failure ping thread = %q, want General", ping.Params.Get("message_thread_id"))
+	}
+}
+
 func TestBackgroundJobWakesTheBotOnFailure(t *testing.T) {
 	s, in, runner, api := testScheduler(t)
 	b, err := in.createBot("worker", "")

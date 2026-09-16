@@ -17,7 +17,6 @@ const version = "3.0.0"
 type Config struct {
 	BotToken          string              `json:"bot_token"`
 	ChatID            int64               `json:"chat_id"`                      // the owner's Telegram user id — also their DM chat
-	GroupID           int64               `json:"group_id,omitempty"`           // leftover forum group; new sessions are DM-only
 	TranscriptionLang string              `json:"transcription_lang,omitempty"` // language code for whisper (e.g. "es")
 	RelayURL          string              `json:"relay_url,omitempty"`          // relay server for files over 50 MB
 	HubURL            string              `json:"hub_url,omitempty"`            // public ccc hub (default wss://hub.getccc.dev; "-" disables)
@@ -41,7 +40,7 @@ type Config struct {
 // TelegramMessage represents a Telegram message.
 type TelegramMessage struct {
 	MessageID       int   `json:"message_id"`
-	MessageThreadID int64 `json:"message_thread_id,omitempty"` // topic id
+	MessageThreadID int64 `json:"message_thread_id,omitempty"` // ignored; ccc is DM-only
 	Chat            struct {
 		ID   int64  `json:"id"`
 		Type string `json:"type"` // "private", "group", "supergroup"
@@ -60,26 +59,7 @@ type TelegramMessage struct {
 	Photo          []TelegramPhoto   `json:"photo,omitempty"`
 	Document       *TelegramDocument `json:"document,omitempty"`
 	Caption        string            `json:"caption,omitempty"`
-	// ForumTopicEdited is the service message Telegram posts into a topic when
-	// somebody renames it in the app. ccc follows the title with the session name.
-	ForumTopicEdited *ForumTopicEdited `json:"forum_topic_edited,omitempty"`
-	// ForumTopicClosed / ForumTopicReopened are Telegram close/reopen of a
-	// forum topic. Closing retires the session; reopening continues it.
-	ForumTopicClosed   *ForumTopicClosed   `json:"forum_topic_closed,omitempty"`
-	ForumTopicReopened *ForumTopicReopened `json:"forum_topic_reopened,omitempty"`
 }
-
-// ForumTopicEdited carries the new title of a renamed forum topic. Only the
-// changed fields are present, so an icon-only edit has an empty Name.
-type ForumTopicEdited struct {
-	Name string `json:"name,omitempty"`
-}
-
-// ForumTopicClosed is Telegram's empty payload for a closed forum topic.
-type ForumTopicClosed struct{}
-
-// ForumTopicReopened is Telegram's empty payload for a reopened forum topic.
-type ForumTopicReopened struct{}
 
 type TelegramVoice struct {
 	FileID   string `json:"file_id"`
@@ -133,12 +113,6 @@ type TelegramResponse struct {
 	Result      json.RawMessage `json:"result,omitempty"`
 }
 
-// TopicResult is the result of creating a forum topic.
-type TopicResult struct {
-	MessageThreadID int64  `json:"message_thread_id"`
-	Name            string `json:"name"`
-}
-
 // InlineKeyboardButton represents a Telegram inline keyboard button.
 type InlineKeyboardButton struct {
 	Text         string `json:"text"`
@@ -182,11 +156,6 @@ func main() {
 
 	case "config":
 		must(configCommand(os.Args[2:]))
-
-	case "setgroup":
-		config, err := loadConfig()
-		must(err)
-		must(setGroup(config))
 
 	case "mcp":
 		// Stdio MCP server for one turn; spawned by Claude Code, never by hand.
@@ -256,8 +225,8 @@ func fail(format string, args ...any) {
 // ---------------------------------------------------------------------------
 
 // configCommand is the non-interactive bootstrap path: on a headless VM,
-// `ccc config set bot_token …`, `chat_id …` and `group_id …` are enough to
-// bring an instance up without ever attaching a terminal to Telegram.
+// `ccc config set bot_token …` and `chat_id …` are enough to bring an
+// instance up without ever attaching a terminal to Telegram.
 func configCommand(args []string) error {
 	config, err := loadConfig()
 	if err != nil || config == nil {
@@ -333,7 +302,7 @@ func withDefaultNote(value string, isDefault bool) string {
 
 // configKeys are the keys `ccc config` understands. Secrets are never printed
 // back (DESIGN §12): the bot token reads as "configured".
-var configKeys = []string{"bot_token", "chat_id", "group_id", "model", "data_dir", "env_passthrough", "relay_url",
+var configKeys = []string{"bot_token", "chat_id", "model", "data_dir", "env_passthrough", "relay_url",
 	"hub_url", "instance_name", "transcription_lang", "default_profile", "default_engine", "debounce_ms",
 	"compaction_model", "maintenance_hour", "idle_compact_s", "watch_ttl_s"}
 
@@ -346,8 +315,6 @@ func configGet(config *Config, key string) (string, error) {
 		return "configured", nil
 	case "chat_id":
 		return fmt.Sprint(config.ChatID), nil
-	case "group_id":
-		return fmt.Sprint(config.GroupID), nil
 	case "model":
 		return renderInstanceModels(config), nil
 	case "data_dir":
@@ -398,12 +365,6 @@ func configSet(config *Config, key, value string) error {
 			return err
 		}
 		config.ChatID = n
-	case "group_id":
-		n, err := parseID()
-		if err != nil {
-			return err
-		}
-		config.GroupID = n
 	case "model":
 		config.Model = value
 	case "data_dir":

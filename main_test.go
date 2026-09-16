@@ -19,7 +19,6 @@ func TestConfigSaveLoad(t *testing.T) {
 	config := &Config{
 		BotToken:       "test-token-123",
 		ChatID:         12345,
-		GroupID:        -67890,
 		Model:          "sonnet",
 		DataDir:        "/var/lib/ccc",
 		EnvPassthrough: []string{"GH_TOKEN"},
@@ -33,7 +32,7 @@ func TestConfigSaveLoad(t *testing.T) {
 		t.Fatalf("loadConfig: %v", err)
 	}
 	if loaded.BotToken != config.BotToken || loaded.ChatID != config.ChatID ||
-		loaded.GroupID != config.GroupID || loaded.Model != config.Model || loaded.DataDir != config.DataDir {
+		loaded.Model != config.Model || loaded.DataDir != config.DataDir {
 		t.Errorf("round trip lost data: %+v", loaded)
 	}
 	if len(loaded.EnvPassthrough) != 1 || loaded.EnvPassthrough[0] != "GH_TOKEN" {
@@ -78,7 +77,7 @@ func TestConfigLoadToleratesLegacyKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a v2 config must still load: %v", err)
 	}
-	if config.BotToken != "T" || config.ChatID != 42 || config.GroupID != -100 {
+	if config.BotToken != "T" || config.ChatID != 42 {
 		t.Errorf("the keys v3 still uses were lost: %+v", config)
 	}
 
@@ -92,6 +91,9 @@ func TestConfigLoadToleratesLegacyKeys(t *testing.T) {
 	}
 	if strings.Contains(string(data), "sessions") {
 		t.Errorf("saveConfig kept the legacy sessions map: %s", data)
+	}
+	if strings.Contains(string(data), "group_id") {
+		t.Errorf("saveConfig kept leftover group_id: %s", data)
 	}
 }
 
@@ -226,16 +228,6 @@ func TestSplitList(t *testing.T) {
 		if got := splitList(tt.in); len(got) != tt.want {
 			t.Errorf("splitList(%q) = %v, want %d entries", tt.in, got, tt.want)
 		}
-	}
-}
-
-func TestTopicResultJSON(t *testing.T) {
-	var topic TopicResult
-	if err := json.Unmarshal([]byte(`{"message_thread_id": 12345, "name": "test-topic"}`), &topic); err != nil {
-		t.Fatalf("Unmarshal: %v", err)
-	}
-	if topic.MessageThreadID != 12345 || topic.Name != "test-topic" {
-		t.Errorf("topic = %+v", topic)
 	}
 }
 

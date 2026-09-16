@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// CLI surface of ccc v3: bootstrap (`setup`, `setgroup`, `config`), diagnostics
+// CLI surface of ccc v3: bootstrap (`setup`, `config`), diagnostics
 // (`doctor`) and the service control the installer needs. Everything the bots
 // do at runtime lives in listenv3.go / runner.go.
 
@@ -79,8 +79,7 @@ func startListenerService() {
 // ---------------------------------------------------------------------------
 
 // setup is the interactive bootstrap. On a headless box use the non-interactive
-// path instead: `ccc config set bot_token|chat_id|group_id …` plus `/setgroup`
-// from Telegram (README "Bootstrap on a VM").
+// path instead: `ccc config set bot_token|chat_id …` (README "Bootstrap on a VM").
 func setup(botToken string) error {
 	fmt.Println("🚀 ccc setup")
 	fmt.Println("============")
@@ -97,7 +96,7 @@ func setup(botToken string) error {
 	fmt.Println("Stopping the listener...")
 	stopListenerService()
 
-	fmt.Println("Step 1/3: send any message to your bot in Telegram...")
+	fmt.Println("Step 1/2: send any message to your bot in Telegram...")
 	offset := 0
 	client := &http.Client{Timeout: 35 * time.Second}
 	for config.ChatID == 0 {
@@ -117,31 +116,7 @@ func setup(botToken string) error {
 		}
 	}
 
-	fmt.Println("Step 2/3: optional leftover group — skip with ctrl-c. The happy path is")
-	fmt.Println("          this bot's DM (General). A forum group is not required...")
-	deadline := time.Now().Add(30 * time.Second)
-	for config.GroupID == 0 && time.Now().Before(deadline) {
-		updates, next, err := pollUpdates(client, botToken, offset, 5)
-		if err != nil {
-			continue
-		}
-		offset = next
-		for _, u := range updates {
-			if u.Message.Chat.Type == "supergroup" && u.Message.From.ID == config.ChatID {
-				config.GroupID = u.Message.Chat.ID
-				if err := saveConfig(config); err != nil {
-					return fmt.Errorf("save config: %w", err)
-				}
-				fmt.Printf("✅ Group: %d\n\n", config.GroupID)
-			}
-		}
-	}
-	if config.GroupID == 0 {
-		fmt.Println("⏭️  No group — the bot's DM is General. That is the happy path.")
-		fmt.Println()
-	}
-
-	fmt.Println("Step 3/3: installing the background service...")
+	fmt.Println("Step 2/2: installing the background service...")
 	if err := installService(); err != nil {
 		fmt.Printf("⚠️  Service installation failed: %v\n", err)
 		fmt.Println("   You can start it manually with: ccc listen")
@@ -154,35 +129,8 @@ func setup(botToken string) error {
 	return nil
 }
 
-// setGroup records the forum group from the next message the owner sends there.
-func setGroup(config *Config) error {
-	fmt.Println("Send a message in the group where you want your sessions to live...")
-	fmt.Println("(Topics must be enabled and the bot must be an admin.)")
-
-	offset := 0
-	client := &http.Client{Timeout: 35 * time.Second}
-	for {
-		updates, next, err := pollUpdates(client, config.BotToken, offset, 30)
-		if err != nil {
-			return err
-		}
-		offset = next
-		for _, u := range updates {
-			chat := u.Message.Chat
-			if chat.Type == "supergroup" && u.Message.From.ID == config.ChatID {
-				config.GroupID = chat.ID
-				if err := saveConfig(config); err != nil {
-					return err
-				}
-				fmt.Printf("✅ Group set: %d\n", chat.ID)
-				return nil
-			}
-		}
-	}
-}
-
 // pollUpdates is one getUpdates round trip; it returns the updates and the next
-// offset. Shared by the two bootstrap loops above.
+// offset. Used by interactive setup.
 func pollUpdates(client *http.Client, token string, offset, timeout int) ([]telegramUpdateEntry, int, error) {
 	reqURL := fmt.Sprintf("%s?offset=%d&timeout=%d", telegramURL(token, "getUpdates"), offset, timeout)
 	resp, err := telegramClientGet(client, token, reqURL)
@@ -286,9 +234,6 @@ func doctor(fix bool) {
 			fmt.Printf("   %s\n", check.hint)
 			allGood = false
 		}
-		if config.GroupID != 0 {
-			fmt.Printf("  %-14s %d (legacy forum group; new sessions are DM-only)\n", "group_id", config.GroupID)
-		}
 		fmt.Printf("  %-14s %s\n", "data_dir", dataDir(config))
 		fmt.Printf("  %-14s %s\n", "model", renderInstanceModels(config))
 	}
@@ -356,12 +301,11 @@ USAGE:
     ccc listen              Run the instance (normally done by the service)
 
 COMMANDS:
-    setup <bot_token>       Interactive bootstrap (owner DM, optional group, service)
+    setup <bot_token>       Interactive bootstrap (owner DM, service)
     config set <key> <val>  Non-interactive bootstrap; keys: bot_token, chat_id,
-                            group_id (legacy), model, default_engine, data_dir, env_passthrough
+                            model, default_engine, data_dir, env_passthrough
     config get <key>        Show one value
     config                  Show the whole configuration
-    setgroup                Record the forum group from your next message in it
     install                 Install the background service (launchd / systemd --user)
     env sync                Snapshot env_passthrough secrets into <config>/env
                             (run from a login shell: bash -lc 'ccc env sync')
@@ -385,7 +329,7 @@ TELEGRAM (the bot's 1:1 DM is General):
     /engine                 assign this session to an engine's account pool
     /sessions /status /usage                                    anywhere
     /memory stats|restore <id>                                  memory upkeep
-    /account add <id> <engine> /access /model [engine] <slug> /setgroup  owner only
+    /account add <id> <engine> /access /model [engine] <slug>  owner only
 
 FLAGS:
     -h, --help              Show this help

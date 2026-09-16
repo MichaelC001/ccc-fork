@@ -43,19 +43,9 @@ func postBotMirror(cfg *Config, from, to *Bot, body string) {
 	html := fmt.Sprintf("🤝 <b>%s</b> → <b>%s</b>: %s",
 		htmlEscape(from.Name), htmlEscape(to.Name), renderTelegramHTML(truncate(body, 1500)))
 	// Owner-facing: one copy in General (the DM) so the dispatcher traffic
-	// is visible. Leftover forum topics also get a copy.
+	// is visible.
 	if chat, thread, ok := destForTopic(cfg, 0); ok {
 		_, _ = sendMessageHTMLGetID(cfg, chat, thread, html) // safe-ignore: a failed mirror must not fail the send
-	}
-	if hasForumTopic(to) {
-		if chat, thread, ok := destForTopic(cfg, to.TopicID); ok {
-			_, _ = sendMessageHTMLGetID(cfg, chat, thread, html) // safe-ignore: same
-		}
-	}
-	if hasForumTopic(from) && from.TopicID != to.TopicID {
-		if chat, thread, ok := destForTopic(cfg, from.TopicID); ok {
-			_, _ = sendMessageHTMLGetID(cfg, chat, thread, html) // safe-ignore: same
-		}
 	}
 }
 

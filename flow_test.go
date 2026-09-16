@@ -24,7 +24,6 @@ type fakeBotAPI struct {
 	mu      sync.Mutex
 	calls   []apiCall
 	nextMsg int64
-	nextTop int64
 }
 
 type apiCall struct {
@@ -34,7 +33,7 @@ type apiCall struct {
 
 func newFakeBotAPI(t *testing.T) *fakeBotAPI {
 	t.Helper()
-	f := &fakeBotAPI{nextMsg: 1000, nextTop: 500}
+	f := &fakeBotAPI{nextMsg: 1000}
 	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// File downloads are served from a different path shape than methods.
 		if strings.HasPrefix(r.URL.Path, "/file/") {
@@ -47,10 +46,6 @@ func newFakeBotAPI(t *testing.T) *fakeBotAPI {
 		f.calls = append(f.calls, apiCall{Method: method, Params: r.Form})
 		var body string
 		switch method {
-		case "createForumTopic":
-			f.nextTop++
-			body = fmt.Sprintf(`{"ok":true,"result":{"message_thread_id":%d,"name":%q}}`,
-				f.nextTop, r.Form.Get("name"))
 		case "getFile":
 			body = `{"ok":true,"result":{"file_path":"documents/blob.bin"}}`
 		case "sendMessage", "editMessageText":
@@ -151,29 +146,15 @@ func isolateConfigEnv(t *testing.T) {
 	t.Setenv("CCC_DB", "")
 }
 
-// attachForumTopic pretends this session still has a leftover Telegram forum
-// topic (legacy group+topics). New sessions do not get one.
-func attachForumTopic(t *testing.T, in *instance, b *Bot) {
-	t.Helper()
-	id, err := createForumTopic(in.config(), b.Name)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := in.db.Model(&Bot{}).Where("id = ?", b.ID).Update("topic_id", id).Error; err != nil {
-		t.Fatal(err)
-	}
-	b.TopicID = id
-}
-
 func testInstance(t *testing.T) (*instance, *fakeRunner, *fakeBotAPI) {
 	t.Helper()
-	// Commands that write the configuration (/model, /setgroup, /account) go
-	// through loadConfig/saveConfig, so the tests get their own HOME.
+	// Commands that write the configuration (/model, /account) go through
+	// loadConfig/saveConfig, so the tests get their own HOME.
 	isolateConfigEnv(t)
 	t.Setenv("HOME", t.TempDir())
 	api := newFakeBotAPI(t)
 	dir := t.TempDir()
-	cfg := &Config{BotToken: "TESTTOKEN", ChatID: 42, GroupID: -100777, DataDir: dir}
+	cfg := &Config{BotToken: "TESTTOKEN", ChatID: 42, DataDir: dir}
 	db, err := openStore(dbPath(cfg))
 	if err != nil {
 		t.Fatalf("openStore: %v", err)
@@ -182,13 +163,9 @@ func testInstance(t *testing.T) (*instance, *fakeRunner, *fakeBotAPI) {
 	return &instance{db: db, cfg: cfg, runner: runner, dataDir: dir}, runner, api
 }
 
-// ownerMessage builds an inbound group message from the owner.
-func ownerMessage(threadID int64, text string) *TelegramMessage {
-	m := &TelegramMessage{MessageThreadID: threadID, Text: text, MessageID: 7}
-	m.Chat.ID = -100777
-	m.Chat.Type = "supergroup"
-	m.From.ID = 42
-	return m
+// ownerMessage builds an inbound DM from the owner (General).
+func ownerMessage(text string) *TelegramMessage {
+	return dmMessage(42, text)
 }
 
 // An edited message is how a mistyped command gets fixed on a phone, so a
@@ -200,7 +177,7 @@ func TestEditedCommandIsDispatchedOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	edit := ownerMessage(0, "/model sonnet")
+	edit := ownerMessage("/model sonnet")
 	edit.EditDate = 1700000000
 	in.handleEditedMessage(edit)
 	in.handleEditedMessage(edit) // Telegram redelivers the same edit
@@ -213,7 +190,7 @@ func TestEditedCommandIsDispatchedOnce(t *testing.T) {
 	}
 
 	// Editing the same message again is a new edit, and runs.
-	again := ownerMessage(0, "/model opus")
+	again := ownerMessage("/model opus")
 	again.EditDate = 1700000060
 	in.handleEditedMessage(again)
 	if got := in.config().Model; got != "opus" {
@@ -221,7 +198,7 @@ func TestEditedCommandIsDispatchedOnce(t *testing.T) {
 	}
 
 	// Plain text is still ignored: fixing a typo must not re-run a turn.
-	plain := ownerMessage(0, "watch the deploy")
+	plain := ownerMessage("watch the deploy")
 	plain.EditDate = 1700000120
 	in.handleEditedMessage(plain)
 	if _, ok := runner.last(); ok {
@@ -235,7 +212,7 @@ func TestEditedCommandIsDispatchedOnce(t *testing.T) {
 func TestTextInGeneralGoesToDispatcher(t *testing.T) {
 	in, runner, api := testInstance(t)
 
-	in.handleMessage(ownerMessage(0, "watch the deploy\nand tell me when it is green"))
+	in.handleMessage(ownerMessage("watch the deploy\nand tell me when it is green"))
 
 	if got := len(api.since("createForumTopic")); got != 0 {
 		t.Fatalf("General must not open a new topic, created %d", got)
@@ -301,41 +278,25 @@ func TestSessionFromDMCreatesBackendWorker(t *testing.T) {
 	}
 }
 
-func TestTextInTopicEnqueuesTurnForThatBot(t *testing.T) {
-	in, runner, _ := testInstance(t)
-	b, err := in.createBot("deployer", "ships things")
-	if err != nil {
-		t.Fatalf("createBot: %v", err)
+func TestGroupMessageIsIgnored(t *testing.T) {
+	in, runner, api := testInstance(t)
+	if _, err := in.createBot("deployer", ""); err != nil {
+		t.Fatal(err)
 	}
-	attachForumTopic(t, in, b)
-
-	msg := ownerMessage(b.TopicID, "status?")
-	msg.MessageID = 99
-	in.handleMessage(msg)
-
-	last, ok := runner.last()
-	if !ok {
-		t.Fatal("nothing enqueued")
-	}
-	if last.BotID != b.ID || last.Text != "status?" || last.Source != sourceUser {
-		t.Errorf("unexpected turn: %+v", last)
-	}
-	if last.Trigger != 99 {
-		t.Errorf("trigger message = %d, want 99 (needed for the ✅ reaction)", last.Trigger)
-	}
-}
-
-func TestTextInUnknownTopicIsNotDispatched(t *testing.T) {
-	in, runner, _ := testInstance(t)
-	in.handleMessage(ownerMessage(31337, "hello?"))
+	before := len(api.since("sendMessage"))
+	in.handleMessage(groupMessage(42, 1, "status?"))
+	in.handleMessage(groupMessage(42, 31337, "hello?"))
 	if _, ok := runner.last(); ok {
-		t.Error("a message in a topic with no bot should not enqueue anything")
+		t.Error("a group message must not enqueue a turn")
+	}
+	if got := len(api.since("sendMessage")) - before; got != 0 {
+		t.Errorf("ccc replied %d times in a group, want 0", got)
 	}
 }
 
 func TestNonOwnerIsIgnored(t *testing.T) {
 	in, runner, api := testInstance(t)
-	msg := ownerMessage(0, "let me in")
+	msg := ownerMessage("let me in")
 	msg.From.ID = 999
 	in.handleMessage(msg)
 	if _, ok := runner.last(); ok {
@@ -364,7 +325,7 @@ func TestQuestionCallbackAnswersAndResumesTheBot(t *testing.T) {
 
 	cb := &CallbackQuery{ID: "cb1", Data: fmt.Sprintf("q:%d:0", q.ID)}
 	cb.From.ID = 42
-	cb.Message = ownerMessage(b.TopicID, "")
+	cb.Message = ownerMessage("")
 	cb.Message.MessageID = 555
 	in.handleCallback(cb)
 
@@ -414,7 +375,7 @@ func TestReplyToQuestionCountsAsAnswer(t *testing.T) {
 	q := Question{BotID: b.ID, Question: "Which branch?", AskedMessageID: 777}
 	in.db.Create(&q)
 
-	msg := ownerMessage(b.TopicID, "main")
+	msg := ownerMessage("main")
 	msg.ReplyToMessage = &TelegramMessage{MessageID: 777}
 	in.handleMessage(msg)
 
@@ -429,7 +390,7 @@ func TestReplyToQuestionCountsAsAnswer(t *testing.T) {
 	}
 }
 
-func TestSendToBotMirrorsIntoBothTopics(t *testing.T) {
+func TestSendToBotMirrorsIntoGeneral(t *testing.T) {
 	in, _, api := testInstance(t)
 	a, err := in.createBot("alpha", "")
 	if err != nil {
@@ -472,7 +433,7 @@ func TestSendToBotMirrorsIntoBothTopics(t *testing.T) {
 	}
 }
 
-func TestQueueBotMessageMirrorsIntoBothTopics(t *testing.T) {
+func TestQueueBotMessageMirrorsIntoGeneral(t *testing.T) {
 	in, _, api := testInstance(t)
 	a, err := in.createBot("alpha", "")
 	if err != nil {
@@ -555,13 +516,16 @@ func TestSendToBotRejectsUnknownTarget(t *testing.T) {
 	}
 }
 
-func TestCommandsInTopic(t *testing.T) {
+func TestCommandsInDM(t *testing.T) {
 	in, runner, api := testInstance(t)
-	b, _ := in.createBot("worker", "")
-	in.db.Model(&Bot{}).Where("id = ?", b.ID).Update("session_id", "abc-123")
+	g, err := in.ensureGeneralBot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.db.Model(&Bot{}).Where("id = ?", g.ID).Update("session_id", "abc-123")
 
-	in.handleMessage(ownerMessage(b.TopicID, "/role ships the deploy"))
-	after, _ := botByID(in.db, b.ID)
+	in.handleMessage(ownerMessage("/role ships the deploy"))
+	after, _ := botByID(in.db, g.ID)
 	if after.Role != "" {
 		t.Errorf("/role must not set a role anymore: %q", after.Role)
 	}
@@ -569,34 +533,34 @@ func TestCommandsInTopic(t *testing.T) {
 		t.Error("/role must not rotate the session")
 	}
 
-	in.db.Model(&Bot{}).Where("id = ?", b.ID).Update("session_id", "def-456")
-	in.handleMessage(ownerMessage(b.TopicID, "/new"))
-	after, _ = botByID(in.db, b.ID)
+	in.db.Model(&Bot{}).Where("id = ?", g.ID).Update("session_id", "def-456")
+	in.handleMessage(ownerMessage("/new"))
+	after, _ = botByID(in.db, g.ID)
 	if after.SessionID != "" {
 		t.Error("/new must clear the session id")
 	}
 
-	in.handleMessage(ownerMessage(b.TopicID, "/stop"))
-	if len(runner.stops) != 1 || runner.stops[0] != b.ID {
+	in.handleMessage(ownerMessage("/stop"))
+	if len(runner.stops) != 1 || runner.stops[0] != g.ID {
 		t.Errorf("/stop did not reach the runner: %v", runner.stops)
 	}
 
-	in.handleMessage(ownerMessage(b.TopicID, "/cwd /definitely/not/here"))
-	after, _ = botByID(in.db, b.ID)
+	in.handleMessage(ownerMessage("/cwd /definitely/not/here"))
+	after, _ = botByID(in.db, g.ID)
 	if after.Cwd == "/definitely/not/here" {
 		t.Error("/cwd accepted a directory that does not exist")
 	}
 	dir := t.TempDir()
-	in.handleMessage(ownerMessage(b.TopicID, "/cwd "+dir))
-	after, _ = botByID(in.db, b.ID)
+	in.handleMessage(ownerMessage("/cwd " + dir))
+	after, _ = botByID(in.db, g.ID)
 	if after.Cwd != dir {
 		t.Errorf("cwd = %q, want %q", after.Cwd, dir)
 	}
 
-	if err := upsertMemory(in.db, scopeUser, "", "deploy-target", "vps3", b.ID); err != nil {
+	if err := upsertMemory(in.db, scopeUser, "", "deploy-target", "vps3", g.ID); err != nil {
 		t.Fatal(err)
 	}
-	in.handleMessage(ownerMessage(b.TopicID, "/memory deploy"))
+	in.handleMessage(ownerMessage("/memory deploy"))
 	found := false
 	for _, txt := range api.texts("") {
 		if strings.Contains(txt, "deploy-target") {
@@ -607,23 +571,23 @@ func TestCommandsInTopic(t *testing.T) {
 		t.Error("/memory did not show the stored memory")
 	}
 
-	in.db.Model(&Bot{}).Where("id = ?", b.ID).Update("session_id", "eng-789")
-	in.handleMessage(ownerMessage(b.TopicID, "/engine"))
-	in.handleMessage(ownerMessage(b.TopicID, "/engine grok"))
-	after, _ = botByID(in.db, b.ID)
+	in.db.Model(&Bot{}).Where("id = ?", g.ID).Update("session_id", "eng-789")
+	in.handleMessage(ownerMessage("/engine"))
+	in.handleMessage(ownerMessage("/engine grok"))
+	after, _ = botByID(in.db, g.ID)
 	if after.Engine != engineGrok {
 		t.Errorf("engine = %q after /engine grok", after.Engine)
 	}
 	if after.SessionID != "" {
 		t.Error("/engine must rotate the session: the conversation id is per CLI")
 	}
-	in.handleMessage(ownerMessage(b.TopicID, "/engine not-a-cli"))
-	after, _ = botByID(in.db, b.ID)
+	in.handleMessage(ownerMessage("/engine not-a-cli"))
+	after, _ = botByID(in.db, g.ID)
 	if after.Engine != engineGrok {
 		t.Error("a bad /engine argument must not change the stored engine")
 	}
 
-	in.handleMessage(ownerMessage(b.TopicID, "/forget user deploy-target"))
+	in.handleMessage(ownerMessage("/forget user deploy-target"))
 	var n int64
 	in.db.Model(&Memory{}).Where("key = ?", "deploy-target").Count(&n)
 	if n != 0 {
@@ -636,7 +600,7 @@ func TestBotsCommandWorksAnywhere(t *testing.T) {
 	if _, err := in.createBot("alpha", "does alpha things"); err != nil {
 		t.Fatal(err)
 	}
-	in.handleMessage(ownerMessage(0, "/sessions"))
+	in.handleMessage(ownerMessage("/sessions"))
 	joined := strings.Join(api.texts(""), "\n")
 	if !strings.Contains(joined, "alpha") {
 		t.Errorf("/sessions output missing the session: %q", joined)
@@ -648,9 +612,12 @@ func TestBotsCommandWorksAnywhere(t *testing.T) {
 
 func TestDocumentIsSavedIntoTheBotInbox(t *testing.T) {
 	in, runner, _ := testInstance(t)
-	b, _ := in.createBot("filer", "")
+	g, err := in.ensureGeneralBot()
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	msg := ownerMessage(b.TopicID, "")
+	msg := ownerMessage("")
 	msg.Document = &TelegramDocument{FileID: "file-1", FileName: "../../escape.txt"}
 	msg.Caption = "read this"
 	in.handleMessage(msg)
@@ -659,7 +626,7 @@ func TestDocumentIsSavedIntoTheBotInbox(t *testing.T) {
 	if !ok {
 		t.Fatal("nothing enqueued for the attachment")
 	}
-	wantDir := filepath.Join(b.Cwd, "inbox")
+	wantDir := filepath.Join(g.Cwd, "inbox")
 	if !strings.Contains(last.Text, wantDir) {
 		t.Errorf("message %q does not point at the bot inbox %q", last.Text, wantDir)
 	}
@@ -668,138 +635,23 @@ func TestDocumentIsSavedIntoTheBotInbox(t *testing.T) {
 	}
 }
 
-func TestNameCommandRenamesTheBotAndTheTopic(t *testing.T) {
+func TestNameCommandOnGeneralStaysGeneral(t *testing.T) {
 	in, _, api := testInstance(t)
-	b, err := in.createBot("worker", "does things")
-	if err != nil {
+	if _, err := in.ensureGeneralBot(); err != nil {
 		t.Fatal(err)
 	}
-	attachForumTopic(t, in, b)
-	in.db.Model(&Bot{}).Where("id = ?", b.ID).Update("session_id", "abc-123")
-
-	// No argument shows the current name and changes nothing.
-	in.handleMessage(ownerMessage(b.TopicID, "/name"))
-	if len(api.since("editForumTopic")) != 0 {
-		t.Error("/name with no argument must not rename anything")
-	}
-	if texts := api.texts(fmt.Sprint(b.TopicID)); len(texts) == 0 || !strings.Contains(texts[len(texts)-1], "worker") {
-		t.Errorf("/name did not show the current name: %v", texts)
-	}
-
-	in.handleMessage(ownerMessage(b.TopicID, "/name shipper"))
-
-	after, err := botByID(in.db, b.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if after.Name != "shipper" {
-		t.Errorf("name = %q, want shipper", after.Name)
-	}
-	if after.SessionID != "" {
-		t.Error("/name must rotate the session: the name is part of the system prompt")
-	}
-	if after.Role != "does things" {
-		t.Errorf("role = %q, want it untouched by a rename", after.Role)
-	}
-	edits := api.since("editForumTopic")
-	if len(edits) != 1 {
-		t.Fatalf("expected one editForumTopic call, got %d", len(edits))
-	}
-	if got := edits[0].Params.Get("name"); got != "shipper" {
-		t.Errorf("topic renamed to %q, want shipper", got)
-	}
-	if got := edits[0].Params.Get("message_thread_id"); got != fmt.Sprint(b.TopicID) {
-		t.Errorf("renamed topic %s, want %d", got, b.TopicID)
-	}
-	if got := edits[0].Params.Get("icon_custom_emoji_id"); got != "" {
-		t.Errorf("topic icons are unused; got icon id %q", got)
-	}
-}
-
-func TestNameCommandRejectsACollision(t *testing.T) {
-	in, _, api := testInstance(t)
-	if _, err := in.createBot("alpha", ""); err != nil {
-		t.Fatal(err)
-	}
-	b, err := in.createBot("beta", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	in.db.Model(&Bot{}).Where("id = ?", b.ID).Update("session_id", "keep-me")
-
-	// Case-insensitively taken: alpha already exists.
-	in.handleMessage(ownerMessage(b.TopicID, "/name ALPHA"))
-
-	after, err := botByID(in.db, b.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if after.Name != "beta" {
-		t.Errorf("name = %q, want beta: the rename should have been rejected", after.Name)
-	}
-	if after.SessionID != "keep-me" {
-		t.Error("a rejected rename must not rotate the session")
-	}
-	if len(api.since("editForumTopic")) != 0 {
-		t.Error("a rejected rename must not touch the topic")
-	}
+	in.handleMessage(ownerMessage("/name"))
 	joined := strings.Join(api.texts(""), "\n")
-	if !strings.Contains(joined, "alpha") {
-		t.Errorf("the rejection should say which bot holds the name: %q", joined)
+	if !strings.Contains(joined, "General stays General") && !strings.Contains(joined, generalBotName) {
+		t.Errorf("/name in the DM should mention General: %q", joined)
 	}
-}
-
-func TestTopicRenameSyncsTheBotName(t *testing.T) {
-	in, _, api := testInstance(t)
-	b, err := in.createBot("worker", "")
+	in.handleMessage(ownerMessage("/name shipper"))
+	g, err := generalBot(in.db)
 	if err != nil {
 		t.Fatal(err)
 	}
-	attachForumTopic(t, in, b)
-	in.db.Model(&Bot{}).Where("id = ?", b.ID).Update("session_id", "abc-123")
-
-	renamed := ownerMessage(b.TopicID, "")
-	renamed.ForumTopicEdited = &ForumTopicEdited{Name: "shipper"}
-	in.handleMessage(renamed)
-
-	after, err := botByID(in.db, b.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if after.Name != "shipper" {
-		t.Errorf("name = %q, want the topic title", after.Name)
-	}
-	if after.SessionID != "" {
-		t.Error("a synced rename rotates the session too")
-	}
-	// The title is already right, so ccc must not rename it back.
-	if len(api.since("editForumTopic")) != 0 {
-		t.Error("following a topic rename must not call editForumTopic")
-	}
-}
-
-func TestTopicRenameKeepsTheOldNameOnACollision(t *testing.T) {
-	in, _, api := testInstance(t)
-	if _, err := in.createBot("alpha", ""); err != nil {
-		t.Fatal(err)
-	}
-	b, err := in.createBot("beta", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	attachForumTopic(t, in, b)
-
-	renamed := ownerMessage(b.TopicID, "")
-	renamed.ForumTopicEdited = &ForumTopicEdited{Name: "alpha"}
-	in.handleMessage(renamed)
-
-	after, _ := botByID(in.db, b.ID)
-	if after.Name != "beta" {
-		t.Errorf("name = %q, want beta: a colliding title must not be adopted", after.Name)
-	}
-	joined := strings.Join(api.texts(fmt.Sprint(b.TopicID)), "\n")
-	if !strings.Contains(joined, "beta") {
-		t.Errorf("the topic should have been told the name was kept: %q", joined)
+	if g.Name != generalBotName {
+		t.Errorf("General was renamed to %q", g.Name)
 	}
 }
 
@@ -814,10 +666,17 @@ func TestTellSessionFollowsTheRename(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	in.handleMessage(ownerMessage(target.TopicID, "/name gamma"))
+	s := &mcpServer{db: in.db, config: in.cfg, botID: target.ID}
+	res, _, err := s.setName(t.Context(), nil, setNameIn{Name: "gamma"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Fatalf("set_name failed: %+v", res.Content)
+	}
 
-	s := &mcpServer{db: in.db, config: in.cfg, botID: chief.ID}
-	res, _, err := s.tellSession(t.Context(), nil, tellSessionIn{Session: "gamma", Text: "hi"})
+	s = &mcpServer{db: in.db, config: in.cfg, botID: chief.ID}
+	res, _, err = s.tellSession(t.Context(), nil, tellSessionIn{Session: "gamma", Text: "hi"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -833,13 +692,12 @@ func TestTellSessionFollowsTheRename(t *testing.T) {
 	}
 }
 
-func TestSetNameToolRenamesTheTopic(t *testing.T) {
+func TestSetNameToolRenamesTheSession(t *testing.T) {
 	in, _, api := testInstance(t)
 	b, err := in.createBot("worker", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	attachForumTopic(t, in, b)
 	s := &mcpServer{db: in.db, config: in.cfg, botID: b.ID}
 
 	res, _, err := s.setName(t.Context(), nil, setNameIn{Name: "shipper"})
@@ -853,15 +711,10 @@ func TestSetNameToolRenamesTheTopic(t *testing.T) {
 	if after.Name != "shipper" {
 		t.Errorf("name = %q, want shipper", after.Name)
 	}
-	edits := api.since("editForumTopic")
-	if len(edits) != 1 || edits[0].Params.Get("name") != "shipper" {
-		t.Errorf("set_name did not update the topic correctly: %v", edits)
-	}
-	if got := edits[0].Params.Get("icon_custom_emoji_id"); got != "" {
-		t.Errorf("set_name must not set a topic icon, got %q", got)
+	if len(api.since("editForumTopic")) != 0 {
+		t.Error("set_name must not call Telegram forum APIs")
 	}
 
-	// A taken name is a tool error, not a silent no-op.
 	if _, err := in.createBot("taken", ""); err != nil {
 		t.Fatal(err)
 	}
@@ -878,7 +731,7 @@ func TestSetNameToolRenamesTheTopic(t *testing.T) {
 // text. No role interview, no /role, no update_instructions.
 func TestNewSessionDispatchesThePromptStraightToTheEngine(t *testing.T) {
 	in, runner, api := testInstance(t)
-	in.handleMessage(ownerMessage(0, "/session help me with the deploy"))
+	in.handleMessage(ownerMessage("/session help me with the deploy"))
 
 	if len(api.since("createForumTopic")) != 0 {
 		t.Fatalf("new sessions must not create a Telegram topic, got %d", len(api.since("createForumTopic")))
@@ -908,73 +761,6 @@ func TestNewSessionDispatchesThePromptStraightToTheEngine(t *testing.T) {
 	}
 }
 
-func TestClosingATopicRetiresTheSession(t *testing.T) {
-	in, runner, _ := testInstance(t)
-	b, err := in.createBot("worker", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	attachForumTopic(t, in, b)
-	closed := ownerMessage(b.TopicID, "")
-	closed.ForumTopicClosed = &ForumTopicClosed{}
-	in.handleMessage(closed)
-
-	after, err := botByID(in.db, b.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if after.ArchivedAt == nil {
-		t.Fatal("closing the topic must archive the session")
-	}
-	if after.Status != botDisabled {
-		t.Errorf("status = %q, want disabled", after.Status)
-	}
-
-	in.handleMessage(ownerMessage(b.TopicID, "are you still there?"))
-	// Talking in a closed-then-reopened topic (no service message) continues it.
-	last, ok := runner.last()
-	if !ok || last.Text != "are you still there?" {
-		t.Fatalf("talking in the topic after close should continue the session: %+v", last)
-	}
-	live, err := botByTopic(in.db, b.TopicID)
-	if err != nil || live.ID != b.ID {
-		t.Fatal("the session should be live again after a message in its topic")
-	}
-}
-
-func TestReopeningATopicContinuesTheSession(t *testing.T) {
-	in, runner, _ := testInstance(t)
-	b, err := in.createBot("worker", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	attachForumTopic(t, in, b)
-	if err := archiveBotRow(in.db, b.ID); err != nil {
-		t.Fatal(err)
-	}
-
-	reopened := ownerMessage(b.TopicID, "")
-	reopened.ForumTopicReopened = &ForumTopicReopened{}
-	in.handleMessage(reopened)
-
-	after, err := botByID(in.db, b.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if after.ArchivedAt != nil {
-		t.Fatal("reopening the topic must unarchive the session")
-	}
-	if after.Status != botIdle {
-		t.Errorf("status = %q, want idle", after.Status)
-	}
-
-	in.handleMessage(ownerMessage(b.TopicID, "continue the deploy"))
-	last, ok := runner.last()
-	if !ok || last.BotID != b.ID || last.Text != "continue the deploy" {
-		t.Errorf("talking in a reopened topic must continue the same session: %+v", last)
-	}
-}
-
 func TestUsageCommandWorksAnywhere(t *testing.T) {
 	in, _, api := testInstance(t)
 	b, err := in.createBot("spender", "")
@@ -984,7 +770,7 @@ func TestUsageCommandWorksAnywhere(t *testing.T) {
 	usageTurn(t, in, b.ID, time.Now(), 12*time.Second,
 		`{"input_tokens":1000,"cache_read_input_tokens":4000,"cost_usd":0.4}`)
 
-	in.handleMessage(ownerMessage(0, "/usage"))
+	in.handleMessage(ownerMessage("/usage"))
 	texts := api.texts("")
 	if len(texts) == 0 || !strings.Contains(texts[len(texts)-1], "spender") {
 		t.Errorf("/usage did not report the bot: %v", texts)
@@ -996,10 +782,6 @@ func TestUsageCommandWorksAnywhere(t *testing.T) {
 
 func TestMemoryStatsAndRestoreCommands(t *testing.T) {
 	in, _, api := testInstance(t)
-	b, err := in.createBot("rememberer", "")
-	if err != nil {
-		t.Fatal(err)
-	}
 	seedMemories(t, in.db, memCompactMaxCount+10)
 	rep := runMaintenance(in.db, in.cfg, maintenanceDeps{Turner: answering(compactionAnswer(60))}, time.Now())
 	if len(rep.Compactions) != 1 {
@@ -1007,7 +789,7 @@ func TestMemoryStatsAndRestoreCommands(t *testing.T) {
 	}
 	id := rep.Compactions[0].CompactionID
 
-	in.handleMessage(ownerMessage(b.TopicID, "/memory stats"))
+	in.handleMessage(ownerMessage("/memory stats"))
 	last := func() string {
 		texts := api.texts("")
 		return texts[len(texts)-1]
@@ -1017,17 +799,15 @@ func TestMemoryStatsAndRestoreCommands(t *testing.T) {
 	}
 
 	// A non-owner may look, but not undo.
-	stranger := ownerMessage(b.TopicID, fmt.Sprintf("/memory restore %d", id))
-	stranger.From.ID = 4242
 	if err := in.db.Create(&Access{TelegramUserID: 4242, State: accessApproved}).Error; err != nil {
 		t.Fatal(err)
 	}
-	in.handleMessage(stranger)
+	in.handleMessage(dmMessage(4242, fmt.Sprintf("/memory restore %d", id)))
 	if !strings.Contains(last(), "owner-only") {
 		t.Errorf("restore is owner-only: %q", last())
 	}
 
-	in.handleMessage(ownerMessage(b.TopicID, fmt.Sprintf("/memory restore %d", id)))
+	in.handleMessage(ownerMessage(fmt.Sprintf("/memory restore %d", id)))
 	if !strings.Contains(last(), "Restored") {
 		t.Errorf("/memory restore = %q", last())
 	}
@@ -1044,7 +824,7 @@ func TestMemoryStatsAndRestoreCommands(t *testing.T) {
 func TestSetCommandIsGone(t *testing.T) {
 	in, _, api := testInstance(t)
 
-	in.handleMessage(ownerMessage(0, "/set debounce_ms 800"))
+	in.handleMessage(ownerMessage("/set debounce_ms 800"))
 
 	texts := api.texts("")
 	if len(texts) == 0 {

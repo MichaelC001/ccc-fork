@@ -50,8 +50,8 @@ func handleSendFile(filePath string) error {
 	if err != nil {
 		return fmt.Errorf("no bot owns %s — run this from a bot's working directory", cwd)
 	}
-	sessionName, topicID := bot.Name, ownerTopic(bot)
-	chat, thread, ok := destForTopic(config, topicID)
+	sessionName := bot.Name
+	chat, thread, ok := destForTopic(config, 0)
 	if !ok {
 		return fmt.Errorf("no Telegram destination configured")
 	}

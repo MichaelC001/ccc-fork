@@ -19,8 +19,8 @@ import (
 
 // listenv3.go is the Telegram side of ccc v3 (DESIGN §8): the owner's 1:1 DM
 // is General, the dispatcher. Sessions live in the backend; spawn_session
-// (and /session) start a worker without a Telegram topic. Leftover forum
-// topics from the old group+topics setup still route if they exist.
+// (and /session) start a worker without a Telegram chat. Group messages are
+// ignored.
 
 // instance is one `ccc listen` process: config + database + runner.
 type instance struct {
@@ -82,8 +82,8 @@ func (in *instance) config() *Config {
 }
 
 // telegramUI is the runner's view of Telegram. General (topic 0) lands in
-// the owner's DM. A positive topic id is a leftover forum topic. A negative
-// id is a backend worker: no Telegram send (the hub still sees the event).
+// the owner's DM. Any other topic id is a backend worker: no Telegram send
+// (the hub still sees the event).
 type telegramUI struct{ in *instance }
 
 func (t telegramUI) Post(topicID int64, html string) (int64, error) {
@@ -115,20 +115,11 @@ func (t telegramUI) Edit(topicID, msgID int64, html string) error {
 
 func (t telegramUI) React(messageID int64, emoji string) {
 	cfg := t.in.config()
-	if cfg.BotToken == "" || messageID == 0 {
+	if cfg.BotToken == "" || messageID == 0 || cfg.ChatID == 0 {
 		return
 	}
-	// The trigger may be in the DM (happy path) or in a leftover group
-	// topic. Try the DM first; fall back to the group.
-	if cfg.ChatID != 0 {
-		if err := setMessageReaction(cfg, cfg.ChatID, messageID, emoji); err == nil {
-			return
-		}
-	}
-	if cfg.GroupID != 0 {
-		if err := setMessageReaction(cfg, cfg.GroupID, messageID, emoji); err != nil {
-			hookLog("reaction failed: %v", err)
-		}
+	if err := setMessageReaction(cfg, cfg.ChatID, messageID, emoji); err != nil {
+		hookLog("reaction failed: %v", err)
 	}
 }
 
@@ -137,7 +128,7 @@ func (t telegramUI) React(messageID int64, emoji string) {
 // ---------------------------------------------------------------------------
 
 // listenV3 is `ccc listen`: open the database, start the runner, long-poll
-// Telegram. Bootstrap config (token, group, profiles) stays in config.json;
+// Telegram. Bootstrap config (token, chat_id, profiles) stays in config.json;
 // everything runtime lives in SQLite (DESIGN §5).
 func listenV3() error {
 	time.Sleep(time.Duration(os.Getpid()%500) * time.Millisecond)
@@ -198,7 +189,7 @@ func listenV3() error {
 
 	linkSharedProjects(cfg)
 	setBotCommandsV3(cfg.BotToken)
-	listenLog("ccc v3 listening (dm: %d, group: %d, db: %s)", cfg.ChatID, cfg.GroupID, dbPath(cfg))
+	listenLog("ccc v3 listening (dm: %d, db: %s)", cfg.ChatID, dbPath(cfg))
 
 	// Conversational turns that were mid-flight died with us: they are
 	// requeued (same row, so they stay oldest) and retried. Background
@@ -408,20 +399,15 @@ func setBotCommandsV3(botToken string) {
 		{"command": "model", "description": "Show or set the model (owner only)"},
 		{"command": "cancel", "description": "Cancel an in-progress account login"},
 	}
-	for _, scope := range []map[string]any{nil, {"type": "all_group_chats"}} {
-		payload := map[string]any{"commands": commands}
-		if scope != nil {
-			payload["scope"] = scope
-		}
-		body, err := json.Marshal(payload)
-		if err != nil {
-			continue
-		}
-		client := &http.Client{Timeout: 15 * time.Second}
-		resp, err := client.Post(telegramURL(botToken, "setMyCommands"), "application/json", strings.NewReader(string(body)))
-		if err == nil {
-			resp.Body.Close() // safe-ignore: the command list is cosmetic; a failed close changes nothing
-		}
+	payload := map[string]any{"commands": commands}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Post(telegramURL(botToken, "setMyCommands"), "application/json", strings.NewReader(string(body)))
+	if err == nil {
+		resp.Body.Close() // safe-ignore: the command list is cosmetic; a failed close changes nothing
 	}
 }
 
@@ -433,26 +419,12 @@ func setBotCommandsV3(botToken string) {
 // Nothing happens before the access gate: an update from a user who is neither
 // the owner nor approved is dropped here, group or DM (DESIGN §12).
 func (in *instance) handleMessage(msg *TelegramMessage) {
-	cfg := in.config()
-	role := in.gate(msg.From.ID, senderName(msg.From.Username, msg.From.FirstName), msg.Chat.ID, msg.Chat.Type == "private")
+	isDM := msg.Chat.Type == "private"
+	role := in.gate(msg.From.ID, senderName(msg.From.Username, msg.From.FirstName), msg.Chat.ID, isDM)
 	if role == roleDenied {
 		return
 	}
-	inGroup := cfg.GroupID != 0 && msg.Chat.ID == cfg.GroupID
-	isDM := msg.Chat.Type == "private"
-	topicID := msg.MessageThreadID
-
-	// Leftover forum topic lifecycle. New sessions have no topic.
-	if inGroup && topicID > 0 && msg.ForumTopicClosed != nil {
-		in.handleTopicClosed(msg)
-		return
-	}
-	if inGroup && topicID > 0 && msg.ForumTopicReopened != nil {
-		in.handleTopicReopened(msg)
-		return
-	}
-	if inGroup && topicID > 0 && msg.ForumTopicEdited != nil {
-		in.handleTopicRename(msg)
+	if !isDM {
 		return
 	}
 
@@ -474,47 +446,20 @@ func (in *instance) handleMessage(msg *TelegramMessage) {
 	}
 
 	if strings.HasPrefix(text, "/") {
-		in.handleCommand(msg, text, inGroup, topicID, role)
+		in.handleCommand(msg, text, role)
 		return
 	}
 
-	// Reply-to a pending ask_owner question, even in the DM: the owner is
-	// answering that session, not chatting with General.
+	// Reply-to a pending ask_owner question: the owner is answering that
+	// session, not chatting with General.
 	if b, ok := in.botForQuestionReply(msg); ok {
 		in.deliver(b, msg, text)
 		return
 	}
 
-	// The DM is General. So is the leftover group's root topic.
-	if isDM || topicID == 0 {
-		b, err := in.ensureGeneralBot()
-		if err != nil {
-			in.reply(msg, "Could not start General: "+err.Error())
-			return
-		}
-		in.deliver(b, msg, text)
-		return
-	}
-
-	if !inGroup {
-		in.reply(msg, "Talk to me in this chat. I am General.")
-		return
-	}
-
-	b, err := botByTopic(in.db, topicID)
+	b, err := in.ensureGeneralBot()
 	if err != nil {
-		// A just-reopened topic whose service message we missed: continue it.
-		if archived, aerr := botByTopicAny(in.db, topicID); aerr == nil && archived.ArchivedAt != nil {
-			if uerr := unarchiveBotRow(in.db, archived.ID); uerr != nil {
-				in.reply(msg, "Could not reopen the session: "+uerr.Error())
-				return
-			}
-			archived.ArchivedAt = nil
-			archived.Status = botIdle
-			in.deliver(archived, msg, text)
-			return
-		}
-		in.reply(msg, "This topic has no session behind it. Ask in this DM (General), or /session.")
+		in.reply(msg, "Could not start General: "+err.Error())
 		return
 	}
 	in.deliver(b, msg, text)
@@ -673,7 +618,7 @@ func (in *instance) createBot(name, role string) (*Bot, error) {
 	return createBotRow(in.db, in.config(), name, role, "")
 }
 
-// botNameFromText derives a topic name from the first line of a message.
+// botNameFromText derives a session name from the first line of a message.
 func botNameFromText(text string) string {
 	line := text
 	if i := strings.IndexAny(line, "\n\r"); i >= 0 {
@@ -690,7 +635,7 @@ func botNameFromText(text string) string {
 	return line
 }
 
-// sanitizeBotName keeps names usable as directory names and topic titles.
+// sanitizeBotName keeps names usable as directory names.
 func sanitizeBotName(name string) string {
 	name = strings.TrimSpace(name)
 	name = strings.Map(func(r rune) rune {
@@ -723,17 +668,11 @@ func (in *instance) handleAttachment(msg *TelegramMessage) bool {
 	if msg.Voice == nil && msg.Document == nil && len(msg.Photo) == 0 {
 		return false
 	}
-	cfg := in.config()
-	inGroup := cfg.GroupID != 0 && msg.Chat.ID == cfg.GroupID
-	var b *Bot
-	var err error
-	if msg.Chat.Type == "private" || msg.MessageThreadID == 0 {
-		b, err = in.ensureGeneralBot()
-	} else if inGroup {
-		b, err = botByTopic(in.db, msg.MessageThreadID)
-	} else {
+	if msg.Chat.Type != "private" {
 		return false
 	}
+	cfg := in.config()
+	b, err := in.ensureGeneralBot()
 	if err != nil {
 		return false
 	}
@@ -863,12 +802,12 @@ func botCwd(cfg *Config, b *Bot) string {
 // ---------------------------------------------------------------------------
 
 // ownerOnlyCommands are the ones that change the instance itself, rather than
-// talking to a bot: accounts, access, model and the group binding.
+// talking to a bot: accounts, access and model.
 var ownerOnlyCommands = map[string]bool{
-	"/account": true, "/access": true, "/model": true, "/setgroup": true,
+	"/account": true, "/access": true, "/model": true,
 }
 
-func (in *instance) handleCommand(msg *TelegramMessage, text string, inGroup bool, topicID int64, role accessRole) {
+func (in *instance) handleCommand(msg *TelegramMessage, text string, role accessRole) {
 	cmd, rest := splitCommand(text)
 	if ownerOnlyCommands[cmd] && role != roleOwner {
 		in.reply(msg, "That command is owner-only.")
@@ -882,14 +821,7 @@ func (in *instance) handleCommand(msg *TelegramMessage, text string, inGroup boo
 		in.handleAccountCommand(msg, rest)
 		return
 	case "/model":
-		var b *Bot
-		if inGroup && topicID != 0 {
-			b, _ = botByTopic(in.db, topicID) // safe-ignore: /model in a topic with no bot is instance-level
-		}
-		in.handleModelCommand(msg, rest, b)
-		return
-	case "/setgroup":
-		in.handleSetGroupCommand(msg)
+		in.handleModelCommand(msg, rest, nil)
 		return
 	case "/cancel":
 		in.reply(msg, "Nothing to cancel.")
@@ -912,18 +844,9 @@ func (in *instance) handleCommand(msg *TelegramMessage, text string, inGroup boo
 		return
 	}
 
-	var b *Bot
-	var err error
-	if msg.Chat.Type == "private" || topicID == 0 {
-		b, err = in.ensureGeneralBot()
-	} else if inGroup {
-		b, err = botByTopic(in.db, topicID)
-	} else {
-		in.reply(msg, "Talk to me in this DM. I am General.")
-		return
-	}
+	b, err := in.ensureGeneralBot()
 	if err != nil {
-		in.reply(msg, "This chat has no session behind it.")
+		in.reply(msg, "Could not start General: "+err.Error())
 		return
 	}
 
@@ -1057,8 +980,9 @@ func (in *instance) handleMemoryRestore(msg *TelegramMessage, arg string) {
 }
 
 // handleNameCommand implements `/name [<name>]` (DESIGN §8): show or change
-// the session name. The name is the topic title and part of the system prompt,
-// so setting it renames the topic and rotates the conversation (DESIGN §14.14).
+// the session name. The name is part of the system prompt, so setting it
+// rotates the conversation (DESIGN §14.14). Workers are renamed via set_name
+// or the phone; in the DM this only ever hits General, which refuses.
 func (in *instance) handleNameCommand(msg *TelegramMessage, b *Bot, rest string) {
 	raw := strings.TrimSpace(rest)
 	if raw == "" {
@@ -1084,68 +1008,7 @@ func (in *instance) handleNameCommand(msg *TelegramMessage, b *Bot, rest string)
 		reply = fmt.Sprintf("✏️ <b>%s</b> is now <b>%s</b>; the next message starts a fresh conversation with the new name.",
 			htmlEscape(old), htmlEscape(name))
 	}
-	// Leftover forum topics stay in sync with the name. Backend workers
-	// have no topic to rename.
-	if hasForumTopic(b) {
-		if err := editForumTopic(in.config(), b.TopicID, name); err != nil {
-			hookLog("edit topic %d: %v", b.TopicID, err)
-			reply += "\n⚠️ The topic could not be updated: " + htmlEscape(err.Error())
-		}
-	}
 	in.reply(msg, reply)
-}
-
-// handleTopicRename follows a rename made in Telegram itself (the
-// forum_topic_edited service message) so the topic title and bots.name never
-// drift apart. The title is not renamed back on a rejection: that would fight
-// the person doing the renaming, and could loop.
-func (in *instance) handleTopicRename(msg *TelegramMessage) {
-	b, err := botByTopic(in.db, msg.MessageThreadID)
-	if err != nil {
-		return
-	}
-	title := strings.TrimSpace(msg.ForumTopicEdited.Name)
-	// An icon-only edit carries no name, and ccc's own /name rename echoes back
-	// as the name it just set.
-	if title == "" || title == b.Name {
-		return
-	}
-	name, err := validateBotName(in.db, b.ID, title)
-	if err != nil {
-		in.reply(msg, fmt.Sprintf("⚠️ Still <b>%s</b>: %s. Pick another title, or use /name.",
-			htmlEscape(b.Name), htmlEscape(err.Error())))
-		return
-	}
-	old := b.Name
-	if err := renameBot(in.db, in.config(), b, name); err != nil {
-		in.reply(msg, "⚠️ Still <b>"+htmlEscape(old)+"</b>: "+htmlEscape(err.Error()))
-		return
-	}
-	in.reply(msg, fmt.Sprintf("✏️ <b>%s</b> is now <b>%s</b>; the next message starts a fresh conversation with the new name.",
-		htmlEscape(old), htmlEscape(name)))
-}
-
-// handleTopicClosed retires the session when Telegram closes or archives the
-// topic. The topic is already closed, so we do not call closeForumTopic again.
-func (in *instance) handleTopicClosed(msg *TelegramMessage) {
-	b, err := botByTopicAny(in.db, msg.MessageThreadID)
-	if err != nil || b.ArchivedAt != nil {
-		return
-	}
-	if err := archiveBotRow(in.db, b.ID); err != nil {
-		hookLog("archive session on topic close %d: %v", b.ID, err)
-	}
-}
-
-// handleTopicReopened continues a session whose topic the owner reopened.
-func (in *instance) handleTopicReopened(msg *TelegramMessage) {
-	b, err := botByTopicAny(in.db, msg.MessageThreadID)
-	if err != nil || b.ArchivedAt == nil {
-		return
-	}
-	if err := unarchiveBotRow(in.db, b.ID); err != nil {
-		hookLog("unarchive session on topic reopen %d: %v", b.ID, err)
-	}
 }
 
 func splitCommand(text string) (string, string) {
@@ -1348,10 +1211,10 @@ func (in *instance) handleEngineCommand(msg *TelegramMessage, b *Bot, rest strin
 // handleModelCommand sets a model without rotating the session: --model is
 // passed on every turn, including resumes.
 //
-//	/model                         show this bot (if any) and instance defaults
-//	/model <slug>                  in a bot topic: that bot. In General: Claude.
+//	/model                         show instance defaults
+//	/model <slug>                  Claude's instance default
 //	/model <engine> <slug>         instance default for that engine
-//	/model default                 clear the bot override, or Claude's instance default
+//	/model default                 clear Claude's instance default
 //	/model <engine> default        clear that engine's instance default
 //
 // Engine is a property of the account; model is not. A slug that happens to
@@ -1461,8 +1324,8 @@ func renderModelStatus(cfg *Config, b *Bot) string {
 	}
 	sb.WriteString("instance: ")
 	sb.WriteString(htmlEscape(renderInstanceModels(cfg)))
-	sb.WriteString("\nIn a session topic, /model &lt;slug&gt; overrides that session. ")
-	sb.WriteString("/model &lt;engine&gt; &lt;slug&gt; sets the instance default. /model default clears.")
+	sb.WriteString("\n/model &lt;slug&gt; sets Claude's instance default. ")
+	sb.WriteString("/model &lt;engine&gt; &lt;slug&gt; sets that engine. /model default clears.")
 	return sb.String()
 }
 
@@ -1483,23 +1346,6 @@ func renderInstanceModels(cfg *Config) string {
 		return "claude=default"
 	}
 	return strings.Join(parts, " · ")
-}
-
-// handleSetGroupCommand binds the instance to the forum group the command was
-// sent in, which is the headless alternative to `ccc setgroup` (a VM has no
-// terminal to run that interactive loop in).
-func (in *instance) handleSetGroupCommand(msg *TelegramMessage) {
-	if msg.Chat.Type != "supergroup" {
-		in.reply(msg, "Send /setgroup inside the forum group (Topics enabled, bot as admin).")
-		return
-	}
-	updated := updateConfig(func(c *Config) bool { c.GroupID = msg.Chat.ID; return true })
-	if updated == nil {
-		in.reply(msg, "Could not write the configuration.")
-		return
-	}
-	in.setConfig(updated)
-	in.reply(msg, fmt.Sprintf("📌 Leftover group bound (<code>%d</code>).\nThe happy path is this bot's DM (General). Existing topics still work; new sessions are backend-only.", msg.Chat.ID))
 }
 
 // setConfig swaps the instance's configuration and hands the new one to the

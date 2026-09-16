@@ -552,11 +552,6 @@ func (h *hubClient) rpcArchive(params json.RawMessage, out *hubRPC) {
 		out.OK, out.Error = false, err.Error()
 		return
 	}
-	// Close the topic quietly. Do not post a note: archiving from the phone
-	// should not ping Telegram.
-	if err := closeForumTopic(h.in.config(), b.TopicID); err != nil {
-		hookLog("hub close topic %d: %v", b.TopicID, err)
-	}
 	out.Body, _ = json.Marshal(map[string]any{"archived": true, "bot": b.Name})
 }
 
@@ -573,10 +568,6 @@ func (h *hubClient) rpcUnarchive(params json.RawMessage, out *hubRPC) {
 	if err := unarchiveBotRow(h.in.db, b.ID); err != nil {
 		out.OK, out.Error = false, err.Error()
 		return
-	}
-	cfg := h.in.config()
-	if err := reopenForumTopic(cfg, b.TopicID); err != nil {
-		hookLog("hub reopen topic %d: %v", b.TopicID, err)
 	}
 	out.Body, _ = json.Marshal(map[string]any{"archived": false, "bot": b.Name})
 }
@@ -603,9 +594,6 @@ func (h *hubClient) rpcRename(params json.RawMessage, out *hubRPC) {
 			out.OK, out.Error = false, err.Error()
 			return
 		}
-	}
-	if err := editForumTopic(h.in.config(), b.TopicID, name); err != nil {
-		hookLog("hub rename topic %d: %v", b.TopicID, err)
 	}
 	out.Body, _ = json.Marshal(map[string]any{"name": name, "old": old})
 }

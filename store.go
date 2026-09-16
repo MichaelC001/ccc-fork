@@ -29,9 +29,9 @@ import (
 // and conversation id. The table is still called bots; user-visible language
 // is "session". Role is unused leftover.
 //
-// TopicID: 0 is General (the owner's DM). A positive id is a leftover Telegram
-// forum topic from the old group+topics setup. A negative id is a backend-only
-// worker (no Telegram topic; reports go to General).
+// TopicID is the session key, not a Telegram forum topic. 0 is General (the
+// owner's DM). Any other value is a backend worker (new ones get -id). Reports
+// go to General. The column name is historical.
 type Bot struct {
 	ID          int64  `gorm:"primaryKey"`
 	Name        string `gorm:"uniqueIndex;not null"`
@@ -359,21 +359,10 @@ func ensureMemoryFTS(db *gorm.DB) error {
 // Bots
 // ---------------------------------------------------------------------------
 
-// botByTopic finds the live session behind a forum topic.
+// botByTopic finds the live session whose TopicID (session key) is this value.
 func botByTopic(db *gorm.DB, topicID int64) (*Bot, error) {
 	var b Bot
 	err := db.Where("topic_id = ? AND archived_at IS NULL", topicID).First(&b).Error
-	if err != nil {
-		return nil, err
-	}
-	return &b, nil
-}
-
-// botByTopicAny finds the session behind a forum topic, including archived
-// ones. Close/reopen and talking in a just-reopened topic need the retired row.
-func botByTopicAny(db *gorm.DB, topicID int64) (*Bot, error) {
-	var b Bot
-	err := db.Where("topic_id = ?", topicID).Order("id DESC").First(&b).Error
 	if err != nil {
 		return nil, err
 	}
@@ -752,8 +741,8 @@ func botByCwd(db *gorm.DB, path string) (*Bot, error) {
 
 // createBotRow creates a bot end to end: a unique name, a workspace and the
 // database row. Owner: /session. Dispatcher: spawn_session. New sessions are
-// backend workers — they do not get a Telegram forum topic. A cwd of "" means
-// the bot gets its own workspace under <data_dir>/bots.
+// backend workers (TopicID = -id). A cwd of "" means the bot gets its own
+// workspace under <data_dir>/bots.
 func createBotRow(db *gorm.DB, config *Config, name, role, cwd string) (*Bot, error) {
 	name = uniqueBotName(db, sanitizeBotName(name))
 	if cwd == "" {

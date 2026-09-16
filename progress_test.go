@@ -140,7 +140,7 @@ func TestProgressFinishSplitsLongRepliesIntoValidChunks(t *testing.T) {
 func TestProgressMessagesAreSilentUntilFinish(t *testing.T) {
 	in, _, api := testInstance(t)
 	ui := telegramUI{in}
-	p := newProgress(ui, 7, time.Now())
+	p := newProgress(ui, 0, time.Now())
 	p.set("running tests")
 
 	sends := api.since("sendMessage")

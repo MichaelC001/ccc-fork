@@ -189,7 +189,7 @@ func (s *mcpServer) register(server *mcp.Server) {
 	}, s.setName)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "send_file",
-		Description: "Send a file from this machine to the owner: Telegram DM (or leftover topic) and paired phones (max 50 MB).",
+		Description: "Send a file from this machine to the owner: Telegram DM and paired phones (max 50 MB).",
 	}, s.sendFile)
 	s.registerAutomation(server)
 	s.registerCrew(server)
@@ -440,11 +440,7 @@ func (s *mcpServer) notifyOwner(_ context.Context, _ *mcp.CallToolRequest, in no
 		label = fmt.Sprintf(" <b>%s</b>:", htmlEscape(b.Name))
 	}
 	msg := fmt.Sprintf("%s%s %s", prefix, label, renderTelegramHTML(truncate(body, 3000)))
-	s.post(ownerTopic(b), msg)
-	if strings.EqualFold(in.Urgency, "urgent") && s.config.ChatID != 0 && s.config.BotToken != "" && hasForumTopic(b) {
-		_, _ = sendMessageHTMLGetID(s.config, s.config.ChatID, 0,
-			fmt.Sprintf("%s <b>%s</b>: %s", prefix, htmlEscape(b.Name), renderTelegramHTML(truncate(body, 3000)))) // safe-ignore: the topic message already went out
-	}
+	s.post(0, msg)
 	return text("owner notified"), nil, nil
 }
 
@@ -486,7 +482,7 @@ func (s *mcpServer) askOwner(_ context.Context, _ *mcp.CallToolRequest, in askOw
 	if !isGeneralBot(b) {
 		asked = fmt.Sprintf("[%s] %s", b.Name, q)
 	}
-	msgID := s.postQuestion(ownerTopic(b), row.ID, asked, opts)
+	msgID := s.postQuestion(0, row.ID, asked, opts)
 	if msgID != 0 {
 		s.db.Model(&Question{}).Where("id = ?", row.ID).Update("asked_message_id", msgID)
 	}
@@ -514,14 +510,6 @@ func (s *mcpServer) setName(_ context.Context, _ *mcp.CallToolRequest, in setNam
 		if err := renameBot(s.db, s.config, b, name); err != nil {
 			return toolErr("could not rename: %v", err), nil, nil
 		}
-	}
-	if hasForumTopic(b) {
-		if err := editForumTopic(s.config, b.TopicID, name); err != nil {
-			hookLog("edit topic %d: %v", b.TopicID, err)
-		}
-	}
-	if name != old && hasForumTopic(b) {
-		s.post(b.TopicID, fmt.Sprintf("✏️ <b>%s</b> is now <b>%s</b>", htmlEscape(old), htmlEscape(name)))
 	}
 	out := fmt.Sprintf("renamed to %q; your next message starts a fresh conversation with it", name)
 	if name == old {
@@ -567,13 +555,13 @@ func (s *mcpServer) sendFile(_ context.Context, _ *mcp.CallToolRequest, in sendF
 		hookLog("hub file row: %v", err)
 	}
 	var tgErr error
-	if chat, thread, ok := destForTopic(s.config, ownerTopic(b)); ok {
+	if chat, thread, ok := destForTopic(s.config, 0); ok {
 		tgErr = sendFile(s.config, chat, thread, abs, in.Caption)
 	}
 	if tgErr != nil {
 		return toolErr("offered to phones; Telegram send failed: %v", tgErr), nil, nil
 	}
-	if _, _, ok := destForTopic(s.config, ownerTopic(b)); !ok {
+	if _, _, ok := destForTopic(s.config, 0); !ok {
 		return text("offered %s to paired phones (no Telegram configured)", filepath.Base(abs)), nil, nil
 	}
 	return text("sent %s", filepath.Base(abs)), nil, nil
@@ -988,11 +976,6 @@ func (s *mcpServer) archiveBot(_ context.Context, _ *mcp.CallToolRequest, in arc
 		return toolErr("could not archive: %v", err), nil, nil
 	}
 	s.post(0, "📦 Session <b>"+htmlEscape(target.Name)+"</b> ended. Memories are kept.")
-	if hasForumTopic(target) {
-		if err := closeForumTopic(s.config, target.TopicID); err != nil {
-			hookLog("close topic %d: %v", target.TopicID, err)
-		}
-	}
 	return text("archived %s", target.Name), nil, nil
 }
 

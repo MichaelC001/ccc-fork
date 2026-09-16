@@ -202,7 +202,7 @@ func TestCreateBotIsBackendOnly(t *testing.T) {
 	if b.TopicID >= 0 {
 		t.Fatalf("new session TopicID = %d, want < 0", b.TopicID)
 	}
-	if isGeneralBot(b) || hasForumTopic(b) {
+	if isGeneralBot(b) {
 		t.Fatalf("new session must be a backend worker: %+v", b)
 	}
 	if n := len(api.since("createForumTopic")); n != 0 {
@@ -211,23 +211,23 @@ func TestCreateBotIsBackendOnly(t *testing.T) {
 }
 
 func TestDestForTopic(t *testing.T) {
-	cfg := &Config{BotToken: "T", ChatID: 42, GroupID: -100}
+	cfg := &Config{BotToken: "T", ChatID: 42}
 	chat, thread, ok := destForTopic(cfg, 0)
 	if !ok || chat != 42 || thread != 0 {
 		t.Errorf("General dest = %d/%d ok=%v, want DM 42/0", chat, thread, ok)
 	}
-	chat, thread, ok = destForTopic(cfg, 7)
-	if !ok || chat != -100 || thread != 7 {
-		t.Errorf("legacy topic dest = %d/%d ok=%v, want group -100/7", chat, thread, ok)
+	_, _, ok = destForTopic(cfg, 7)
+	if ok {
+		t.Error("a leftover positive TopicID must have no Telegram dest")
 	}
 	_, _, ok = destForTopic(cfg, -3)
 	if ok {
 		t.Error("backend worker must have no Telegram dest")
 	}
 	cfg.ChatID = 0
-	chat, thread, ok = destForTopic(cfg, 0)
-	if !ok || chat != -100 || thread != 0 {
-		t.Errorf("General without ChatID should fall back to group: %d/%d ok=%v", chat, thread, ok)
+	_, _, ok = destForTopic(cfg, 0)
+	if ok {
+		t.Error("General without ChatID has no Telegram dest")
 	}
 }
 

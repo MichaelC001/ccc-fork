@@ -190,7 +190,7 @@ func TestAccountAddRejectsWhatIsNotAnEmail(t *testing.T) {
 func TestLoginStoresTheAccountClaudeReports(t *testing.T) {
 	in, _, api := testInstance(t)
 	in.setConfig(&Config{
-		BotToken: "TESTTOKEN", ChatID: 42, GroupID: -100777, DataDir: in.dataDir,
+		BotToken: "TESTTOKEN", ChatID: 42, DataDir: in.dataDir,
 		Profiles:       map[string]*Profile{"work": {ConfigDir: "/tmp/work"}},
 		DefaultProfile: "work",
 	})
@@ -268,7 +268,7 @@ func TestProfileDirNameIsFilesystemSafe(t *testing.T) {
 func TestAccountDefaultAndUnknownName(t *testing.T) {
 	in, _, api := testInstance(t)
 	in.setConfig(&Config{
-		BotToken: "TESTTOKEN", ChatID: 42, GroupID: -100777, DataDir: in.dataDir,
+		BotToken: "TESTTOKEN", ChatID: 42, DataDir: in.dataDir,
 		Profiles: map[string]*Profile{"a": {ConfigDir: "/tmp/a"}, "b": {ConfigDir: "/tmp/b"}},
 	})
 	if err := saveConfig(in.config()); err != nil {
@@ -290,7 +290,7 @@ func TestAccountDefaultAndUnknownName(t *testing.T) {
 func TestAccountRemoveRefusesWhileATurnIsRunning(t *testing.T) {
 	in, _, _ := testInstance(t)
 	in.setConfig(&Config{
-		BotToken: "TESTTOKEN", ChatID: 42, GroupID: -100777, DataDir: in.dataDir,
+		BotToken: "TESTTOKEN", ChatID: 42, DataDir: in.dataDir,
 		Profiles: map[string]*Profile{"a": {ConfigDir: "/tmp/a"}},
 	})
 	if err := saveConfig(in.config()); err != nil {
@@ -349,20 +349,20 @@ func TestBusyBotsByProfile(t *testing.T) {
 	}
 }
 
-// /model and /setgroup are the two owner commands that rewrite the bootstrap
-// configuration from Telegram, which is what makes a headless box possible.
+// /model is the owner command that rewrites the bootstrap configuration from
+// Telegram, which is what makes a headless box possible.
 func TestModelCommand(t *testing.T) {
 	in, _, api := testInstance(t)
 	if err := saveConfig(in.config()); err != nil {
 		t.Fatal(err)
 	}
 
-	in.handleMessage(ownerMessage(0, "/model"))
+	in.handleMessage(ownerMessage("/model"))
 	if !strings.Contains(strings.Join(api.texts(""), "\n"), "claude=default") {
 		t.Error("/model with no argument should show the current model")
 	}
 
-	in.handleMessage(ownerMessage(0, "/model sonnet"))
+	in.handleMessage(ownerMessage("/model sonnet"))
 	if got := in.config().Model; got != "sonnet" {
 		t.Errorf("model = %q, want sonnet", got)
 	}
@@ -374,12 +374,12 @@ func TestModelCommand(t *testing.T) {
 		t.Errorf("the model was not persisted: %q", reloaded.Model)
 	}
 
-	in.handleMessage(ownerMessage(0, "/model default"))
+	in.handleMessage(ownerMessage("/model default"))
 	if got := in.config().Model; got != "" {
 		t.Errorf("/model default should clear it, got %q", got)
 	}
 
-	in.handleMessage(ownerMessage(0, "/model grok grok-4"))
+	in.handleMessage(ownerMessage("/model grok grok-4"))
 	if got := in.config().Models[engineGrok]; got != "grok-4" {
 		t.Errorf("grok model = %q", got)
 	}
@@ -387,47 +387,19 @@ func TestModelCommand(t *testing.T) {
 		t.Errorf("setting grok must not rewrite the Claude model, got %q", got)
 	}
 
+	// /model in the DM is instance-level; it does not override a worker.
 	b, err := in.createBot("dev", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	in.handleMessage(ownerMessage(b.TopicID, "/model haiku"))
+	in.handleMessage(ownerMessage("/model haiku"))
 	var bot Bot
 	in.db.First(&bot, b.ID)
-	if bot.Model != "haiku" {
-		t.Errorf("bot model = %q, want haiku", bot.Model)
+	if bot.Model != "" {
+		t.Errorf("worker model = %q, want empty (instance default)", bot.Model)
 	}
-}
-
-func TestSetGroupCommand(t *testing.T) {
-	in, _, api := testInstance(t)
-	in.setConfig(&Config{BotToken: "TESTTOKEN", ChatID: 42, DataDir: in.dataDir})
-	if err := saveConfig(in.config()); err != nil {
-		t.Fatal(err)
-	}
-
-	// In a DM it is refused: there is nothing to bind to.
-	in.handleMessage(dmMessage(42, "/setgroup"))
-	if in.config().GroupID != 0 {
-		t.Error("/setgroup in a DM must not set a group")
-	}
-
-	msg := ownerMessage(0, "/setgroup")
-	msg.Chat.ID = -100999
-	in.handleMessage(msg)
-
-	if got := in.config().GroupID; got != -100999 {
-		t.Errorf("group = %d, want -100999", got)
-	}
-	reloaded, err := loadConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if reloaded.GroupID != -100999 {
-		t.Errorf("the group was not persisted: %d", reloaded.GroupID)
-	}
-	if !strings.Contains(strings.Join(api.texts(""), "\n"), "-100999") {
-		t.Error("/setgroup did not confirm the new group")
+	if got := in.config().Model; got != "haiku" {
+		t.Errorf("instance model = %q, want haiku", got)
 	}
 }
 
@@ -598,7 +570,7 @@ func TestAccountAddSameEmailDifferentEngine(t *testing.T) {
 func TestAccountLoginDisambiguation(t *testing.T) {
 	in, _, api := testInstance(t)
 	in.setConfig(&Config{
-		BotToken: "TESTTOKEN", ChatID: 42, GroupID: -100777, DataDir: in.dataDir,
+		BotToken: "TESTTOKEN", ChatID: 42, DataDir: in.dataDir,
 		Profiles: map[string]*Profile{
 			"jairo@example.com":       {Engine: engineClaude, Label: "jairo@example.com", ConfigDir: "/tmp/c"},
 			"jairo@example.com/codex": {Engine: engineCodex, Label: "jairo@example.com", ConfigDir: "/tmp/x"},
@@ -687,11 +659,11 @@ func TestCancelLoginFromAnotherTopic(t *testing.T) {
 
 func TestCancelWithNoLogin(t *testing.T) {
 	in, _, api := testInstance(t)
-	in.handleMessage(ownerMessage(0, "/cancel"))
+	in.handleMessage(ownerMessage("/cancel"))
 	if !strings.Contains(strings.Join(api.texts(""), "\n"), "Nothing to cancel.") {
 		t.Errorf("got %v", api.texts(""))
 	}
-	in.handleMessage(ownerMessage(0, "/cancel@jairo_vps_bot"))
+	in.handleMessage(ownerMessage("/cancel@jairo_vps_bot"))
 	if strings.Count(strings.Join(api.texts(""), "\n"), "Nothing to cancel.") != 2 {
 		t.Errorf("/cancel@bot with no login: %v", api.texts(""))
 	}

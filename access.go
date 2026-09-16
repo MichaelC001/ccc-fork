@@ -18,8 +18,8 @@ import (
 // trust boundary: this file is what stops anyone who finds the bot from
 // getting a shell. The policy is default-deny by Telegram user id — the owner
 // from config.chat_id is always allowed, everybody else must be `approved` in
-// the access table before a single update from them is looked at, in a group
-// or in a DM, message or callback or edit.
+// the access table before a single update from them is looked at. Group
+// messages are dropped. Pairing is DM-only.
 //
 // Pairing exists so the owner can let somebody in without touching the server:
 // an unknown DM gets one 6-hex code, and the OWNER turns it into access with
@@ -104,9 +104,7 @@ type pairingOutcome struct {
 }
 
 // handleUnknownUser runs the pairing state machine for one message from a
-// non-approved user in a DM. Group messages never reach it: an unknown user in
-// the group is dropped in silence, because answering there would let anyone who
-// finds the group make the bot talk.
+// non-approved user in a DM. Group messages never reach it.
 func handleUnknownUser(db *gorm.DB, userID int64, display string, now time.Time) pairingOutcome {
 	var row Access
 	err := db.First(&row, "telegram_user_id = ?", userID).Error

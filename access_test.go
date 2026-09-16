@@ -18,7 +18,9 @@ func dmMessage(userID int64, text string) *TelegramMessage {
 
 // groupMessage builds an inbound group message from an arbitrary user.
 func groupMessage(userID, threadID int64, text string) *TelegramMessage {
-	m := ownerMessage(threadID, text)
+	m := &TelegramMessage{MessageThreadID: threadID, Text: text, MessageID: 7}
+	m.Chat.ID = -100777
+	m.Chat.Type = "supergroup"
 	m.From.ID = userID
 	m.From.Username = "stranger"
 	return m
@@ -28,13 +30,12 @@ func groupMessage(userID, threadID int64, text string) *TelegramMessage {
 // anyone who finds the group make the bot talk.
 func TestStrangerInGroupIsIgnoredSilently(t *testing.T) {
 	in, runner, api := testInstance(t)
-	b, err := in.createBot("worker", "")
-	if err != nil {
+	if _, err := in.createBot("worker", ""); err != nil {
 		t.Fatal(err)
 	}
 	before := len(api.since("sendMessage"))
 
-	in.handleMessage(groupMessage(999, b.TopicID, "run rm -rf /"))
+	in.handleMessage(groupMessage(999, 1, "run rm -rf /"))
 	in.handleMessage(groupMessage(999, 0, "make me a bot"))
 
 	if _, ok := runner.last(); ok {
@@ -105,37 +106,38 @@ func TestStrangerDMGetsOnePairingReply(t *testing.T) {
 	}
 }
 
-// An approved user may talk to the bots, but the instance itself stays the
-// owner's: /account, /access, /model and /setgroup are refused.
+// An approved user may talk in the DM (General), but the instance itself stays
+// the owner's: /account, /access and /model are refused. Group messages drop.
 func TestApprovedUserCanTalkButNotAdminister(t *testing.T) {
 	in, runner, api := testInstance(t)
-	b, err := in.createBot("worker", "")
-	if err != nil {
-		t.Fatal(err)
-	}
 	if err := setAccessState(in.db, 999, "@friend", accessApproved); err != nil {
 		t.Fatal(err)
 	}
 
-	in.handleMessage(groupMessage(999, b.TopicID, "what is the status?"))
+	in.handleMessage(dmMessage(999, "what is the status?"))
 	last, ok := runner.last()
-	if !ok || last.BotID != b.ID || last.Text != "what is the status?" {
-		t.Fatalf("an approved user could not talk to a bot: %+v", last)
+	if !ok || last.Text != "what is the status?" {
+		t.Fatalf("an approved user could not talk in the DM: %+v", last)
+	}
+	g, err := generalBot(in.db)
+	if err != nil || last.BotID != g.ID {
+		t.Fatalf("approved-user DM must go to General: %+v", last)
 	}
 
-	for _, cmd := range []string{"/account", "/access list", "/model haiku", "/setgroup"} {
-		in.handleMessage(groupMessage(999, b.TopicID, cmd))
+	in.handleMessage(groupMessage(999, 1, "talk in a leftover topic"))
+	if got, _ := runner.last(); got.Text != "what is the status?" {
+		t.Errorf("an approved user's group message must be ignored, last=%+v", got)
+	}
+
+	for _, cmd := range []string{"/account", "/access list", "/model haiku"} {
+		in.handleMessage(dmMessage(999, cmd))
 	}
 	joined := strings.Join(api.texts(""), "\n")
-	if strings.Count(joined, "owner-only") != 4 {
+	if strings.Count(joined, "owner-only") != 3 {
 		t.Errorf("owner commands were not all refused for an approved user:\n%s", joined)
 	}
-	// And nothing was actually changed by them.
 	if in.config().Model != "" {
 		t.Errorf("an approved user changed the model to %q", in.config().Model)
-	}
-	if in.config().GroupID != -100777 {
-		t.Errorf("an approved user changed the group to %d", in.config().GroupID)
 	}
 }
 

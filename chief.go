@@ -11,32 +11,17 @@ import (
 )
 
 // General is the persistent dispatcher session. The owner's 1:1 DM with the
-// bot IS General. Sessions live in the backend (TopicID < 0); they have no
-// Telegram topic. A leftover forum topic (TopicID > 0) from the old
-// group+topics setup still works until it is archived.
+// bot IS General. Sessions live in the backend (TopicID != 0); they have no
+// Telegram chat. New workers get TopicID = -id so they cannot collide with
+// General (0).
 const generalBotName = "General"
 
 func isGeneralBot(b *Bot) bool {
 	return b != nil && b.TopicID == 0
 }
 
-// hasForumTopic is true when this session still has a Telegram forum topic
-// (legacy group+topics). Backend-only workers and General do not.
-func hasForumTopic(b *Bot) bool {
-	return b != nil && b.TopicID > 0
-}
-
-// ownerTopic is where owner-facing Telegram posts for this session go:
-// the leftover forum topic if it has one, otherwise General (the DM).
-func ownerTopic(b *Bot) int64 {
-	if hasForumTopic(b) {
-		return b.TopicID
-	}
-	return 0
-}
-
 // markBackendTopic assigns a negative TopicID so a worker cannot collide
-// with General (0) or a real forum topic (>0). Call after the row has an id.
+// with General (0). Call after the row has an id.
 func markBackendTopic(db *gorm.DB, b *Bot) error {
 	if b == nil || b.ID == 0 {
 		return fmt.Errorf("bot has no id")
@@ -93,9 +78,8 @@ func generalBot(db *gorm.DB) (*Bot, error) {
 	return &b, nil
 }
 
-// ensureGeneralBot returns the dispatcher row, creating it if needed. It does
-// not create a forum topic: General is the owner's DM (and, if a leftover
-// group is bound, also the group root).
+// ensureGeneralBot returns the dispatcher row, creating it if needed.
+// General is the owner's 1:1 DM; it has no Telegram topic.
 func (in *instance) ensureGeneralBot() (*Bot, error) {
 	return ensureGeneralBotRow(in.db, in.config())
 }

@@ -234,10 +234,6 @@ func (s *scheduler) compactIdleSessions(now time.Time) {
 		if res.Error != nil || res.RowsAffected == 0 {
 			continue
 		}
-		if hasForumTopic(&b) {
-			s.in.notifyTopicSilent(b.TopicID, fmt.Sprintf(
-				"🧹 Fresh conversation after %s idle. Memories are kept.", humanDuration(after)))
-		}
 	}
 }
 
@@ -549,8 +545,8 @@ func (in *instance) notifyGeneral(text string) {
 	in.notifyTopic(0, htmlEscape(text))
 }
 
-// notifyBot posts owner-facing HTML for a session: leftover forum topic if
-// it has one, otherwise General (the DM), labelled with the session name.
+// notifyBot posts owner-facing HTML for a session in General (the DM),
+// labelled with the session name when it is not General itself.
 func (in *instance) notifyBot(b *Bot, html string) {
 	in.notifyBotOpts(b, html, false)
 }
@@ -563,14 +559,11 @@ func (in *instance) notifyBotOpts(b *Bot, html string, silent bool) {
 	if b == nil || strings.TrimSpace(html) == "" {
 		return
 	}
-	topic := int64(0)
 	body := html
-	if hasForumTopic(b) {
-		topic = b.TopicID
-	} else if !isGeneralBot(b) {
+	if !isGeneralBot(b) {
 		body = fmt.Sprintf("<b>%s</b> · %s", htmlEscape(b.Name), html)
 	}
-	in.notifyTopicOpts(topic, body, silent)
+	in.notifyTopicOpts(0, body, silent)
 }
 
 // notifyTopic posts HTML to a Telegram destination (0 = General / the DM).

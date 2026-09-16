@@ -20,9 +20,8 @@ talk to it; it sees live sessions in its envelope and can `spawn_session` /
 `tell_session`. Sessions live in the backend — they have no Telegram topic.
 Workers `report_to_general` only — they do not see the roster or message each
 other. `/session <prompt>` is the escape hatch that starts a worker without
-the dispatcher. The owner never writes into a session chat. A leftover forum
-group from older installs still routes existing topics; new sessions do not
-create them. No role, no `/role`, no ceremony.
+the dispatcher. The owner never writes into a session chat. Group messages
+are ignored. No role, no `/role`, no ceremony.
 
 Non-goals (explicitly dropped from v2): Claude Code background agents, the
 agents view, `claude attach` handoff, transcript scraping, the AskUserQuestion
@@ -33,9 +32,9 @@ instance never talks to more than one Telegram bot.
 
 | Concept | Definition |
 |---|---|
-| **Instance** | One `ccc listen` process on one machine, bound to one Telegram bot token. The owner's DM is General. A leftover forum group is optional. Instance-level config: model, env passthrough, default profile, data dir. |
+| **Instance** | One `ccc listen` process on one machine, bound to one Telegram bot token. The owner's DM is General. Instance-level config: model, env passthrough, default profile, data dir. |
 | **Profile** | One account for one engine (see `profiles.go`). Claude = one `CLAUDE_CONFIG_DIR`. Grok = isolated `GROK_HOME`. Antigravity = isolated HOME/`GEMINI_HOME`. Codex = isolated `CODEX_HOME`. Engine is set when the account is added. Same-engine accounts are interchangeable at turn granularity (§4). One instance may mix engines. |
-| **Session** (`bots` table) | A backend worker. Identity = `name` + an **engine** derived from the default account (or `default_engine`) + an optional **model** override. Turns pick a healthy account of that engine. `/engine` is a secondary pool assignment. `/model` in General overrides that session. Claude, Grok and Codex sessions get the ccc MCP server (Claude: `--mcp-config`; Grok/Codex: isolated-home `config.toml`). Antigravity does not. Optional per-session `cwd` (default: `<data_dir>/bots/<name>/workspace`). Role is unused leftover. `archive_bot` archives the row. Topic id 0 is **General** (the owner's DM). Topic id > 0 is a leftover forum topic. Topic id < 0 is a backend-only worker. |
+| **Session** (`bots` table) | A backend worker. Identity = `name` + an **engine** derived from the default account (or `default_engine`) + an optional **model** override. Turns pick a healthy account of that engine. `/engine` is a secondary pool assignment. `/model` in the DM sets the instance default. Claude, Grok and Codex sessions get the ccc MCP server (Claude: `--mcp-config`; Grok/Codex: isolated-home `config.toml`). Antigravity does not. Optional per-session `cwd` (default: `<data_dir>/bots/<name>/workspace`). Role is unused leftover. `archive_bot` archives the row. `topic_id` is the session key (not a Telegram forum topic): 0 is **General** (the owner's DM); any other value is a backend worker (new ones get `-id`). |
 | **Conversation** | The engine transcript behind a session: a UUID ccc mints and resumes. A session has exactly one live conversation; `/new` rotates it. After `idle_compact_s` (default 1h) of no finished turn, ccc rotates it automatically — memories stay, the transcript does not. |
 | **Turn** | One `claude -p` process: input = one user/system/background message (plus context envelope), output = streamed events until `result`. At most one turn per session at a time; further inputs queue (FIFO) and are delivered together on the next turn. A background job is **not** a turn: it must not hold `turns.status=running`. |
 | **Background job** | A long-running shell command owned by a session, started with `run_background`. It runs in the session's cwd with `env_passthrough` while the topic stays responsive. Completion enqueues a `source=background` turn. |
@@ -107,8 +106,7 @@ into the chat; `thinking` is never shown.
 Backend workers do not post progress or final answers to Telegram. The owner
 hears from them via `report_to_general`, `notify_owner`, `ask_owner`, idle
 reminders, and job pings — all of which land in General. The phone hub still
-sees every turn. Leftover forum topics (TopicID > 0) keep the old in-topic
-progress path.
+sees every turn.
 
 ### 3.3 Post-turn
 
@@ -173,7 +171,7 @@ is not injected again (avoids a loop); the topic is told to use `/session`.
 ## 5. Data model (SQLite via GORM, `<data_dir>/ccc.db`, WAL, FK on)
 
 ```
-bots        id, name (unique), topic_id (0=General/DM, >0 leftover forum topic, <0 backend worker), role (text), cwd, session_id, engine (claude|grok|antigravity, default claude),
+bots        id, name (unique), topic_id (0=General/DM, !=0 backend worker; new workers get -id), role (text), cwd, session_id, engine (claude|grok|antigravity, default claude),
             status (idle|running|waiting|disabled), created_at, archived_at, parent_bot_id (legacy; unused — bots cannot spawn children),
             idle_reminded_at (when General last pinged the owner about this idle session)
 turns       id, bot_id, session_id, profile, source (user|bot|schedule|watch|routine|system|background), input (text),
@@ -225,18 +223,18 @@ home (Codex also gets per-turn `exec -c`). Identity is `--bot`/`--turn` or
 | `remember` | `scope` (user\|project\|bot), `key`, `text`, `project_path?` | Upsert a memory. `bot` scope is this session (not a persona). |
 | `recall` | `query`, `scope?`, `limit?` | Full-text (SQLite FTS5) search over memories visible to this session: all `user`, all `project`, own session. Returns key+text+scope. |
 | `forget` | `scope`, `key`, `project_path?` | Delete one memory. |
-| `notify_owner` | `text`, `urgency` (normal\|urgent) | Post in General (the DM), labelled with the session name. Leftover forum topics still get a copy there; `urgent` also DMs if the post was in a topic. |
-| `ask_owner` | `question`, `options?` (≤4 strings) | Post question with inline buttons (or free text if no options) in General / leftover topic. Returns immediately with `{"status":"asked"}`; the session should end its turn. The answer arrives as the next input (`source=user`, prefixed `Answer to "<question>": …`) via a button tap or a reply-to that question in the DM. Free text in the DM is always General. |
-| `set_name` | `name` | Rename this session: validate (§8 `/name`), update `bots.name`, rename a leftover forum topic if it has one. Rotates the conversation (§14.14). `/name` does the same from Telegram. No topic icon. |
+| `notify_owner` | `text`, `urgency` (normal\|urgent) | Post in General (the DM), labelled with the session name. |
+| `ask_owner` | `question`, `options?` (≤4 strings) | Post question with inline buttons (or free text if no options) in General. Returns immediately with `{"status":"asked"}`; the session should end its turn. The answer arrives as the next input (`source=user`, prefixed `Answer to "<question>": …`) via a button tap or a reply-to that question in the DM. Free text in the DM is always General. |
+| `set_name` | `name` | Rename this session: validate (§8 `/name`), update `bots.name`. Rotates the conversation (§14.14). `/name` in the DM only hits General, which refuses. No topic icon. |
 | `watch` | `name`, `command`, `interval_s` (≥60) | Register a deterministic watch (§7). Lasts `watch_ttl_s` (default 4h); re-upserting the name renews it. `unwatch(name)`, `list_watches()`. |
 | `schedule_wakeup` | `in_seconds` or `at` (RFC3339), `note`, `cron?` | Self-wakeup (§7). `cancel_schedule(id)`. |
 | `run_background` | `command`, `name?` | Queue a long-running shell command in the bot's cwd with `env_passthrough`. Returns a job id immediately; does not block the turn. Use when Bash/a tool is expected to exceed ~60s. |
 | `list_background` | — | This bot's recent/active jobs: id, status, short summary. |
 | `get_background` | `id` | Status + truncated output for one job. |
 | `cancel_background` | `id` | Best-effort kill (queued → failed; running → SIGTERM). |
-| `archive_bot` | `bot?` (default self) | Mark archived. Close a leftover forum topic if it has one. |
+| `archive_bot` | `bot?` (default self) | Mark archived. |
 | `get_project` / `set_project` | `path`, fields | Read/update the project registry. |
-| `send_file` | `path`, `caption?` | Send a file to the owner in General / leftover topic (≤50 MB; larger → existing relay if kept). |
+| `send_file` | `path`, `caption?` | Send a file to the owner in General (≤50 MB; larger → existing relay if kept). |
 | `list_sessions` | — | **General only.** Live workers: name, status, last output. |
 | `spawn_session` | `prompt`, `name?` | **General only.** Create a backend worker (no Telegram topic) and queue the prompt (wakes after this turn). |
 | `tell_session` | `session`, `text` | **General only.** Inbox + wake a live worker. |
@@ -246,7 +244,7 @@ All tools validate the calling bot from the `--bot` flag; tool inputs coming
 from the model are data, never instructions to ccc.
 
 Topic icons are not used. Session liveness is General's 30s cap (§3.5) and
-the 10-minute idle reminder (§7), not an emoji on the forum topic.
+the 10-minute idle reminder (§7).
 
 Only General can create other sessions (`spawn_session`). Workers
 `report_to_general`. `/session <prompt>` is the owner escape hatch. Long
@@ -363,10 +361,8 @@ older than 90 days.
   topic id 0, created on listen). `/session <prompt>` starts a backend
   worker named from the first line and dispatches that prompt. General may
   `spawn_session` the same way. The owner never writes into a session chat.
-- Plain text in a leftover forum topic → input for that old session.
-- Telegram close / archive of a leftover topic retires that session. Reopen
-  continues it. New sessions have no topic to close.
-- Photos/documents → saved into the session's workspace `inbox/`, path passed
+  Group messages are dropped.
+- Photos/documents → saved into General's workspace `inbox/`, path passed
   in the message. Voice → transcribed if the `voice` build is present, else
   the file path is passed (keep the existing whisper integration).
 - `ask_owner` → inline buttons `q:<question_id>:<option_idx>`; tapping edits the
@@ -374,9 +370,6 @@ older than 90 days.
   question message counts as the answer, and so does ANY text sent while the
   session is parked `waiting` (a reply-to takes priority when both apply,
   §14.3).
-- Renaming a topic in Telegram itself renames the session: the
-  `forum_topic_edited` service message is validated like `/name` and, when it
-  passes, `bots.name` follows the title (§14.15).
 - An **edited** message is gated like any other update. If its text starts with
   `/` it goes through the same command dispatcher — editing a mistyped command
   in place is how a phone corrects one — deduped by
@@ -387,23 +380,21 @@ older than 90 days.
 ### Commands
 | Command | Where | Effect |
 |---|---|---|
-| `/sessions` | anywhere | Table of open sessions. `/bots` is an alias. |
-| `/name [text]` | topic | Show or set the session's name: renames the forum topic and rotates the conversation (§14.14). |
-| `/new` | topic | Rotate the conversation (fresh transcript, memory kept). |
-| `/stop` | topic | Kill the running turn (SIGTERM the `claude` process), drop the queue. |
-| `/cwd [path]` | topic | Show or set the session's working dir. |
-| `/engine [name]` | topic | Secondary: assign this session to an engine's account pool (`claude`, `grok`/`grok-build`, `antigravity`/`agy`). Rotates the conversation. Engine itself is set at `/account add`. New sessions inherit the default account's engine, or `default_engine` if set. |
-| `/memory [query]` | topic | List/search memories visible to this session; `/forget <scope> <key>`. |
-| `/memory stats` | topic | Per scope: entries, bytes, whether it is over the compaction threshold, last compaction (§7.1). |
-| `/memory restore <id>` | topic | Undo one compaction. Owner only. |
-| `/usage` | anywhere | Tokens, cache hit ratio, turns, average duration and cost per session, today and last 7 days (§14.19). |
-| `/watches`, `/schedules` | topic | List and cancel. |
-| `/account` | anywhere | Status card per account (engine + health) with buttons; subcommands `status`, `add <identity> <engine>`, `login`, `remove`, `default`. |
-| `/model [engine] [slug]` | anywhere | Show/set models. In a session topic, one slug overrides that session. Two args (`/model grok grok-4`) set the instance default for that engine. `/model default` clears. |
-| `/access` | anywhere | Pairing/allowlist management (below). Owner only. |
-| `/watches`, `/schedules` | topic | List and cancel (also listed above). |
-| `/setgroup` | group | Bind the instance to this forum group. Owner only, and the headless alternative to `ccc setgroup`. |
-| `/status` | anywhere | Instance health: profiles, running turns, queue, doctor findings. |
+| `/sessions` | DM | Table of open sessions. `/bots` is an alias. |
+| `/name [text]` | DM | Show General's name. Rename is refused (General stays General). Workers rename via `set_name` or the phone. |
+| `/new` | DM | Rotate General's conversation (fresh transcript, memory kept). |
+| `/stop` | DM | Kill General's running turn, drop the queue. |
+| `/cwd [path]` | DM | Show or set General's working dir. |
+| `/engine [name]` | DM | Assign General to an engine's account pool (`claude`, `grok`/`grok-build`, `antigravity`/`agy`). Rotates the conversation. Engine itself is set at `/account add`. |
+| `/memory [query]` | DM | List/search memories visible to General; `/forget <scope> <key>`. |
+| `/memory stats` | DM | Per scope: entries, bytes, whether it is over the compaction threshold, last compaction (§7.1). |
+| `/memory restore <id>` | DM | Undo one compaction. Owner only. |
+| `/usage` | DM | Tokens, cache hit ratio, turns, average duration and cost per session, today and last 7 days (§14.19). |
+| `/watches`, `/schedules` | DM | List and cancel General's watches/schedules. |
+| `/account` | DM | Status card per account (engine + health) with buttons; subcommands `status`, `add <identity> <engine>`, `login`, `remove`, `default`. |
+| `/model [engine] [slug]` | DM | Show/set instance models. One slug sets Claude's default. Two args (`/model grok grok-4`) set that engine. `/model default` clears. |
+| `/access` | DM | Pairing/allowlist management (below). Owner only. |
+| `/status` | DM | Instance health: profiles, running turns, queue, doctor findings. |
 
 ### Account management from Telegram (login without a terminal)
 Engine is defined when the account is added (`/account add <identity> <engine>`),
@@ -460,12 +451,11 @@ never by assuming a position.
 - Owner = the Telegram user id from bootstrap config; always allowed.
 - Unknown DM → 6-hex pairing code (1 h TTL, ≤3 pending, ≤2 replies per stranger
   and then silence); owner approves with `/access pair <code>` (or a button in
-  the owner's DM). Approved users may talk to sessions in the group; only the owner
-  can use `/account`, `/access`, `/model` and `/setgroup`.
+  the owner's DM). Approved users may talk in the DM (General); only the owner
+  can use `/account`, `/access` and `/model`.
 - Every inbound update from a non-approved user is dropped silently after the
-  pairing reply. Messages, EDITS and callback queries are gated the same way; an
-  unknown user in the GROUP gets no reply at all, because answering there would
-  let anyone who finds the group make the bot talk.
+  pairing reply. Messages, EDITS and callback queries are gated the same way.
+  Group messages are dropped.
 - Until `chat_id` is configured there is no owner, so nobody is allowed.
 
 ## 9. System prompt and context envelope
@@ -568,7 +558,7 @@ v3 instance and the first save rewrites it clean. Kept: `telegram.go`,
   / `/role`; those are gone — a topic is a session, not a teammate.)
 - **2b — automation & accounts** (done): watches, schedules,
   `archive_bot`, project registry, doctor loop, `/account …` with PTY
-  login and disclaimer, `/access` pairing, `/model`, `/setgroup`, headless
+  login and disclaimer, `/access` pairing, `/model`, headless
   bootstrap (`ccc config set`, systemd user unit, `make build-linux`), legacy
   removal (§11), README rewrite. `spawn_bot` was later removed (14.24).
   Inter-session messaging and roles were dropped after 2b (14.17).
@@ -668,41 +658,34 @@ immediately and there is nothing to rotate.
 
 **14.13 Headless bootstrap.** §8 assumed `ccc setup`'s interactive Telegram
 loop. A VM has no terminal to run it in, so `ccc config set <key> <value>` sets
-every bootstrap key non-interactively and `/setgroup` binds the forum group from
-Telegram. `ccc install` writes a systemd **user** unit whose only `Environment=`
+every bootstrap key non-interactively. `ccc install` writes a systemd **user** unit whose only `Environment=`
 lines are the `env_passthrough` names that are actually set.
 
 **14.14 Renaming rotates the conversation.** The session name is in the
 system prompt (`You are a coding assistant in a Telegram session named
 <name>`, §9), and the system prompt is recorded per conversation (14.5), so
 a rename would otherwise leave the model answering under the old title
-until the next compaction. `/name`, `set_name` and the topic-title sync
+until the next compaction. `/name` and `set_name`
 therefore all clear `session_id` — memories are kept — and the confirmation
 message says so. A `set_name` call made DURING a turn is rotated by the
 same post-turn check (14.2), which also repairs the id a fresh conversation
 wrote back after the tool cleared it. Other open sessions are unaffected:
 there is no roster in their prompts.
 
-**14.15 The topic title and `bots.name` are kept in sync in both directions.**
-The name is unique (it is the forum topic title the owner reads), so it
-cannot be a free-text label that collides. `/name` and `set_name` rename
-the topic; a rename made in Telegram arrives as a `forum_topic_edited`
-service message and renames the session. A title that fails validation
-(taken, empty, too long) is NOT renamed back — that would fight the person
-renaming it, and could loop — the old name is kept and the topic is told
-why.
+**14.15 Session names are unique labels, not Telegram titles.** The name is
+unique so it cannot collide. Workers rename via `set_name` or the phone
+hub; `/name` in the DM only hits General, which refuses. There is no
+Telegram forum topic to keep in sync.
 
-**14.16 Topic icons are gone.** They were a status indicator on the forum
-topic (and a large, order-unstable blob in the system prompt). General's 30s
-cap and the 10-minute idle reminder in General replace that. `set_name` /
-`/name` rename only. Existing topic emojis are left as Telegram left them;
-ccc never writes `icon_custom_emoji_id`.
+**14.16 Topic icons are gone.** They were a status indicator on the old
+forum topic (and a large, order-unstable blob in the system prompt).
+General's 30s cap and the 10-minute idle reminder in General replace that.
 
-**14.17 Sessions have no role onboarding.** A topic is a session. General is
-the dispatcher (not a launcher). `/session <prompt>` (and `spawn_session`)
-dispatch that prompt as the first worker turn. `/role` and
-`update_instructions` are gone. Closing a worker topic archives it; reopening
-continues it.
+**14.17 Sessions have no role onboarding.** A session is a backend worker.
+General is the dispatcher (not a launcher). `/session <prompt>` (and
+`spawn_session`) dispatch that prompt as the first worker turn. `/role` and
+`update_instructions` are gone. Archiving a worker is `archive_bot` or the
+phone.
 
 **14.18 Inputs are debounced before a turn starts.** §2 only said further inputs
 "queue and are delivered together on the next turn", which handles a burst that
@@ -855,15 +838,16 @@ file. Implicit (non-isolated) Grok/Codex homes are not patched, so a
 user's interactive CLI does not pick up a broken `ccc mcp`.
 
 **14.31 The owner's DM is General; sessions have no Telegram topic.** The
-forum-group model (one topic per session) was the original v3 UX. The
-owner now talks only to General in the bot's 1:1 DM. `spawn_session` and
-`/session` create a backend worker (`TopicID = -id`) and never call
-`createForumTopic`. Worker progress and final answers stay off Telegram;
+forum-group model (one topic per session) was the original v3 UX and is
+gone. The owner talks only to General in the bot's 1:1 DM. Group messages
+are ignored. `spawn_session` and `/session` create a backend worker
+(`TopicID = -id`). Worker progress and final answers stay off Telegram;
 the owner hears via `report_to_general`, `notify_owner`, `ask_owner`, idle
-reminders and job pings, all of which land in the DM. A leftover group
-(`group_id`) is optional: existing topics (`TopicID > 0`) still route,
-close, rename and reopen, but new sessions do not get one. `group_id` is
-no longer required to start listening. `isGeneralBot` stays `TopicID == 0`.
+reminders and job pings, all of which land in the DM. There is no
+`group_id`, `/setgroup`, or forum topic API. `isGeneralBot` stays
+`TopicID == 0`. The `topic_id` column is the session key, not a Telegram
+forum id; leftover positive ids from old installs identify those rows and
+have no Telegram destination.
 
 ## 15. Public hub (mobile)
 
@@ -889,9 +873,9 @@ Phone RPC (plaintext inside the box, instance `hubClient.dispatch`):
 | `archived` | — | Sessions with `archived_at` set. |
 | `history` | `bot_id`, `limit?` | Turns, oldest first. |
 | `send` | `bot_id`, `text?`, `image?` (`mime`, `name`, `data` base64) | Enqueue a user turn. An image is written to the session `inbox/` (≤512 KiB) the same way a Telegram photo is. |
-| `rename` | `bot_id`, `name` | `validateBotName` + `renameBot` + `editForumTopic` when the session still has a leftover topic. |
-| `archive` | `bot_id` | `archiveBotRow` + close a leftover forum topic if it has one. Drops off `bots`. |
-| `unarchive` | `bot_id` | `unarchiveBotRow` + reopen a leftover topic if it has one. |
+| `rename` | `bot_id`, `name` | `validateBotName` + `renameBot`. |
+| `archive` | `bot_id` | `archiveBotRow`. Drops off `bots`. |
+| `unarchive` | `bot_id` | `unarchiveBotRow`. |
 
 Keepalive: clients send `{v:1,t:ping}` every ~30s; the hub replies `{t:pong}`.
 The hub's 2-minute read deadline resets on any data frame. The phone keeps one
