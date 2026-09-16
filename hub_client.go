@@ -30,6 +30,9 @@ type hubClient struct {
 	wmu   sync.Mutex
 	conn  *websocket.Conn
 	peers map[string][32]byte // device pk hex -> pubkey
+
+	progMu sync.Mutex
+	prog   map[int64]string // live progress line per bot, for phones that reopen a chat
 }
 
 func instanceDisplayName(cfg *Config) string {
@@ -276,6 +279,7 @@ func (h *hubClient) sendBox(toHex string, toPub [32]byte, plain []byte) {
 }
 
 func (h *hubClient) pushEvent(kind string, body any) {
+	h.rememberProgress(kind, body)
 	raw, _ := json.Marshal(body)
 	rpc, _ := json.Marshal(hubRPC{Kind: "event", Method: kind, Body: raw})
 	h.mu.Lock()
@@ -286,6 +290,66 @@ func (h *hubClient) pushEvent(kind string, body any) {
 	h.mu.Unlock()
 	for id, pk := range peers {
 		h.sendBox(id, pk, rpc)
+	}
+}
+
+func botIDFromBody(body any) int64 {
+	m, ok := body.(map[string]any)
+	if !ok {
+		return 0
+	}
+	switch v := m["bot_id"].(type) {
+	case int64:
+		return v
+	case int:
+		return int64(v)
+	case float64:
+		return int64(v)
+	default:
+		return 0
+	}
+}
+
+func (h *hubClient) rememberProgress(kind string, body any) {
+	id := botIDFromBody(body)
+	if id == 0 {
+		return
+	}
+	text := ""
+	if m, ok := body.(map[string]any); ok {
+		text, _ = m["text"].(string)
+	}
+	h.progMu.Lock()
+	defer h.progMu.Unlock()
+	if h.prog == nil {
+		h.prog = map[int64]string{}
+	}
+	if kind == "post" || strings.TrimSpace(text) == "" {
+		delete(h.prog, id)
+		return
+	}
+	if kind == "progress" {
+		h.prog[id] = text
+	}
+}
+
+func (h *hubClient) progressOf(botID int64) string {
+	h.progMu.Lock()
+	defer h.progMu.Unlock()
+	return h.prog[botID]
+}
+
+func liveProgress(status, stored string) string {
+	switch status {
+	case turnRunning:
+		if strings.TrimSpace(stored) != "" {
+			return stored
+		}
+		return "working"
+	case turnQueued:
+		return "queued"
+	default:
+		return ""
 	}
 }
 
@@ -329,7 +393,7 @@ func (h *hubClient) rpcBots(archived bool, out *hubRPC) {
 	}
 	list := make([]hubBotInfo, 0, len(bots))
 	for i := range bots {
-		list = append(list, fillBotInfo(h.in.db, &bots[i]))
+		list = append(list, fillBotInfo(h.in.db, &bots[i], h.progressOf(bots[i].ID)))
 	}
 	if !archived {
 		sort.SliceStable(list, func(i, j int) bool { return list[i].Last > list[j].Last })
@@ -337,7 +401,7 @@ func (h *hubClient) rpcBots(archived bool, out *hubRPC) {
 	out.Body, _ = json.Marshal(list)
 }
 
-func fillBotInfo(db *gorm.DB, b *Bot) hubBotInfo {
+func fillBotInfo(db *gorm.DB, b *Bot, progress string) hubBotInfo {
 	info := hubBotInfo{ID: b.ID, Name: b.Name, Role: b.Role, Status: b.Status, Engine: botEngine(b), Archived: b.ArchivedAt != nil}
 	var last Turn
 	if err := db.Where("bot_id = ?", b.ID).Order("id DESC").First(&last).Error; err == nil {
@@ -347,6 +411,7 @@ func fillBotInfo(db *gorm.DB, b *Bot) hubBotInfo {
 			preview = strings.TrimSpace(last.Input)
 		}
 		info.LastText = truncate(preview, 80)
+		info.Progress = liveProgress(last.Status, progress)
 	}
 	return info
 }
@@ -363,11 +428,13 @@ func (h *hubClient) rpcHistory(params json.RawMessage, out *hubRPC) {
 	var turns []Turn
 	h.in.db.Where("bot_id = ?", p.BotID).Order("id DESC").Limit(p.Limit).Find(&turns)
 	list := make([]hubTurnInfo, 0, len(turns))
+	live := h.progressOf(p.BotID)
 	for i := len(turns) - 1; i >= 0; i-- {
 		t := turns[i]
 		list = append(list, hubTurnInfo{
 			ID: t.ID, Source: t.Source, Input: t.Input, Output: t.Output,
 			Status: t.Status, At: t.CreatedAt.UTC().Format(time.RFC3339),
+			Progress: liveProgress(t.Status, live),
 		})
 	}
 	out.Body, _ = json.Marshal(list)

@@ -129,6 +129,51 @@ func TestHubArchiveHidesFromBotsList(t *testing.T) {
 	}
 }
 
+func TestHubHistoryIncludesLiveProgress(t *testing.T) {
+	h, in, _, _ := testHub(t)
+	b, err := in.createBot("chat", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := in.db.Create(&Turn{BotID: b.ID, Source: sourceUser, Input: "hi", Status: turnRunning}).Error; err != nil {
+		t.Fatal(err)
+	}
+	h.pushEvent("progress", map[string]any{"bot_id": b.ID, "bot": b.Name, "text": "reading main.dart · 8s"})
+
+	params, _ := json.Marshal(map[string]any{"bot_id": b.ID})
+	res := h.dispatch(hubRPC{Kind: "req", ID: "1", Method: "history", Params: params})
+	if !res.OK {
+		t.Fatalf("history: %s", res.Error)
+	}
+	var turns []hubTurnInfo
+	if err := json.Unmarshal(res.Body, &turns); err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 1 || turns[0].Progress != "reading main.dart · 8s" {
+		t.Fatalf("history progress = %+v", turns)
+	}
+
+	listed := h.dispatch(hubRPC{Kind: "req", ID: "2", Method: "bots"})
+	var bots []hubBotInfo
+	if err := json.Unmarshal(listed.Body, &bots); err != nil {
+		t.Fatal(err)
+	}
+	if len(bots) != 1 || bots[0].Progress != "reading main.dart · 8s" {
+		t.Fatalf("bots progress = %+v", bots)
+	}
+
+	h.pushEvent("post", map[string]any{"bot_id": b.ID, "bot": b.Name, "text": "done"})
+	in.db.Model(&Turn{}).Where("bot_id = ?", b.ID).Update("status", turnDone)
+	listed = h.dispatch(hubRPC{Kind: "req", ID: "3", Method: "bots"})
+	bots = nil
+	if err := json.Unmarshal(listed.Body, &bots); err != nil {
+		t.Fatal(err)
+	}
+	if len(bots) != 1 || bots[0].Progress != "" {
+		t.Fatalf("progress after post = %+v", bots)
+	}
+}
+
 func TestHubRename(t *testing.T) {
 	h, in, _, api := testHub(t)
 	b, _ := in.createBot("old-name", "")

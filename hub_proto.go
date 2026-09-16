@@ -85,6 +85,7 @@ type hubBotInfo struct {
 	Engine   string `json:"engine"`
 	Last     string `json:"last,omitempty"`
 	LastText string `json:"last_text,omitempty"`
+	Progress string `json:"progress,omitempty"`
 	Archived bool   `json:"archived,omitempty"`
 }
 
@@ -93,12 +94,13 @@ type hubBotInfo struct {
 const hubImageMaxBytes = 512 * 1024
 
 type hubTurnInfo struct {
-	ID     int64  `json:"id"`
-	Source string `json:"source"`
-	Input  string `json:"input"`
-	Output string `json:"output"`
-	Status string `json:"status"`
-	At     string `json:"at"`
+	ID       int64  `json:"id"`
+	Source   string `json:"source"`
+	Input    string `json:"input"`
+	Output   string `json:"output"`
+	Status   string `json:"status"`
+	At       string `json:"at"`
+	Progress string `json:"progress,omitempty"`
 }
 
 type hubHello struct {
