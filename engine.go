@@ -9,10 +9,9 @@ import (
 	"strings"
 )
 
-// Engines a bot can run on. Claude Code is the default and the only engine
-// that gets the ccc MCP server and the Claude account pool. Grok Build,
-// Antigravity and Codex are first-class alternatives: same Telegram topic,
-// same envelope, their own CLI and session flags.
+// Engines a bot can run on. Claude, Grok and Codex get the ccc MCP server
+// (Claude via --mcp-config; Grok/Codex via isolated-home config.toml).
+// Antigravity does not: no per-turn MCP attach that would not race ~/.gemini.
 const (
 	engineClaude      = "claude"
 	engineGrok        = "grok"
@@ -225,10 +224,9 @@ func resolveEngineBin(engine string) (string, error) {
 // The prompt is NOT in this slice: `--single` takes it as its argument, so
 // buildTurn appends `--single`, envelope after these flags.
 //
-// MCP is deliberately omitted. Grok has `grok mcp add|list|remove` and stores
-// servers in ~/.grok/config.toml (or project .grok/config.toml) — there is no
-// clean per-turn inline --mcp-config equivalent. Long work stays in this
-// session (run_background is Claude-only; other engines use their own tools).
+// MCP is attached by ensureAccountMCP writing [mcp_servers.ccc] into the
+// isolated GROK_HOME/config.toml. Identity is CCC_BOT_ID in the process env.
+// There is no per-turn --mcp-config flag.
 func grokTurnArgs(model, systemPrompt, sessionID string, resume bool) []string {
 	args := []string{
 		"--always-approve",
@@ -307,8 +305,8 @@ func agyTurnArgs(model, conversationID string, resume bool) []string {
 //	                            a thread_id (captured from the stream).
 //
 // No --system-prompt: the system prompt is prepended to the user prompt
-// (buildTurn), same as agy. MCP is omitted (no inline --mcp-config); teammates
-// are `ccc tell`.
+// (buildTurn), same as agy. MCP is attached via CODEX_HOME/config.toml and
+// per-turn `codex exec -c` overrides (insertCodexMCPArgs).
 func codexTurnArgs(model, sessionID, prompt string, resume bool) []string {
 	args := []string{
 		"exec",

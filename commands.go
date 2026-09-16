@@ -368,7 +368,7 @@ COMMANDS:
     maintain                Run the daily growth-control job once, now
     profile <cmd>           Manage accounts (list/add/remove/default/
                             login/accept-disclaimer); engine is set at add
-    mcp --bot <id>          MCP server for one turn (spawned by Claude Code)
+    mcp --bot <id>          MCP server for one turn (spawned by claude/grok/codex)
     routine add|list|cancel Named recurring wakeup (⏰ in the topic)
     send <file>             Send a file into the topic of the session owning this directory
     relay [port]            Relay server for files over 50 MB (default port: 8080)
@@ -377,8 +377,9 @@ COMMANDS:
     hub [addr]              Run the public pairing hub (default :8787)
 
 TELEGRAM (in the forum group):
-    Text in General         Start a new session from your message
+    Text in General         Talk to the dispatcher (sees sessions, can spawn them)
     Text in a session topic Continue that session
+    /session <prompt>       Start a session without going through General
     /new /stop /cwd /memory /forget /watches /schedules         per session
     /engine                 assign this session to an engine's account pool
     /sessions /status /usage                                    anywhere

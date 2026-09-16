@@ -48,7 +48,13 @@ func runMCPServer(args []string) error {
 		}
 	}
 	if botID == 0 {
-		return fmt.Errorf("ccc mcp requires --bot <id>")
+		botID, _ = strconv.ParseInt(os.Getenv("CCC_BOT_ID"), 10, 64) // safe-ignore: 0 still rejected below
+	}
+	if turnID == 0 {
+		turnID, _ = strconv.ParseInt(os.Getenv("CCC_TURN_ID"), 10, 64) // safe-ignore: missing turn id only loses the question link
+	}
+	if botID == 0 {
+		return fmt.Errorf("ccc mcp requires --bot <id> (or CCC_BOT_ID)")
 	}
 
 	// The listener passes the database and config paths through the MCP env
@@ -139,6 +145,20 @@ type sendFileIn struct {
 	Caption string `json:"caption,omitempty" jsonschema:"optional caption"`
 }
 
+type spawnSessionIn struct {
+	Prompt string `json:"prompt" jsonschema:"first message the new session should run"`
+	Name   string `json:"name,omitempty" jsonschema:"topic title; default is the first line of prompt"`
+}
+
+type tellSessionIn struct {
+	Session string `json:"session" jsonschema:"name of the live session to message"`
+	Text    string `json:"text" jsonschema:"the message"`
+}
+
+type reportToGeneralIn struct {
+	Text string `json:"text" jsonschema:"status the dispatcher (and the owner) should see"`
+}
+
 // ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
@@ -175,6 +195,34 @@ func (s *mcpServer) register(server *mcp.Server) {
 		Description: "Send a file from this machine to the owner: Telegram topic and paired phones (max 50 MB).",
 	}, s.sendFile)
 	s.registerAutomation(server)
+	s.registerCrew(server)
+}
+
+func (s *mcpServer) isChief() bool {
+	b, err := s.bot()
+	return err == nil && isGeneralBot(b)
+}
+
+func (s *mcpServer) registerCrew(server *mcp.Server) {
+	if s.isChief() {
+		mcp.AddTool(server, &mcp.Tool{
+			Name:        "list_sessions",
+			Description: "List live sessions (not including General): name, status, engine, last output.",
+		}, s.listSessions)
+		mcp.AddTool(server, &mcp.Tool{
+			Name:        "spawn_session",
+			Description: "Open a new Telegram topic as a session and give it a first prompt. The session starts when this turn ends. Use this instead of doing long work yourself.",
+		}, s.spawnSession)
+		mcp.AddTool(server, &mcp.Tool{
+			Name:        "tell_session",
+			Description: "Message an existing live session and wake it. Sessions cannot message each other; only General can tell them.",
+		}, s.tellSession)
+		return
+	}
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "report_to_general",
+		Description: "Send a status update to General (the dispatcher). Use it when the owner should hear: finished work, a blocker, a question for the dispatcher. You cannot message other sessions.",
+	}, s.reportToGeneral)
 }
 
 // ---------------------------------------------------------------------------
@@ -294,6 +342,89 @@ func (s *mcpServer) sendToBot(_ context.Context, _ *mcp.CallToolRequest, in send
 	return text("message queued for %s", target.Name), nil, nil
 }
 
+func (s *mcpServer) listSessions(_ context.Context, _ *mcp.CallToolRequest, _ emptyIn) (*mcp.CallToolResult, any, error) {
+	if !s.isChief() {
+		return toolErr("only General can list sessions"), nil, nil
+	}
+	return text("%s", formatSessionRoster(sessionRoster(s.db, s.botID))), nil, nil
+}
+
+func (s *mcpServer) spawnSession(_ context.Context, _ *mcp.CallToolRequest, in spawnSessionIn) (*mcp.CallToolResult, any, error) {
+	if !s.isChief() {
+		return toolErr("only General can spawn sessions"), nil, nil
+	}
+	prompt := strings.TrimSpace(in.Prompt)
+	if prompt == "" {
+		return toolErr("spawn_session needs a prompt"), nil, nil
+	}
+	name := strings.TrimSpace(in.Name)
+	if name == "" {
+		name = botNameFromText(prompt)
+	}
+	if strings.EqualFold(sanitizeBotName(name), generalBotName) {
+		return toolErr("cannot spawn a session named General"), nil, nil
+	}
+	b, err := createBotRow(s.db, s.config, name, "", "")
+	if err != nil {
+		return toolErr("could not start the session: %v", err), nil, nil
+	}
+	self, err := s.bot()
+	if err != nil {
+		return toolErr("unknown bot"), nil, nil
+	}
+	if _, _, err := queueBotMessage(s.db, s.config, self, b.Name, prompt, true); err != nil {
+		return toolErr("started %s but could not queue the first prompt: %s", b.Name, err.Error()), nil, nil
+	}
+	return text("started session %q; it will run when this turn ends. Continue in its topic, or tell_session later.", b.Name), nil, nil
+}
+
+func (s *mcpServer) tellSession(_ context.Context, _ *mcp.CallToolRequest, in tellSessionIn) (*mcp.CallToolResult, any, error) {
+	if !s.isChief() {
+		return toolErr("only General can message sessions"), nil, nil
+	}
+	body := strings.TrimSpace(in.Text)
+	if body == "" {
+		return toolErr("tell_session needs text"), nil, nil
+	}
+	target, err := botByName(s.db, strings.TrimSpace(in.Session))
+	if err != nil {
+		return toolErr("no live session named %q", in.Session), nil, nil
+	}
+	if isGeneralBot(target) || target.ID == s.botID {
+		return toolErr("tell_session is for worker sessions, not General"), nil, nil
+	}
+	self, err := s.bot()
+	if err != nil {
+		return toolErr("unknown bot"), nil, nil
+	}
+	if _, _, err := queueBotMessage(s.db, s.config, self, target.Name, body, true); err != nil {
+		return toolErr("%s", err.Error()), nil, nil
+	}
+	return text("queued for %s; it will run when this turn ends", target.Name), nil, nil
+}
+
+func (s *mcpServer) reportToGeneral(_ context.Context, _ *mcp.CallToolRequest, in reportToGeneralIn) (*mcp.CallToolResult, any, error) {
+	if s.isChief() {
+		return toolErr("you are General; talk to the owner here"), nil, nil
+	}
+	body := strings.TrimSpace(in.Text)
+	if body == "" {
+		return toolErr("report_to_general needs text"), nil, nil
+	}
+	chief, err := generalBot(s.db)
+	if err != nil {
+		return toolErr("General dispatcher is not running"), nil, nil
+	}
+	self, err := s.bot()
+	if err != nil {
+		return toolErr("unknown bot"), nil, nil
+	}
+	if _, _, err := queueBotMessage(s.db, s.config, self, chief.Name, body, true); err != nil {
+		return toolErr("%s", err.Error()), nil, nil
+	}
+	return text("reported to General; it will run when this turn ends"), nil, nil
+}
+
 func (s *mcpServer) notifyOwner(_ context.Context, _ *mcp.CallToolRequest, in notifyOwnerIn) (*mcp.CallToolResult, any, error) {
 	body := strings.TrimSpace(in.Text)
 	if body == "" {
@@ -376,6 +507,9 @@ func (s *mcpServer) setName(_ context.Context, _ *mcp.CallToolRequest, in setNam
 	b, err := s.bot()
 	if err != nil {
 		return toolErr("unknown bot"), nil, nil
+	}
+	if isGeneralBot(b) {
+		return toolErr("General stays General"), nil, nil
 	}
 	name, err := validateBotName(s.db, b.ID, in.Name)
 	if err != nil {
@@ -489,7 +623,7 @@ func sendFileForbidden(config *Config, abs string) (string, bool) {
 // post writes into a topic, or does nothing when this instance has no Telegram
 // configured (which is how the runner is exercised in tests).
 func (s *mcpServer) post(topicID int64, html string) {
-	if s.config == nil || s.config.BotToken == "" || s.config.GroupID == 0 || topicID == 0 {
+	if s.config == nil || s.config.BotToken == "" || s.config.GroupID == 0 {
 		return
 	}
 	_, _ = sendMessageHTMLGetID(s.config, s.config.GroupID, topicID, html) // safe-ignore: a failed mirror must not fail the tool call
@@ -498,7 +632,7 @@ func (s *mcpServer) post(topicID int64, html string) {
 // postQuestion renders an ask_owner question with one button per option and
 // returns the message id so a tap can be matched back to the question.
 func (s *mcpServer) postQuestion(topicID, questionID int64, question string, options []string) int64 {
-	if s.config == nil || s.config.BotToken == "" || s.config.GroupID == 0 || topicID == 0 {
+	if s.config == nil || s.config.BotToken == "" || s.config.GroupID == 0 {
 		return 0
 	}
 	body := "❓ " + renderTelegramHTML(question)
@@ -845,10 +979,16 @@ func (s *mcpServer) archiveBot(_ context.Context, _ *mcp.CallToolRequest, in arc
 		return toolErr("unknown bot"), nil, nil
 	}
 	if name := strings.TrimSpace(in.Bot); name != "" && name != target.Name {
+		if !s.isChief() {
+			return toolErr("you can only archive yourself"), nil, nil
+		}
 		target, err = botByName(s.db, name)
 		if err != nil {
 			return toolErr("no live bot named %q", name), nil, nil
 		}
+	}
+	if isGeneralBot(target) {
+		return toolErr("General cannot be archived"), nil, nil
 	}
 	if err := archiveBotRow(s.db, target.ID); err != nil {
 		return toolErr("could not archive: %v", err), nil, nil

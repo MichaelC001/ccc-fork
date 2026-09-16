@@ -225,33 +225,28 @@ func TestEditedCommandIsDispatchedOnce(t *testing.T) {
 	}
 }
 
-func TestTextInGeneralCreatesBotAndTopic(t *testing.T) {
+func TestTextInGeneralGoesToDispatcher(t *testing.T) {
 	in, runner, api := testInstance(t)
 
 	in.handleMessage(ownerMessage(0, "watch the deploy\nand tell me when it is green"))
 
-	topics := api.since("createForumTopic")
-	if len(topics) != 1 {
-		t.Fatalf("expected one topic created, got %d", len(topics))
+	if got := len(api.since("createForumTopic")); got != 0 {
+		t.Fatalf("General must not open a new topic, created %d", got)
 	}
-	if got := topics[0].Params.Get("name"); got != "watch the deploy" {
-		t.Errorf("topic name = %q, want the first line of the message", got)
-	}
-
 	bots, err := liveBots(in.db)
 	if err != nil || len(bots) != 1 {
-		t.Fatalf("expected one bot, got %d (%v)", len(bots), err)
+		t.Fatalf("expected the General bot, got %d (%v)", len(bots), err)
 	}
 	b := bots[0]
-	if b.TopicID == 0 {
-		t.Error("bot has no topic id")
+	if b.TopicID != 0 || b.Name != generalBotName {
+		t.Errorf("dispatcher = %+v, want name %s topic 0", b, generalBotName)
 	}
-	if want := filepath.Join(in.dataDir, "bots", b.Name, "workspace"); b.Cwd != want {
+	if want := filepath.Join(in.dataDir, "bots", generalBotName, "workspace"); b.Cwd != want {
 		t.Errorf("cwd = %q, want %q", b.Cwd, want)
 	}
 	last, ok := runner.last()
 	if !ok || last.BotID != b.ID || !strings.HasPrefix(last.Text, "watch the deploy") {
-		t.Errorf("first message was not dispatched to the new bot: %+v", last)
+		t.Errorf("General did not get the message: %+v", last)
 	}
 }
 
@@ -785,9 +780,9 @@ func TestTopicRenameKeepsTheOldNameOnACollision(t *testing.T) {
 	}
 }
 
-func TestSendToBotFollowsTheRename(t *testing.T) {
+func TestTellSessionFollowsTheRename(t *testing.T) {
 	in, _, _ := testInstance(t)
-	sender, err := in.createBot("alpha", "")
+	chief, err := in.ensureGeneralBot()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -798,15 +793,15 @@ func TestSendToBotFollowsTheRename(t *testing.T) {
 
 	in.handleMessage(ownerMessage(target.TopicID, "/name gamma"))
 
-	s := &mcpServer{db: in.db, config: in.cfg, botID: sender.ID}
-	res, _, err := s.sendToBot(t.Context(), nil, sendToBotIn{Bot: "gamma", Text: "hi"})
+	s := &mcpServer{db: in.db, config: in.cfg, botID: chief.ID}
+	res, _, err := s.tellSession(t.Context(), nil, tellSessionIn{Session: "gamma", Text: "hi"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if res.IsError {
 		t.Errorf("the new name should be addressable: %+v", res.Content)
 	}
-	res, _, err = s.sendToBot(t.Context(), nil, sendToBotIn{Bot: "beta", Text: "hi"})
+	res, _, err = s.tellSession(t.Context(), nil, tellSessionIn{Session: "beta", Text: "hi"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -856,9 +851,12 @@ func TestSetNameToolRenamesAndSetsTheIcon(t *testing.T) {
 // A session created from General goes straight to the engine with the owner's
 // text. No role interview, no /role, no update_instructions.
 func TestNewSessionDispatchesThePromptStraightToTheEngine(t *testing.T) {
-	in, runner, _ := testInstance(t)
-	in.handleMessage(ownerMessage(0, "help me with the deploy"))
+	in, runner, api := testInstance(t)
+	in.handleMessage(ownerMessage(0, "/session help me with the deploy"))
 
+	if len(api.since("createForumTopic")) != 1 {
+		t.Fatalf("expected one worker topic, got %d", len(api.since("createForumTopic")))
+	}
 	last, ok := runner.last()
 	if !ok {
 		t.Fatal("nothing enqueued for the new session")
@@ -869,6 +867,9 @@ func TestNewSessionDispatchesThePromptStraightToTheEngine(t *testing.T) {
 	b, err := botByID(in.db, last.BotID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if isGeneralBot(b) {
+		t.Fatal("/session must not enqueue on General")
 	}
 	envelope := buildEnvelope(in.db, b, last.Source, last.Text, time.Now())
 	if !strings.Contains(envelope, "help me with the deploy") {

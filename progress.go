@@ -124,6 +124,23 @@ func (p *progress) flush(force bool) {
 // HTML subset first: handing the raw text to a parse_mode=HTML send is what
 // used to make Telegram reject — and ccc silently drop — every reply that
 // happened to contain a "<".
+// discard retires the silent progress message without posting a reply. Used
+// when General times out: the instruction goes into the next turn, not to
+// the owner as a ❌.
+func (p *progress) discard() {
+	if p == nil || p.ui == nil {
+		return
+	}
+	p.mu.Lock()
+	p.finished = true
+	msgID := p.msgID
+	created := p.created
+	p.mu.Unlock()
+	if created {
+		p.retireProgress(msgID)
+	}
+}
+
 func (p *progress) finish(final string) {
 	if p == nil || p.ui == nil {
 		return

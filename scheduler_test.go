@@ -772,6 +772,154 @@ func TestWatchExpiryLabel(t *testing.T) {
 	}
 }
 
+func TestIdleRemindPingsGeneralEveryTenMinutes(t *testing.T) {
+	s, in, _, api := testScheduler(t)
+	if _, err := in.ensureGeneralBot(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := in.createBot("deployer", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	seedEndedTurn(t, in.db, b.ID, now.Add(-15*time.Minute))
+
+	s.remindIdleSessions(now)
+	joined := strings.Join(api.texts(""), "\n")
+	if !strings.Contains(joined, "deployer") || !strings.Contains(joined, "esperando") {
+		t.Errorf("expected a Spanish reminder in General, got %q", api.texts(""))
+	}
+	for _, c := range api.since("sendMessage") {
+		if strings.Contains(c.Params.Get("text"), "esperando") && c.Params.Get("disable_notification") == "true" {
+			t.Error("idle remind must ping the owner, not go silent")
+		}
+	}
+
+	s.remindIdleSessions(now.Add(time.Minute))
+	if n := len(api.texts("")); n != 1 {
+		t.Errorf("reminded again after 1m (%d messages); cadence is 10m", n)
+	}
+
+	s.remindIdleSessions(now.Add(idleRemindInterval + time.Minute))
+	if n := len(api.texts("")); n != 2 {
+		t.Errorf("after 10m more, want a second reminder, got %d", n)
+	}
+}
+
+func TestIdleRemindSkipsWorkingKeepaliveAndGeneral(t *testing.T) {
+	s, in, _, api := testScheduler(t)
+	chief, err := in.ensureGeneralBot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	seedEndedTurn(t, in.db, chief.ID, now.Add(-time.Hour))
+
+	running, err := in.createBot("running-one", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.db.Model(&Bot{}).Where("id = ?", running.ID).Update("status", botRunning)
+	seedEndedTurn(t, in.db, running.ID, now.Add(-time.Hour))
+
+	watched, err := in.createBot("watched", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := upsertWatch(in.db, watched.ID, "ci", "echo hi", 60); err != nil {
+		t.Fatal(err)
+	}
+	seedEndedTurn(t, in.db, watched.ID, now.Add(-time.Hour))
+
+	queued, err := in.createBot("queued", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := in.db.Create(&Turn{BotID: queued.ID, Source: sourceUser, Input: "go", Status: turnQueued}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	archived, err := in.createBot("old", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := archiveBotRow(in.db, archived.ID); err != nil {
+		t.Fatal(err)
+	}
+	seedEndedTurn(t, in.db, archived.ID, now.Add(-time.Hour))
+
+	s.remindIdleSessions(now)
+	if n := len(api.texts("")); n != 0 {
+		t.Errorf("reminded sessions that are not waiting on the owner: %q", api.texts(""))
+	}
+}
+
+func TestIdleRemindStopsAfterUserActivity(t *testing.T) {
+	s, in, _, api := testScheduler(t)
+	b, err := in.createBot("analyst", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	seedEndedTurn(t, in.db, b.ID, now.Add(-20*time.Minute))
+	s.remindIdleSessions(now)
+	if n := len(api.texts("")); n != 1 {
+		t.Fatalf("want the first reminder, got %d", n)
+	}
+
+	seedEndedTurn(t, in.db, b.ID, now.Add(time.Minute))
+	s.remindIdleSessions(now.Add(2 * time.Minute))
+	if n := len(api.texts("")); n != 1 {
+		t.Errorf("a fresh user turn must stop the reminders, got %d", n)
+	}
+}
+
+func TestIdleRemindIncludesWaitingAskOwner(t *testing.T) {
+	s, in, _, api := testScheduler(t)
+	b, err := in.createBot("asker", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.db.Model(&Bot{}).Where("id = ?", b.ID).Update("status", botWaiting)
+	now := time.Now()
+	seedEndedTurn(t, in.db, b.ID, now.Add(-12*time.Minute))
+	if err := in.db.Create(&Question{BotID: b.ID, Question: "ship it?"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	s.remindIdleSessions(now)
+	if n := len(api.texts("")); n != 1 {
+		t.Errorf("a parked ask_owner should be reminded, got %d: %q", n, api.texts(""))
+	}
+}
+
+func TestIdleRemindSkipsBackgroundAndSchedule(t *testing.T) {
+	s, in, _, api := testScheduler(t)
+	now := time.Now()
+
+	bg, err := in.createBot("builder", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := in.db.Create(&BackgroundJob{BotID: bg.ID, Name: "build", Status: jobRunning, Kind: jobKindShell, Command: "sleep 9"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	seedEndedTurn(t, in.db, bg.ID, now.Add(-time.Hour))
+
+	sched, err := in.createBot("cronned", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := in.db.Create(&Schedule{BotID: sched.ID, Note: "later", FireAt: now.Add(time.Hour)}).Error; err != nil {
+		t.Fatal(err)
+	}
+	seedEndedTurn(t, in.db, sched.ID, now.Add(-time.Hour))
+
+	s.remindIdleSessions(now)
+	if n := len(api.texts("")); n != 0 {
+		t.Errorf("keepalive sessions were reminded: %q", api.texts(""))
+	}
+}
+
 // noopTestUI is a botUI that does nothing, for tests that build a real Runner
 // only to exercise its database side.
 type noopTestUI struct{}

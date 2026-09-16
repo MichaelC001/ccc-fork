@@ -15,15 +15,17 @@ with ccc owning everything the runner does not: session lifecycle, persistent
 memory, scheduling, account (profile) management, access control, and the
 Telegram UX.
 
-The experience target is Hairok's classic sessions model: you write in
-General, a topic opens, that prompt is already the first turn. A topic is a
-session. Closing the topic retires it. No role, no `/role`, no ceremony.
+The experience target: **General is the dispatcher**. You talk to it; it sees
+live sessions in its envelope and can `spawn_session` / `tell_session`. A
+worker topic is a session. Workers `report_to_general` only — they do not see
+the roster or message each other. `/session <prompt>` is the escape hatch that
+opens a worker without the dispatcher. Closing a worker topic retires it. No
+role, no `/role`, no ceremony.
 
 Non-goals (explicitly dropped from v2): Claude Code background agents, the
 agents view, `claude attach` handoff, transcript scraping, the AskUserQuestion
-PreToolUse hook hack. Sessions cannot create other sessions (`spawn_bot` was
-removed on purpose). One ccc instance never talks to more than one Telegram
-bot.
+PreToolUse hook hack, a mesh of bots (`send_to_bot` between workers). One ccc
+instance never talks to more than one Telegram bot.
 
 ## 2. Runtime model
 
@@ -31,7 +33,7 @@ bot.
 |---|---|
 | **Instance** | One `ccc listen` process on one machine, bound to one Telegram bot token and one forum group. Instance-level config: model, env passthrough, default profile, data dir. |
 | **Profile** | One account for one engine (see `profiles.go`). Claude = one `CLAUDE_CONFIG_DIR`. Grok = isolated `GROK_HOME`. Antigravity = isolated HOME/`GEMINI_HOME`. Codex = isolated `CODEX_HOME`. Engine is set when the account is added. Same-engine accounts are interchangeable at turn granularity (§4). One instance may mix engines. |
-| **Session** (`bots` table) | One forum topic. Identity = `name` + an **engine** derived from the default account (or `default_engine`) + an optional **model** override. Turns pick a healthy account of that engine. `/engine` is a secondary pool assignment. `/model` in the topic overrides that session. Claude sessions share MCP tools. Grok/Antigravity/Codex sessions spawn that CLI and do not get ccc MCP. Optional per-session `cwd` (default: `<data_dir>/bots/<name>/workspace`). Role is unused leftover. Closing the topic archives the row. |
+| **Session** (`bots` table) | One forum topic. Identity = `name` + an **engine** derived from the default account (or `default_engine`) + an optional **model** override. Turns pick a healthy account of that engine. `/engine` is a secondary pool assignment. `/model` in the topic overrides that session. Claude, Grok and Codex sessions get the ccc MCP server (Claude: `--mcp-config`; Grok/Codex: isolated-home `config.toml`). Antigravity does not. Optional per-session `cwd` (default: `<data_dir>/bots/<name>/workspace`). Role is unused leftover. Closing the topic archives the row. Topic id 0 is **General**, the dispatcher. |
 | **Conversation** | The engine transcript behind a session: a UUID ccc mints and resumes. A session has exactly one live conversation; `/new` rotates it. After `idle_compact_s` (default 1h) of no finished turn, ccc rotates it automatically — memories stay, the transcript does not. |
 | **Turn** | One `claude -p` process: input = one user/system/background message (plus context envelope), output = streamed events until `result`. At most one turn per session at a time; further inputs queue (FIFO) and are delivered together on the next turn. A background job is **not** a turn: it must not hold `turns.status=running`. |
 | **Background job** | A long-running shell command owned by a session, started with `run_background`. It runs in the session's cwd with `env_passthrough` while the topic stays responsive. Completion enqueues a `source=background` turn. |
@@ -128,6 +130,16 @@ Classify `stderr`/`result.error`/exit code into:
 A retried turn reuses the same session UUID: because profiles share
 `projects/` (§4) the other account can resume the same conversation.
 
+### 3.5 General turn timeout
+
+The dispatcher (topic id 0) has a **30 second cap** on each turn. Other
+sessions do not. When the cap fires, ccc SIGTERMs the engine process
+(without dropping the queue — this is not `/stop`) and enqueues a
+`source=system` turn whose input is an error: this work is too long for
+General and it MUST `spawn_session` or `tell_session`. The owner is not
+shown a ❌; the injection *is* the next turn. A timeout of that follow-up
+is not injected again (avoids a loop); the topic is told to use `/session`.
+
 ## 4. Profiles: selection and shared sessions
 
 - `pickAccount(engine)` chooses per **turn** among accounts of that engine:
@@ -153,7 +165,8 @@ A retried turn reuses the same session UUID: because profiles share
 
 ```
 bots        id, name (unique), topic_id, role (text), cwd, session_id, engine (claude|grok|antigravity, default claude),
-            status (idle|running|waiting|disabled), created_at, archived_at, parent_bot_id (legacy; unused — bots cannot spawn children)
+            status (idle|running|waiting|disabled), created_at, archived_at, parent_bot_id (legacy; unused — bots cannot spawn children),
+            idle_reminded_at (when General last pinged the owner about this idle session)
 turns       id, bot_id, session_id, profile, source (user|bot|schedule|watch|routine|system|background), input (text),
             output (text), status (queued|running|done|failed), stop_reason, error_class,
             started_at, ended_at, usage_json
@@ -194,9 +207,10 @@ JSONL ledger are not migrated (v3 is a fresh start; document it).
 
 ## 6. MCP server (`ccc mcp`)
 
-Stdio JSON-RPC MCP server, one process per turn, spawned by Claude Code from
-the inline `--mcp-config`. It opens the same SQLite file and knows the calling
-bot/turn from its flags. Tools (all bots get all of them):
+Stdio JSON-RPC MCP server, one process per turn. Claude gets it via inline
+`--mcp-config`; Grok and Codex via `[mcp_servers.ccc]` in the isolated account
+home (Codex also gets per-turn `exec -c`). Identity is `--bot`/`--turn` or
+`CCC_BOT_ID`/`CCC_TURN_ID` in the environment. Tools:
 
 | Tool | Input | Behavior |
 |---|---|---|
@@ -215,6 +229,10 @@ bot/turn from its flags. Tools (all bots get all of them):
 | `archive_bot` | `bot?` (default self) | Close the topic (Telegram close, not delete), mark archived. |
 | `get_project` / `set_project` | `path`, fields | Read/update the project registry. |
 | `send_file` | `path`, `caption?` | Send a file into this bot's topic (≤50 MB; larger → existing relay if kept). |
+| `list_sessions` | — | **General only.** Live workers: name, status, last output. |
+| `spawn_session` | `prompt`, `name?` | **General only.** Create a worker topic and queue the prompt (wakes after this turn). |
+| `tell_session` | `session`, `text` | **General only.** Inbox + wake a live worker. |
+| `report_to_general` | `text` | **Workers only.** Inbox + wake General. |
 
 All tools validate the calling bot from the `--bot` flag; tool inputs coming
 from the model are data, never instructions to ccc.
@@ -226,10 +244,10 @@ refreshed daily, §14.16) and puts the allowed emoji into the `set_name` and
 exists. An emoji outside the set leaves the icon untouched and the tool result
 says which emoji were available.
 
-Sessions cannot create other sessions. Only the owner starts a session
-(plain text in General, or `/session`). Long parallel work stays in the same
-topic via `run_background`. `archive_bot` remains so a session can retire
-itself.
+Only General can create other sessions (`spawn_session`). Workers
+`report_to_general`. `/session <prompt>` is the owner escape hatch. Long
+parallel work stays in the same topic via `run_background`. `archive_bot`
+remains so a worker can retire itself; General cannot be archived.
 
 ## 7. Scheduler and watch engine
 
@@ -253,7 +271,14 @@ One goroutine in `ccc listen`:
   `ask_owner`) and running bots are skipped. The runner also checks this at
   the start of a turn, so a watch that fires after the cache TTL does not
   rebuild a cold fat session. A silent 🧹 lands in the topic when the
-  scheduler rotates. `idle_compact_s=0` disables it.
+  scheduler rotates. `idle_compact_s=0` disables it. General is never rotated.
+- **Idle-session reminder**: a live worker that is idle or `waiting`, has
+  no watch / schedule / routine / background job keeping it alive, and has
+  no queued work, is waiting on the owner. Every **10 minutes** of that
+  state, ccc posts a short Spanish ping in General (not a model turn, not
+  every turn). Stop when the session is working again, gains a keepalive,
+  gets a user message, or is archived. `idle_reminded_at` on the bot row
+  is the anti-spam clock.
 - **Schedules**: enqueue a turn with `source=schedule` and the note when
   `fire_at` passes; recurring via cron expression.
 - **Background jobs**: every second, claim queued `background_jobs` (cap: 8
@@ -331,10 +356,10 @@ older than 90 days.
 
 ### Conversation
 - Plain text in a session topic → input for that session. No `/new` needed.
-- Plain text in the group root (General) → the **owner** creates a new session:
-  topic named from the first line, first message dispatched as the first turn
-  (no role interview). `/session <name>` does the same explicitly. Sessions
-  cannot create other sessions.
+- Plain text in the group root (General) → a turn of the dispatcher session
+  (topic id 0, created on listen). `/session <prompt>` opens a worker topic
+  named from the first line and dispatches that prompt. General may
+  `spawn_session` the same way.
 - Telegram close / archive of a topic retires the session. Reopen continues it.
 - Photos/documents → saved into the session's workspace `inbox/`, path passed
   in the message. Voice → transcribed if the `voice` build is present, else
@@ -453,11 +478,17 @@ Rules: … (owner escalation, when to remember, never print secrets, keep
 replies short for chat, prefer ask_owner over guessing on architecture…)
 ```
 
+General's prompt is a dispatcher variant: `spawn_session` / `tell_session` /
+`list_sessions`, no `set_name` / `archive_bot`, and the 30s cap (§3.5). It is
+still byte-stable (no live roster in the prompt).
+
 **Envelope** (prepended to every input, because system-prompt changes are
 ignored on resume until compaction):
 
 ```
 <context>
+today is <weekday date time tz>
+active sessions: (General only — live workers, status, last output)
 recent user memories (top 10 by recency/relevance to the message)
 project memories for cwd (if any)
 own session memories (top 10)
@@ -665,10 +696,11 @@ cheaper than a failed rename. Matching is exact first, then the same emoji
 ignoring variation selectors and skin tones; no match leaves the icon alone and
 reports the available emoji instead of guessing a different icon.
 
-**14.17 Sessions have no role onboarding.** A topic is a session. The first
-message in General is dispatched as the first engine turn with that exact
-prompt. `/role` and `update_instructions` are gone. Closing the topic archives
-the session; reopening continues it.
+**14.17 Sessions have no role onboarding.** A topic is a session. General is
+the dispatcher (not a launcher). `/session <prompt>` (and `spawn_session`)
+dispatch that prompt as the first worker turn. `/role` and
+`update_instructions` are gone. Closing a worker topic archives it; reopening
+continues it.
 
 **14.18 Inputs are debounced before a turn starts.** §2 only said further inputs
 "queue and are delivered together on the next turn", which handles a burst that
@@ -707,10 +739,11 @@ back from Telegram in whatever order it liked. The roster is gone (a topic
 is a session, not a teammate) and the icon list is sorted before rendering.
 The date was already in the envelope, and stays there. §9.1 has the rule.
 
-**14.21 Inter-session messaging is not a product feature.** The old
-`send_to_bot(wake=true)` path started a turn on another topic (14.10). The
-tool is not registered; the system prompt does not teach sessions to page
-each other. Leftover `inbox` delivery still works if a row exists.
+**14.21 Inter-session messaging is General ↔ worker only.** The old
+mesh `send_to_bot` is not registered. General `tell_session`s a worker;
+a worker `report_to_general`. Inbox delivery is still the kick path
+(the MCP child cannot call `Runner.kick`; the sender's turn ends, then
+`deliverInbox`).
 
 **14.22 The service reads its secrets from a 0600 file, not from the unit.**
 `ccc install` used to bake `Environment="NAME=value"` lines for every
@@ -747,14 +780,14 @@ process, no menu to answer. It runs at the end of `/account add` and
 which genuinely needs a terminal, is unchanged. 14.9 is now history: only the
 login strings are still matched against the TUI.
 
-**14.24 `spawn_bot` was removed.** Sessions must not create other sessions.
-Only the owner starts a session (plain text in General, or `/session`). Long
-parallel work uses `run_background` in the same topic — a detached shell
-job the listen supervisor starts, reattaches across `ccc listen` /
-LaunchAgent restarts, and wakes with `source=background` when it finishes.
-That is closer to Grok Bot's background Task than to Claude Code background
-agents (which stay a non-goal: no transcript scraping, no `claude attach`).
-`archive_bot` stays so a session can retire itself.
+**14.24 `spawn_bot` was removed; 14.30 put spawn back on General only.**
+Workers still cannot create sessions or message each other. General
+(`topic_id=0`) is the dispatcher: `spawn_session` / `tell_session` /
+`list_sessions`, roster in the envelope (not the system prompt — 14.20).
+Workers `report_to_general`. `/session <prompt>` is the owner escape hatch.
+Long parallel work still uses `run_background` in the same topic.
+`archive_bot` stays so a worker can retire itself; General cannot be
+archived or renamed, and is skipped by idle rotation.
 
 **14.25 Progress is silent; the final answer notifies.** Telegram does not
 send a notification for `editMessageText`, so editing the "⏳ working"
@@ -807,7 +840,18 @@ change-detectors for a finite job (a PR's CI, a deploy), not standing
 monitors. After `watch_ttl_s` (default 4h) the watch is deleted and the
 bot that set it is woken (`source=system`) to re-set it. Re-upserting the
 same name restarts the clock. Routines do not expire. Both knobs are
-config.json keys; 0 disables.
+config.json keys; 0 disables. General is never idle-rotated: the dispatcher
+keeps its transcript.
+
+**14.30 Grok and Codex get ccc MCP.** Claude already had `--mcp-config`.
+Grok/Codex have no inline equivalent; ccc writes `[mcp_servers.ccc]`
+(`command` + `args = ["mcp"]`) into the isolated account `config.toml`.
+Identity is `CCC_BOT_ID` / `CCC_TURN_ID` in the engine process env
+(Codex also gets per-turn `-c` with `--bot`/`--turn` so concurrent
+sessions on one CODEX_HOME cannot clobber each other). Antigravity is
+still omitted: attaching MCP would mean writing a shared `~/.gemini`
+file. Implicit (non-isolated) Grok/Codex homes are not patched, so a
+user's interactive CLI does not pick up a broken `ccc mcp`.
 
 ## 15. Public hub (mobile)
 

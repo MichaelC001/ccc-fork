@@ -68,6 +68,7 @@ func (s *scheduler) Run() {
 	s.runDoctor(now)
 	s.expireWatches(now)
 	s.compactIdleSessions(now)
+	s.remindIdleSessions(now)
 	ticker := time.NewTicker(schedulerTick)
 	bgTicker := time.NewTicker(backgroundTick)
 	defer ticker.Stop()
@@ -78,6 +79,7 @@ func (s *scheduler) Run() {
 			return
 		case now := <-ticker.C:
 			s.compactIdleSessions(now)
+			s.remindIdleSessions(now)
 			s.runDueWatches(now)
 			s.expireWatches(now)
 			s.fireDueSchedules(now)
@@ -221,6 +223,9 @@ func (s *scheduler) compactIdleSessions(now time.Time) {
 	}
 	for i := range bots {
 		b := bots[i]
+		if isGeneralBot(&b) {
+			continue
+		}
 		if !sessionIdleTooLong(s.in.db, b.ID, now, after) {
 			continue
 		}
@@ -232,6 +237,91 @@ func (s *scheduler) compactIdleSessions(now time.Time) {
 		s.in.notifyTopicSilent(b.TopicID, fmt.Sprintf(
 			"🧹 Fresh conversation after %s idle. Memories are kept.", humanDuration(after)))
 	}
+}
+
+// remindIdleSessions pings General about live workers that are idle, have
+// nothing keeping them alive, and have been waiting on the owner for
+// idleRemindInterval. Cadence is wall-clock 10 minutes, not every turn.
+func (s *scheduler) remindIdleSessions(now time.Time) {
+	var bots []Bot
+	if err := s.in.db.Where("archived_at IS NULL").Find(&bots).Error; err != nil {
+		return
+	}
+	for i := range bots {
+		b := bots[i]
+		if !sessionIdleWaitingOnUser(s.in.db, &b) {
+			if b.IdleRemindedAt != nil {
+				s.in.db.Model(&Bot{}).Where("id = ?", b.ID).
+					Select("idle_reminded_at").Update("idle_reminded_at", nil)
+			}
+			continue
+		}
+		if !shouldIdleRemind(s.in.db, &b, now) {
+			continue
+		}
+		s.in.notifyTopic(0, htmlEscape(idleRemindText(b.Name)))
+		s.in.db.Model(&Bot{}).Where("id = ?", b.ID).Update("idle_reminded_at", now)
+	}
+}
+
+// sessionIdleWaitingOnUser is the idle-remind predicate: a live worker that
+// is not working, has no watch/schedule/routine/background keeping it alive,
+// and has no queued work — so it is waiting on the owner.
+func sessionIdleWaitingOnUser(db *gorm.DB, b *Bot) bool {
+	if b == nil || b.ArchivedAt != nil || isGeneralBot(b) {
+		return false
+	}
+	switch b.Status {
+	case botIdle, botWaiting:
+	default:
+		return false
+	}
+	if sessionHasKeepalive(db, b.ID) {
+		return false
+	}
+	var queued int64
+	db.Model(&Turn{}).Where("bot_id = ? AND status IN ?", b.ID, []string{turnQueued, turnRunning}).Count(&queued)
+	if queued > 0 {
+		return false
+	}
+	var waking int64
+	db.Model(&InboxMessage{}).Where("to_bot_id = ? AND delivered_at IS NULL AND wake = ?", b.ID, true).Count(&waking)
+	return waking == 0
+}
+
+func sessionHasKeepalive(db *gorm.DB, botID int64) bool {
+	var n int64
+	db.Model(&Watch{}).Where("bot_id = ? AND enabled = ?", botID, true).Count(&n)
+	if n > 0 {
+		return true
+	}
+	db.Model(&Schedule{}).Where("bot_id = ? AND fired_at IS NULL", botID).Count(&n)
+	if n > 0 {
+		return true
+	}
+	db.Model(&BackgroundJob{}).Where("bot_id = ? AND status IN ?", botID, []string{jobQueued, jobRunning}).Count(&n)
+	return n > 0
+}
+
+func sessionIdleSince(db *gorm.DB, b *Bot) time.Time {
+	var last Turn
+	if err := db.Where("bot_id = ? AND ended_at IS NOT NULL", b.ID).Order("ended_at DESC").First(&last).Error; err == nil && last.EndedAt != nil {
+		return *last.EndedAt
+	}
+	return b.CreatedAt
+}
+
+func shouldIdleRemind(db *gorm.DB, b *Bot, now time.Time) bool {
+	if !sessionIdleWaitingOnUser(db, b) {
+		return false
+	}
+	if now.Sub(sessionIdleSince(db, b)) < idleRemindInterval {
+		return false
+	}
+	if b.IdleRemindedAt != nil && now.Sub(*b.IdleRemindedAt) < idleRemindInterval {
+		return false
+	}
+	return true
 }
 
 // sessionIdleTooLong is the shared idle check: last finished turn older than

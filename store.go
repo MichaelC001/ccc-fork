@@ -44,6 +44,9 @@ type Bot struct {
 	UpdatedAt   time.Time
 	ArchivedAt  *time.Time
 	ParentBotID *int64
+	// IdleRemindedAt is when General last pinged the owner about this
+	// session sitting idle, waiting on them. Nil = never / not in that spell.
+	IdleRemindedAt *time.Time
 }
 
 // Bot statuses.
@@ -890,8 +893,7 @@ func botByCwd(db *gorm.DB, path string) (*Bot, error) {
 // ---------------------------------------------------------------------------
 
 // createBotRow creates a bot end to end: a unique name, a forum topic, a
-// workspace and the database row. Only the owner creates bots (plain text in
-// General, or /bot); there is no MCP tool for it.
+// workspace and the database row. Owner: /session. Dispatcher: spawn_session.
 // A cwd of "" means the bot gets its own workspace under <data_dir>/bots.
 func createBotRow(db *gorm.DB, config *Config, name, role, cwd string) (*Bot, error) {
 	name = uniqueBotName(db, sanitizeBotName(name))
@@ -916,6 +918,9 @@ func createBotRow(db *gorm.DB, config *Config, name, role, cwd string) (*Bot, er
 // archiveBotRow retires a session: the row is marked archived, its queue is
 // dropped and its automation stops. Memories are deliberately kept.
 func archiveBotRow(db *gorm.DB, botID int64) error {
+	if b, err := botByID(db, botID); err == nil && isGeneralBot(b) {
+		return fmt.Errorf("General cannot be archived")
+	}
 	now := time.Now()
 	if err := db.Model(&Bot{}).Where("id = ?", botID).
 		Updates(map[string]any{"archived_at": now, "status": botDisabled}).Error; err != nil {

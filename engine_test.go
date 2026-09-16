@@ -494,22 +494,36 @@ func TestClassifyFailureGrokAndAgyAuth(t *testing.T) {
 	}
 }
 
-func TestRenderSystemPromptOmitsMCPForGrok(t *testing.T) {
+func TestRenderSystemPromptGrokGetsMCP(t *testing.T) {
 	got := renderSystemPrompt(
 		promptBot{Name: "coder", Role: "writes go", Cwd: "/tmp", Engine: engineGrok},
 		"host", nil, []string{"🚀"},
 	)
-	if strings.Contains(got, "ccc MCP tools:\n  remember") || strings.Contains(got, "ask_owner") && strings.Contains(got, "Prefer ask_owner") {
-		t.Errorf("grok prompt still describes Claude MCP:\n%s", got)
+	if !strings.Contains(got, "Grok Build") {
+		t.Errorf("grok prompt should name the engine:\n%s", got)
 	}
-	if !strings.Contains(got, "Grok Build") || !strings.Contains(got, "do NOT have the ccc MCP") {
-		t.Errorf("grok prompt should name the engine and skip MCP:\n%s", got)
+	if !strings.Contains(got, "ccc MCP tools") || !strings.Contains(got, "report_to_general") {
+		t.Errorf("grok worker prompt should describe ccc MCP:\n%s", got)
 	}
-	if strings.Contains(got, "ccc tell") || strings.Contains(got, "send_to_bot") {
-		t.Errorf("grok prompt must not teach inter-session crew messaging:\n%s", got)
+	if !strings.Contains(got, "search_tool") {
+		t.Errorf("grok prompt should teach search_tool for MCP:\n%s", got)
 	}
-	if !strings.Contains(got, "ccc routine") {
-		t.Errorf("grok prompt should teach ccc routine:\n%s", got)
+	if strings.Contains(got, "spawn_session") || strings.Contains(got, "ccc tell") || strings.Contains(got, "send_to_bot") {
+		t.Errorf("grok worker must not spawn or page teammates:\n%s", got)
+	}
+	chief := renderSystemPrompt(
+		promptBot{Name: "General", Cwd: "/tmp", Engine: engineGrok, Chief: true},
+		"host", nil, nil,
+	)
+	if !strings.Contains(chief, "spawn_session") || !strings.Contains(chief, "tell_session") {
+		t.Errorf("grok chief prompt should describe dispatcher tools:\n%s", chief)
+	}
+	if strings.Contains(chief, "report_to_general") {
+		t.Error("chief must not get report_to_general")
+	}
+	agy := renderSystemPrompt(promptBot{Name: "coder", Cwd: "/tmp", Engine: engineAntigravity}, "host", nil, nil)
+	if !strings.Contains(agy, "do NOT have the ccc MCP") || !strings.Contains(agy, "ccc routine") {
+		t.Errorf("agy should still skip MCP and teach ccc routine:\n%s", agy)
 	}
 	claude := renderSystemPrompt(promptBot{Name: "coder", Cwd: "/tmp"}, "host", nil, nil)
 	if !strings.Contains(claude, "Telegram session") || !strings.Contains(claude, "remember/recall/forget") {

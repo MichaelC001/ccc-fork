@@ -19,8 +19,9 @@ import (
 )
 
 // listenv3.go is the Telegram side of ccc v3 (DESIGN §8): one forum group, one
-// topic per session, plain text in a topic continues that session, plain text
-// in General creates a session and dispatches the prompt as its first turn.
+// topic per session. Plain text in a topic continues that session. Plain text
+// in General is a turn of the persistent dispatcher. /session (or spawn_session
+// from General) opens a worker topic.
 
 // instance is one `ccc listen` process: config + database + runner.
 type instance struct {
@@ -193,6 +194,9 @@ func listenV3() error {
 	// reattaches them. Both get a Telegram ping so a LaunchAgent restart
 	// is not silent.
 	in.recoverAfterRestart()
+	if _, err := in.ensureGeneralBot(); err != nil {
+		listenLog("ensure General: %v", err)
+	}
 	go sched.Run()
 	// Re-arm queues that survived the restart, including bot-to-bot messages
 	// whose sender's turn ended as the process was going down.
@@ -442,7 +446,7 @@ func (in *instance) handleMessage(msg *TelegramMessage) {
 
 	// Attachments are saved into the bot's workspace before anything else, so
 	// the text path below sees a normal message carrying a path.
-	if inGroup && topicID > 0 {
+	if inGroup {
 		if handled := in.handleAttachment(msg); handled {
 			return
 		}
@@ -465,12 +469,17 @@ func (in *instance) handleMessage(msg *TelegramMessage) {
 	}
 
 	if !inGroup {
-		in.reply(msg, "Talk to me in the group: a topic per session. Send text in General to start a new session.")
+		in.reply(msg, "Talk to me in the group. General is the dispatcher; /session starts a session directly.")
 		return
 	}
 
 	if topicID == 0 {
-		in.createBotFromText(msg, text)
+		b, err := in.ensureGeneralBot()
+		if err != nil {
+			in.reply(msg, "Could not start General: "+err.Error())
+			return
+		}
+		in.deliver(b, msg, text)
 		return
 	}
 	b, err := botByTopic(in.db, topicID)
@@ -486,7 +495,7 @@ func (in *instance) handleMessage(msg *TelegramMessage) {
 			in.deliver(archived, msg, text)
 			return
 		}
-		in.reply(msg, "This topic has no session behind it. Send a message in General to start one.")
+		in.reply(msg, "This topic has no session behind it. Ask in General, or /session.")
 		return
 	}
 	in.deliver(b, msg, text)
@@ -607,8 +616,9 @@ func (in *instance) handleCallback(cb *CallbackQuery) {
 // Bot creation
 // ---------------------------------------------------------------------------
 
-// createBotFromText handles plain text in General: a new session whose topic
-// is named after the first line, with that same prompt as its first turn.
+// createBotFromText starts a worker session: a new topic named after the first
+// line, with that same prompt as its first turn. Used by /session (escape hatch
+// around General) and kept as the implementation spawn_session shares conceptually.
 func (in *instance) createBotFromText(msg *TelegramMessage, text string) {
 	b, err := in.createBot(botNameFromText(text), "")
 	if err != nil {
@@ -677,7 +687,13 @@ func (in *instance) handleAttachment(msg *TelegramMessage) bool {
 		return false
 	}
 	cfg := in.config()
-	b, err := botByTopic(in.db, msg.MessageThreadID)
+	var b *Bot
+	var err error
+	if msg.MessageThreadID == 0 {
+		b, err = in.ensureGeneralBot()
+	} else {
+		b, err = botByTopic(in.db, msg.MessageThreadID)
+	}
 	if err != nil {
 		return false
 	}
@@ -852,25 +868,25 @@ func (in *instance) handleCommand(msg *TelegramMessage, text string, inGroup boo
 			in.reply(msg, "Use /session in the group.")
 			return
 		}
-		name, _ := splitFirstWord(rest)
-		if name == "" {
-			in.reply(msg, "Usage: /session &lt;name&gt;")
+		if strings.TrimSpace(rest) == "" {
+			in.reply(msg, "Usage: /session &lt;prompt&gt; — starts a session without going through General.")
 			return
 		}
-		b, err := in.createBot(name, "")
-		if err != nil {
-			in.reply(msg, "Could not start the session: "+err.Error())
-			return
-		}
-		in.reply(msg, fmt.Sprintf("🧵 Started session <b>%s</b>.", htmlEscape(b.Name)))
+		in.createBotFromText(msg, rest)
 		return
 	}
 
-	if !inGroup || topicID == 0 {
+	if !inGroup {
 		in.reply(msg, "That command only works inside a session topic.")
 		return
 	}
-	b, err := botByTopic(in.db, topicID)
+	var b *Bot
+	var err error
+	if topicID == 0 {
+		b, err = in.ensureGeneralBot()
+	} else {
+		b, err = botByTopic(in.db, topicID)
+	}
 	if err != nil {
 		in.reply(msg, "This topic has no session behind it.")
 		return
@@ -878,6 +894,10 @@ func (in *instance) handleCommand(msg *TelegramMessage, text string, inGroup boo
 
 	switch cmd {
 	case "/name":
+		if isGeneralBot(b) {
+			in.reply(msg, "General stays General.")
+			return
+		}
 		in.handleNameCommand(msg, b, rest)
 
 	case "/new":
@@ -1148,7 +1168,7 @@ func splitFirstWord(s string) (string, string) {
 func (in *instance) renderBots() string {
 	bots, err := liveBots(in.db)
 	if err != nil || len(bots) == 0 {
-		return "No sessions yet. Send a message in General to start one."
+		return "No sessions yet. Ask in General, or /session."
 	}
 	var sb strings.Builder
 	sb.WriteString("<b>Sessions</b>\n")
@@ -1160,12 +1180,16 @@ func (in *instance) renderBots() string {
 			when = humanDuration(time.Since(last.CreatedAt)) + " ago"
 		}
 		engine := botEngine(b)
+		label := b.Name
+		if isGeneralBot(b) {
+			label = b.Name + " (dispatcher)"
+		}
 		if engine == engineClaude {
 			fmt.Fprintf(&sb, "• <b>%s</b> [%s] · last %s\n",
-				htmlEscape(b.Name), b.Status, when)
+				htmlEscape(label), b.Status, when)
 		} else {
 			fmt.Fprintf(&sb, "• <b>%s</b> [%s] %s · last %s\n",
-				htmlEscape(b.Name), b.Status, htmlEscape(engine), when)
+				htmlEscape(label), b.Status, htmlEscape(engine), when)
 		}
 	}
 	return sb.String()
@@ -1308,7 +1332,7 @@ func (in *instance) handleEngineCommand(msg *TelegramMessage, b *Bot, rest strin
 	if n := len(listProfilesForEngine(in.config(), engine)); n == 0 {
 		reply += "\nNo " + htmlEscape(engine) + " accounts yet. Add one: <code>/account add &lt;identity&gt; " + htmlEscape(engine) + "</code>."
 	}
-	if engine != engineClaude {
+	if !engineHasMCP(engine) {
 		reply += "\nNo ccc MCP tools on this engine."
 	}
 	in.reply(msg, reply)
@@ -1468,7 +1492,7 @@ func (in *instance) handleSetGroupCommand(msg *TelegramMessage) {
 		return
 	}
 	in.setConfig(updated)
-	in.reply(msg, fmt.Sprintf("📌 This group is now ccc's home (<code>%d</code>).\nSend a message in General to start your first session.", msg.Chat.ID))
+	in.reply(msg, fmt.Sprintf("📌 This group is now ccc's home (<code>%d</code>).\nTalk in General (the dispatcher), or /session to start a worker.", msg.Chat.ID))
 }
 
 // setConfig swaps the instance's configuration and hands the new one to the

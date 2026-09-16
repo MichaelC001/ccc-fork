@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -269,6 +271,35 @@ func TestDisabledBotDoesNotRun(t *testing.T) {
 		if r.runNext(b.ID) {
 			t.Errorf("a %s bot must not run turns", status)
 		}
+	}
+}
+
+func TestInterruptActiveTimesOutWithoutLookingLikeStop(t *testing.T) {
+	cmd := exec.Command("sleep", "30")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) // safe-ignore: test teardown
+
+	r := &Runner{active: map[int64]*activeTurn{}}
+	r.active[1] = &activeTurn{cmd: cmd}
+	if !r.interruptActive(1, true) {
+		t.Fatal("timeout should have signalled the process")
+	}
+	at := r.active[1]
+	if !at.timedOut {
+		t.Error("timedOut flag not set")
+	}
+	if at.stopped {
+		t.Error("a timeout must not look like /stop (that would drop the queue)")
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed-out process did not exit")
 	}
 }
 

@@ -213,6 +213,9 @@ func TestSystemPromptTeachesBackgroundInsteadOfSpawn(t *testing.T) {
 	if strings.Contains(got, "Spawn a bot") || strings.Contains(got, "spawn_bot") || strings.Contains(got, "send_to_bot") {
 		t.Errorf("the system prompt still offers spawning or messaging teammates:\n%s", got)
 	}
+	if strings.Contains(got, "30 second") {
+		t.Error("the 30s cap is General-only; workers must not see it")
+	}
 }
 
 func TestSystemPromptHasNoWakeDiscipline(t *testing.T) {

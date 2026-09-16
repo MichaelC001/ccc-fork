@@ -12,11 +12,14 @@ Phone client (MIT, public): [ccc-app](https://github.com/kidandcat/ccc-app) — 
 
 ## What ccc is
 
-A **topic is a session**. You write something in the group's **General**
-topic; ccc opens a new forum topic (title from the first line) and
-dispatches that same prompt as the first turn. You continue in that topic.
-Closing or archiving the topic ends the session; talking in an open topic
-continues it. There is no role, no `/role`, no «what should I be?» interview.
+A **topic is a session**. **General** is the dispatcher: you talk to it, it
+sees live sessions, and it can open a new topic (`spawn_session`) or message
+one (`tell_session`). It has a 30s cap — longer work must go to a session.
+Idle sessions waiting on you get a short reminder in General every 10 minutes.
+`/session <prompt>` still opens a worker without going through General.
+Closing a worker topic ends that session. Sessions report only to General
+(`report_to_general`). There is no role, no `/role`, no «what should I be?»
+interview.
 
 Under the hood ccc drives a coding CLI as a **stateless runner**. The default
 engine is Claude Code: every message is one `claude -p` process with a
@@ -35,7 +38,8 @@ the Telegram UX.
                                   │        ccc mcp (stdio)             │
                                   └────────────────────────────────────┘
               remember · recall · ask_owner · watch · schedule_wakeup ·
-              run_background · set_name · get_project · send_file
+              run_background · spawn_session · tell_session · report_to_general ·
+              set_name · get_project · send_file
 ```
 
 ### Concepts
@@ -215,8 +219,8 @@ Send a message in the group's **General** topic:
 keep an eye on the fecha deploy and tell me if anything breaks
 ```
 
-ccc creates a topic named after the first line and dispatches that same
-prompt as the first turn. From then on, talk in that topic. Closing the
+General is the dispatcher: it will `spawn_session` (or you can `/session`
+the prompt yourself). Talk in the worker topic from then on. Closing the
 topic ends the session; opening it again continues it.
 
 ---
@@ -227,7 +231,8 @@ topic ends the session; opening it again continues it.
 
 | Where | What happens |
 |---|---|
-| Text in **General** | Creates a new session named after the first line, and sends it your message as the first turn. |
+| Text in **General** | A turn of the dispatcher (30s cap). It sees live sessions and can spawn or tell them. Idle workers waiting on you get a reminder here every 10 minutes. |
+| `/session <prompt>` | Opens a worker topic named after the first line, first turn = that prompt. |
 | Text in a **session topic** | Continues that session. |
 | Close / archive a topic | Ends the session. Reopen it to continue. |
 | A photo or document | Saved into the session's `inbox/`, with the path passed in the message. |
@@ -277,7 +282,8 @@ the turn finishes — that is the ping you get — and your message gets a ✅.
 
 ### What a session can do for itself
 
-Every Claude session has these tools, and uses them without being told:
+Every Claude, Grok and Codex session has these tools (Antigravity does not;
+use `ccc routine` there). Grok calls them through `search_tool` / `use_tool`.
 
 - `remember` / `recall` / `forget` — durable memory in `user` and `project`
   (plus a leftover per-session scope).
@@ -290,11 +296,12 @@ Every Claude session has these tools, and uses them without being told:
 - `schedule_wakeup` / `cancel_schedule` — one-off (or unnamed cron) wakeups.
 - `set_routine` / `list_routines` / `cancel_routine` — named recurring work,
   timezone-aware (default `Europe/Madrid`), ⏰ in the topic when it fires.
-  Grok/agy: `ccc routine add <name> --cron "0 9 * * 1-5" <prompt>`.
+  Agy: `ccc routine add <name> --cron "0 9 * * 1-5" <prompt>`.
 - `run_background` / `list_background` / `get_background` / `cancel_background`
   — start a long shell command without blocking the turn (builds, installs,
-  waits). The session is woken with the result when it finishes. Only the owner
-  creates sessions (a message in General).
+  waits). The session is woken with the result when it finishes.
+- **General only:** `list_sessions`, `spawn_session`, `tell_session`.
+- **Workers only:** `report_to_general` — the only way a session talks back.
 - `archive_bot` — end this session and close its topic.
 - `get_project` / `set_project` — shared notes about a code base.
 - `set_name` — rename this session and set its topic icon. The icon must be one of the
@@ -407,9 +414,9 @@ the instance default for that engine. Empty means the CLI's own default.
 | Engine | Add account | Isolated home | Binary | Session | MCP |
 |---|---|---|---|---|---|
 | **Claude Code** | `/account add you@x.com claude` | `CLAUDE_CONFIG_DIR` under `<data_dir>/profiles/` | `claude` | ccc mints a UUID; `--session-id` then `--resume` | ccc MCP (`remember`, `ask_owner`, `run_background`, …) |
-| **Grok Build** | `/account add work grok` | `GROK_HOME` = `<data_dir>/accounts/grok/<id>` (`auth.json`) | `grok` (`~/.grok/bin/grok`) | ccc mints a UUID; `--session-id` then `--resume` | not wired |
+| **Grok Build** | `/account add work grok` | `GROK_HOME` = `<data_dir>/accounts/grok/<id>` (`auth.json`) | `grok` (`~/.grok/bin/grok`) | ccc mints a UUID; `--session-id` then `--resume` | `[mcp_servers.ccc]` in isolated GROK_HOME |
 | **Antigravity** | `/account add lab agy` | isolated `HOME` + `GEMINI_HOME` + `GEMINI_FORCE_FILE_STORAGE` under `<data_dir>/accounts/antigravity/<id>` | `agy` (`~/.local/bin/agy`) | first turn lets `agy` mint a `conversation_id`; later turns pass `--conversation` | not wired |
-| **Codex** | `/account add openai codex` | `CODEX_HOME` = `<data_dir>/accounts/codex/<id>` (`auth.json`) | `codex` (PATH / `~/.local/bin/codex`) | first turn lets Codex mint a `thread_id`; later turns `codex exec resume <id>` | not wired |
+| **Codex** | `/account add openai codex` | `CODEX_HOME` = `<data_dir>/accounts/codex/<id>` (`auth.json`) | `codex` (PATH / `~/.local/bin/codex`) | first turn lets Codex mint a `thread_id`; later turns `codex exec resume <id>` | CODEX_HOME config.toml + per-turn `-c` |
 
 ```
 /account add you@example.com claude

@@ -180,8 +180,9 @@ type turnRunner interface {
 
 // activeTurn is a turn with a live `claude` process behind it.
 type activeTurn struct {
-	cmd     *exec.Cmd
-	stopped bool
+	cmd      *exec.Cmd
+	stopped  bool
+	timedOut bool
 }
 
 // Runner owns the per-bot turn queues.
@@ -248,16 +249,26 @@ func (r *Runner) Enqueue(botID int64, source, text string, triggerMessageID int6
 // The child is started in its own process group, so the signal reaches the
 // tools it spawned (a long `go test`, say) and not just the claude wrapper.
 func (r *Runner) Stop(botID int64) bool {
+	killed := r.interruptActive(botID, false)
+	r.db.Model(&Turn{}).Where("bot_id = ? AND status = ?", botID, turnQueued).
+		Updates(map[string]any{"status": turnFailed, "stop_reason": "dropped by /stop"})
+	return killed
+}
+
+// interruptActive SIGTERMs a running turn. timedOut is General's 30s cap;
+// /stop passes false. The queue is not touched here (Stop drops it; a
+// timeout must not, so the injected follow-up can run).
+func (r *Runner) interruptActive(botID int64, timedOut bool) bool {
 	r.mu.Lock()
 	at := r.active[botID]
 	if at != nil {
-		at.stopped = true
+		if timedOut {
+			at.timedOut = true
+		} else {
+			at.stopped = true
+		}
 	}
 	r.mu.Unlock()
-
-	r.db.Model(&Turn{}).Where("bot_id = ? AND status = ?", botID, turnQueued).
-		Updates(map[string]any{"status": turnFailed, "stop_reason": "dropped by /stop"})
-
 	if at == nil || at.cmd == nil || at.cmd.Process == nil {
 		return false
 	}
@@ -493,6 +504,11 @@ func (r *Runner) execute(b *Bot, t *Turn, input string, triggers []int64) {
 			lastErr = "stopped by /stop"
 			break
 		}
+		if res.timedOut {
+			class = chiefTimeoutClass
+			lastErr = chiefTimeoutInput()
+			break
+		}
 		lastErr = res.failureText()
 		class = classifyFailure(lastErr, res.exitCode)
 		who := p.Name
@@ -535,6 +551,8 @@ func (r *Runner) execute(b *Bot, t *Turn, input string, triggers []int64) {
 		for _, m := range triggers {
 			r.ui.React(m, "✅")
 		}
+	} else if class == chiefTimeoutClass {
+		r.persistChiefTimeout(b, t, input, end, prog)
 	} else {
 		r.db.Model(&Turn{}).Where("id = ?", t.ID).Updates(map[string]any{
 			"status": turnFailed, "ended_at": end, "error_class": class,
@@ -558,6 +576,28 @@ func (r *Runner) execute(b *Bot, t *Turn, input string, triggers []int64) {
 		setBotStatus(r.db, b.ID, botIdle)
 	}
 	r.deliverInbox(b.ID)
+}
+
+// persistChiefTimeout records the killed General turn and injects the
+// "hand this to a session" error as the next turn. A timeout of that
+// follow-up is not injected again, so a stuck dispatcher cannot loop.
+func (r *Runner) persistChiefTimeout(b *Bot, t *Turn, input string, end time.Time, prog *progress) {
+	r.db.Model(&Turn{}).Where("id = ?", t.ID).Updates(map[string]any{
+		"status": turnFailed, "ended_at": end, "error_class": chiefTimeoutClass,
+		"stop_reason": truncate(chiefTimeoutInput(), 500), "session_id": b.SessionID,
+	})
+	if isChiefTimeoutFollowUp(input) {
+		prog.finish("General hit its 30s cap again and could not hand this off. Use /session.")
+		return
+	}
+	prog.discard()
+	// Insert into the queue without kick: execute runs inside runNext's loop,
+	// which will pick this up as soon as we return. Enqueue would kick a
+	// second loop in tests and spawn a real engine.
+	follow := &Turn{BotID: b.ID, Source: sourceSystem, Input: chiefTimeoutInput(), Status: turnQueued}
+	if err := r.db.Create(follow).Error; err != nil {
+		hookLog("chief timeout enqueue: %v", err)
+	}
 }
 
 func (r *Runner) hasPendingQuestion(botID int64) bool {
@@ -615,7 +655,7 @@ func inboxInput(db *gorm.DB, m InboxMessage) string {
 // sat unused past idle_compact_s starts fresh (DESIGN §7). The runner is
 // already `running`, so status is not part of the check.
 func (r *Runner) sessionForTurn(b *Bot) (string, bool) {
-	if strings.TrimSpace(b.SessionID) != "" && sessionIdleTooLong(r.db, b.ID, time.Now(), idleCompact(r.config())) {
+	if !isGeneralBot(b) && strings.TrimSpace(b.SessionID) != "" && sessionIdleTooLong(r.db, b.ID, time.Now(), idleCompact(r.config())) {
 		r.db.Model(&Bot{}).Where("id = ?", b.ID).Update("session_id", "")
 		b.SessionID = ""
 	}
@@ -676,6 +716,7 @@ type streamResult struct {
 	stderr    string
 	spawnErr  error
 	stopped   bool
+	timedOut  bool
 }
 
 func (s *streamResult) ok() bool {
@@ -713,17 +754,22 @@ func (r *Runner) spawn(p Profile, b *Bot, t *Turn, sessionID string, resume bool
 		return res
 	}
 	sysPrompt := renderSystemPrompt(
-		promptBot{Name: b.Name, Role: b.Role, Cwd: cwd, Engine: botEngine(b)}, hostnameOrUnknown(), botRoster(r.db, b.ID),
+		promptBot{Name: b.Name, Role: b.Role, Cwd: cwd, Engine: botEngine(b), Chief: isGeneralBot(b)}, hostnameOrUnknown(), botRoster(r.db, b.ID),
 		topicIconEmoji(topicIcons(r.db, r.config())))
+	engine := botEngine(b)
 	mcpCfg := ""
-	if botEngine(b) == engineClaude {
+	if engine == engineClaude {
 		mcpCfg = r.mcpConfigJSON(b.ID, t.ID)
 	}
-	model := resolveModel(cfg, botEngine(b), b.Model)
-	spec, err := buildTurn(botEngine(b), p, cfg, mcpCfg, sessionID, sysPrompt, envelope, model, resume)
+	model := resolveModel(cfg, engine, b.Model)
+	spec, err := buildTurn(engine, p, cfg, mcpCfg, sessionID, sysPrompt, envelope, model, resume)
 	if err != nil {
 		res.spawnErr = err
 		return res
+	}
+	ensureAccountMCP(p, engine)
+	if engine == engineCodex {
+		spec.Args = insertCodexMCPArgs(spec.Args, b.ID, t.ID)
 	}
 
 	cmd := exec.Command(spec.Bin, spec.Args...)
@@ -747,6 +793,11 @@ func (r *Runner) spawn(p Profile, b *Bot, t *Turn, sessionID string, resume bool
 	r.mu.Lock()
 	r.active[b.ID] = &activeTurn{cmd: cmd}
 	r.mu.Unlock()
+
+	if d := chiefTimeoutFor(b); d > 0 {
+		timer := time.AfterFunc(d, func() { r.interruptActive(b.ID, true) })
+		defer timer.Stop()
+	}
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
@@ -773,6 +824,7 @@ func (r *Runner) spawn(p Profile, b *Bot, t *Turn, sessionID string, resume bool
 	at := r.active[b.ID]
 	if at != nil {
 		res.stopped = at.stopped
+		res.timedOut = at.timedOut && !at.stopped
 	}
 	delete(r.active, b.ID)
 	r.mu.Unlock()
@@ -900,6 +952,7 @@ func summarizeTool(name string, input json.RawMessage) string {
 		URL         string `json:"url"`
 		Key         string `json:"key"`
 		Bot         string `json:"bot"`
+		Session     string `json:"session"`
 		Prompt      string `json:"prompt"`
 	}
 	if len(input) > 0 {
@@ -937,8 +990,18 @@ func summarizeTool(name string, input json.RawMessage) string {
 		return "remembering " + truncate(in.Key, 40)
 	case "mcp__ccc__recall":
 		return "recalling " + truncate(in.Query, 40)
-	case "mcp__ccc__send_to_bot":
-		return "messaging " + truncate(in.Bot, 30)
+	case "mcp__ccc__send_to_bot", "mcp__ccc__tell_session", "ccc__tell_session":
+		who := in.Session
+		if who == "" {
+			who = in.Bot
+		}
+		return "messaging " + truncate(who, 30)
+	case "mcp__ccc__spawn_session", "ccc__spawn_session":
+		return "starting a session"
+	case "mcp__ccc__report_to_general", "ccc__report_to_general":
+		return "reporting to General"
+	case "mcp__ccc__list_sessions", "ccc__list_sessions":
+		return "listing sessions"
 	case "mcp__ccc__ask_owner":
 		return "asking you a question"
 	case "mcp__ccc__notify_owner":
