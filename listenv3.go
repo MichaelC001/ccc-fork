@@ -19,8 +19,8 @@ import (
 )
 
 // listenv3.go is the Telegram side of ccc v3 (DESIGN §8): one forum group, one
-// topic per bot, plain text in a topic is a turn for that bot, plain text in
-// General creates a bot. It replaces the v2 fleet-mirroring poller.
+// topic per session, plain text in a topic continues that session, plain text
+// in General creates a session and dispatches the prompt as its first turn.
 
 // instance is one `ccc listen` process: config + database + runner.
 type instance struct {
@@ -375,19 +375,18 @@ func linkSharedProjects(cfg *Config) {
 
 func setBotCommandsV3(botToken string) {
 	commands := []map[string]string{
-		{"command": "role", "description": "Show or set this bot's role"},
-		{"command": "name", "description": "Show or set this bot's name: /name <name> [emoji]"},
+		{"command": "name", "description": "Show or set this session's name: /name <name> [emoji]"},
 		{"command": "new", "description": "Start a fresh conversation (memory kept)"},
 		{"command": "stop", "description": "Stop the running turn and drop the queue"},
-		{"command": "cwd", "description": "Show or set this bot's working directory"},
-		{"command": "engine", "description": "Show this bot's engine pool (set at /account add); assign another pool"},
+		{"command": "cwd", "description": "Show or set this session's working directory"},
+		{"command": "engine", "description": "Show this session's engine pool (set at /account add); assign another pool"},
 		{"command": "memory", "description": "Memories: /memory [query] | stats | restore <id>"},
 		{"command": "forget", "description": "Forget a memory: /forget <scope> <key>"},
-		{"command": "watches", "description": "List this bot's watches"},
-		{"command": "schedules", "description": "List this bot's schedules"},
-		{"command": "bots", "description": "List all bots"},
+		{"command": "watches", "description": "List this session's watches"},
+		{"command": "schedules", "description": "List this session's schedules"},
+		{"command": "sessions", "description": "List open sessions"},
 		{"command": "status", "description": "Instance health: profiles, queue, running turns"},
-		{"command": "usage", "description": "Tokens, cache hit ratio and cost per bot"},
+		{"command": "usage", "description": "Tokens, cache hit ratio and cost per session"},
 		{"command": "account", "description": "Accounts by engine (owner only)"},
 		{"command": "access", "description": "Who may talk to ccc (owner only)"},
 		{"command": "model", "description": "Show or set the model (owner only)"},
@@ -426,8 +425,16 @@ func (in *instance) handleMessage(msg *TelegramMessage) {
 	inGroup := cfg.GroupID != 0 && msg.Chat.ID == cfg.GroupID
 	topicID := msg.MessageThreadID
 
-	// A topic rename is a service message with no text, so it is handled before
-	// anything that looks at msg.Text.
+	// Topic lifecycle service messages have no text, so they are handled
+	// before anything that looks at msg.Text.
+	if inGroup && topicID > 0 && msg.ForumTopicClosed != nil {
+		in.handleTopicClosed(msg)
+		return
+	}
+	if inGroup && topicID > 0 && msg.ForumTopicReopened != nil {
+		in.handleTopicReopened(msg)
+		return
+	}
 	if inGroup && topicID > 0 && msg.ForumTopicEdited != nil {
 		in.handleTopicRename(msg)
 		return
@@ -458,7 +465,7 @@ func (in *instance) handleMessage(msg *TelegramMessage) {
 	}
 
 	if !inGroup {
-		in.reply(msg, "Talk to me in the group: a topic per bot. Send text in General to create a new bot.")
+		in.reply(msg, "Talk to me in the group: a topic per session. Send text in General to start a new session.")
 		return
 	}
 
@@ -468,7 +475,18 @@ func (in *instance) handleMessage(msg *TelegramMessage) {
 	}
 	b, err := botByTopic(in.db, topicID)
 	if err != nil {
-		in.reply(msg, "This topic has no bot behind it. Send a message in General to create one.")
+		// A just-reopened topic whose service message we missed: continue it.
+		if archived, aerr := botByTopicAny(in.db, topicID); aerr == nil && archived.ArchivedAt != nil {
+			if uerr := unarchiveBotRow(in.db, archived.ID); uerr != nil {
+				in.reply(msg, "Could not reopen the session: "+uerr.Error())
+				return
+			}
+			archived.ArchivedAt = nil
+			archived.Status = botIdle
+			in.deliver(archived, msg, text)
+			return
+		}
+		in.reply(msg, "This topic has no session behind it. Send a message in General to start one.")
 		return
 	}
 	in.deliver(b, msg, text)
@@ -589,15 +607,15 @@ func (in *instance) handleCallback(cb *CallbackQuery) {
 // Bot creation
 // ---------------------------------------------------------------------------
 
-// createBotFromText handles plain text in General: a new bot whose topic is
-// named after the first line, with the message as its first input.
+// createBotFromText handles plain text in General: a new session whose topic
+// is named after the first line, with that same prompt as its first turn.
 func (in *instance) createBotFromText(msg *TelegramMessage, text string) {
 	b, err := in.createBot(botNameFromText(text), "")
 	if err != nil {
-		in.reply(msg, "Could not create the bot: "+err.Error())
+		in.reply(msg, "Could not start the session: "+err.Error())
 		return
 	}
-	in.reply(msg, fmt.Sprintf("🤖 Created <b>%s</b> — continue in its topic.", htmlEscape(b.Name)))
+	in.reply(msg, fmt.Sprintf("🧵 Started session <b>%s</b> — continue in its topic.", htmlEscape(b.Name)))
 	if _, err := in.runner.Enqueue(b.ID, sourceUser, text, 0); err != nil {
 		hookLog("enqueue first message: %v", err)
 	}
@@ -639,7 +657,7 @@ func sanitizeBotName(name string) string {
 	}, name)
 	name = strings.TrimSpace(name)
 	if name == "" {
-		name = fmt.Sprintf("bot-%d", time.Now().Unix())
+		name = fmt.Sprintf("session-%d", time.Now().Unix())
 	}
 	if len(name) > 64 {
 		name = name[:64]
@@ -770,7 +788,7 @@ func (in *instance) handleCommand(msg *TelegramMessage, text string, inGroup boo
 	case "/cancel":
 		in.reply(msg, "Nothing to cancel.")
 		return
-	case "/bots":
+	case "/sessions", "/bots":
 		in.reply(msg, in.renderBots())
 		return
 	case "/status":
@@ -779,51 +797,36 @@ func (in *instance) handleCommand(msg *TelegramMessage, text string, inGroup boo
 	case "/usage":
 		in.reply(msg, renderUsage(in.db, time.Now()))
 		return
-	case "/bot":
+	case "/session", "/bot":
 		if !inGroup {
-			in.reply(msg, "Use /bot in the group.")
+			in.reply(msg, "Use /session in the group.")
 			return
 		}
-		name, role := splitFirstWord(rest)
+		name, _ := splitFirstWord(rest)
 		if name == "" {
-			in.reply(msg, "Usage: /bot &lt;name&gt; [role]")
+			in.reply(msg, "Usage: /session &lt;name&gt;")
 			return
 		}
-		b, err := in.createBot(name, role)
+		b, err := in.createBot(name, "")
 		if err != nil {
-			in.reply(msg, "Could not create the bot: "+err.Error())
+			in.reply(msg, "Could not start the session: "+err.Error())
 			return
 		}
-		in.reply(msg, fmt.Sprintf("🤖 Created <b>%s</b>.", htmlEscape(b.Name)))
+		in.reply(msg, fmt.Sprintf("🧵 Started session <b>%s</b>.", htmlEscape(b.Name)))
 		return
 	}
 
 	if !inGroup || topicID == 0 {
-		in.reply(msg, "That command only works inside a bot's topic.")
+		in.reply(msg, "That command only works inside a session topic.")
 		return
 	}
 	b, err := botByTopic(in.db, topicID)
 	if err != nil {
-		in.reply(msg, "This topic has no bot behind it.")
+		in.reply(msg, "This topic has no session behind it.")
 		return
 	}
 
 	switch cmd {
-	case "/role":
-		if strings.TrimSpace(rest) == "" {
-			role := strings.TrimSpace(b.Role)
-			if role == "" {
-				role = "(not set)"
-			}
-			in.reply(msg, "<b>Role</b>\n"+htmlEscape(role))
-			return
-		}
-		// The system prompt is recorded per conversation, so a new role only
-		// takes effect in a new one (see runner.go's flag notes).
-		in.db.Model(&Bot{}).Where("id = ?", b.ID).
-			Updates(map[string]any{"role": strings.TrimSpace(rest), "session_id": ""})
-		in.reply(msg, "📝 Role updated; the next message starts a fresh conversation with it.")
-
 	case "/name":
 		in.handleNameCommand(msg, b, rest)
 
@@ -949,10 +952,9 @@ func (in *instance) handleMemoryRestore(msg *TelegramMessage, arg string) {
 }
 
 // handleNameCommand implements `/name [<name>] [emoji]` (DESIGN §8): show or
-// change the bot's name. The name is the address send_to_bot and list_bots use,
-// the topic title and part of the system prompt, so setting it renames the
-// topic and rotates the session exactly like /role does (DESIGN §14.14). A
-// trailing emoji also sets the topic icon.
+// change the session name. The name is the topic title and part of the system
+// prompt, so setting it renames the topic and rotates the conversation
+// (DESIGN §14.14). A trailing emoji also sets the topic icon.
 func (in *instance) handleNameCommand(msg *TelegramMessage, b *Bot, rest string) {
 	raw, emoji := splitNameEmoji(rest)
 	if raw == "" {
@@ -1046,6 +1048,29 @@ func (in *instance) handleTopicRename(msg *TelegramMessage) {
 		htmlEscape(old), htmlEscape(name)))
 }
 
+// handleTopicClosed retires the session when Telegram closes or archives the
+// topic. The topic is already closed, so we do not call closeForumTopic again.
+func (in *instance) handleTopicClosed(msg *TelegramMessage) {
+	b, err := botByTopicAny(in.db, msg.MessageThreadID)
+	if err != nil || b.ArchivedAt != nil {
+		return
+	}
+	if err := archiveBotRow(in.db, b.ID); err != nil {
+		hookLog("archive session on topic close %d: %v", b.ID, err)
+	}
+}
+
+// handleTopicReopened continues a session whose topic the owner reopened.
+func (in *instance) handleTopicReopened(msg *TelegramMessage) {
+	b, err := botByTopicAny(in.db, msg.MessageThreadID)
+	if err != nil || b.ArchivedAt == nil {
+		return
+	}
+	if err := unarchiveBotRow(in.db, b.ID); err != nil {
+		hookLog("unarchive session on topic reopen %d: %v", b.ID, err)
+	}
+}
+
 func splitCommand(text string) (string, string) {
 	cmd := text
 	rest := ""
@@ -1073,10 +1098,10 @@ func splitFirstWord(s string) (string, string) {
 func (in *instance) renderBots() string {
 	bots, err := liveBots(in.db)
 	if err != nil || len(bots) == 0 {
-		return "No bots yet. Send a message in General to create one."
+		return "No sessions yet. Send a message in General to start one."
 	}
 	var sb strings.Builder
-	sb.WriteString("<b>Bots</b>\n")
+	sb.WriteString("<b>Sessions</b>\n")
 	for i := range bots {
 		b := &bots[i]
 		var last Turn
@@ -1084,17 +1109,13 @@ func (in *instance) renderBots() string {
 		if err := in.db.Where("bot_id = ?", b.ID).Order("id DESC").First(&last).Error; err == nil {
 			when = humanDuration(time.Since(last.CreatedAt)) + " ago"
 		}
-		role := strings.TrimSpace(b.Role)
-		if role == "" {
-			role = "(no role)"
-		}
 		engine := botEngine(b)
 		if engine == engineClaude {
-			fmt.Fprintf(&sb, "• <b>%s</b> [%s] — %s · last %s\n",
-				htmlEscape(b.Name), b.Status, htmlEscape(truncate(role, 80)), when)
+			fmt.Fprintf(&sb, "• <b>%s</b> [%s] · last %s\n",
+				htmlEscape(b.Name), b.Status, when)
 		} else {
-			fmt.Fprintf(&sb, "• <b>%s</b> [%s] %s — %s · last %s\n",
-				htmlEscape(b.Name), b.Status, htmlEscape(engine), htmlEscape(truncate(role, 80)), when)
+			fmt.Fprintf(&sb, "• <b>%s</b> [%s] %s · last %s\n",
+				htmlEscape(b.Name), b.Status, htmlEscape(engine), when)
 		}
 	}
 	return sb.String()
@@ -1109,7 +1130,7 @@ func (in *instance) renderStatus() string {
 	in.db.Model(&Turn{}).Where("status = ?", turnRunning).Count(&running)
 	var nBots int64
 	in.db.Model(&Bot{}).Where("archived_at IS NULL").Count(&nBots)
-	fmt.Fprintf(&sb, "bots: %d · running: %d · queued: %d\n", nBots, running, queued)
+	fmt.Fprintf(&sb, "sessions: %d · running: %d · queued: %d\n", nBots, running, queued)
 	fmt.Fprintf(&sb, "models: %s\n", htmlEscape(renderInstanceModels(cfg)))
 	if e := defaultEngine(cfg); e != engineClaude {
 		fmt.Fprintf(&sb, "default engine: %s\n", e)
@@ -1216,7 +1237,7 @@ func (in *instance) handleEngineCommand(msg *TelegramMessage, b *Bot, rest strin
 		in.reply(msg, "<b>Engine</b>\n<code>"+htmlEscape(engine)+"</code> ("+htmlEscape(engineLabel(engine))+") · "+
 			fmt.Sprintf("%d account(s) in this pool", n)+
 			"\nEngine is set when you add an account (<code>/account add &lt;identity&gt; &lt;engine&gt;</code>). "+
-			"/engine assigns this bot to another pool.")
+			"/engine assigns this session to another pool.")
 		return
 	}
 	engine, err := parseEngine(rest)
@@ -1233,7 +1254,7 @@ func (in *instance) handleEngineCommand(msg *TelegramMessage, b *Bot, rest strin
 		in.reply(msg, "Could not update the engine: "+htmlEscape(err.Error()))
 		return
 	}
-	reply := "⚙️ This bot now uses the <code>" + htmlEscape(engine) + "</code> account pool (" + htmlEscape(engineLabel(engine)) + "); the next message starts a fresh conversation."
+	reply := "⚙️ This session now uses the <code>" + htmlEscape(engine) + "</code> account pool (" + htmlEscape(engineLabel(engine)) + "); the next message starts a fresh conversation."
 	if n := len(listProfilesForEngine(in.config(), engine)); n == 0 {
 		reply += "\nNo " + htmlEscape(engine) + " accounts yet. Add one: <code>/account add &lt;identity&gt; " + htmlEscape(engine) + "</code>."
 	}
@@ -1294,10 +1315,10 @@ func (in *instance) handleModelCommand(msg *TelegramMessage, rest string, b *Bot
 	if strings.EqualFold(first, "default") {
 		if b != nil {
 			if err := in.db.Model(&Bot{}).Where("id = ?", b.ID).Update("model", "").Error; err != nil {
-				in.reply(msg, "Could not update the bot: "+htmlEscape(err.Error()))
+				in.reply(msg, "Could not update the session: "+htmlEscape(err.Error()))
 				return
 			}
-			in.reply(msg, "🧠 This bot now uses the instance default (<code>"+
+			in.reply(msg, "🧠 This session now uses the instance default (<code>"+
 				htmlEscape(firstNonEmpty(resolveModel(in.config(), botEngine(b), ""), "(engine default)"))+
 				"</code>).")
 			return
@@ -1325,10 +1346,10 @@ func (in *instance) handleModelCommand(msg *TelegramMessage, rest string, b *Bot
 
 	if b != nil {
 		if err := in.db.Model(&Bot{}).Where("id = ?", b.ID).Update("model", first).Error; err != nil {
-			in.reply(msg, "Could not update the bot: "+htmlEscape(err.Error()))
+			in.reply(msg, "Could not update the session: "+htmlEscape(err.Error()))
 			return
 		}
-		in.reply(msg, "🧠 This bot's model set to <code>"+htmlEscape(first)+"</code>")
+		in.reply(msg, "🧠 This session's model set to <code>"+htmlEscape(first)+"</code>")
 		return
 	}
 
@@ -1350,7 +1371,7 @@ func renderModelStatus(cfg *Config, b *Bot) string {
 	if b != nil {
 		engine := botEngine(b)
 		effective := resolveModel(cfg, engine, b.Model)
-		fmt.Fprintf(&sb, "this bot (%s): <code>%s</code>", htmlEscape(engineLabel(engine)),
+		fmt.Fprintf(&sb, "this session (%s): <code>%s</code>", htmlEscape(engineLabel(engine)),
 			htmlEscape(firstNonEmpty(effective, "(engine default)")))
 		if strings.TrimSpace(b.Model) != "" {
 			sb.WriteString(" (override)")
@@ -1359,7 +1380,7 @@ func renderModelStatus(cfg *Config, b *Bot) string {
 	}
 	sb.WriteString("instance: ")
 	sb.WriteString(htmlEscape(renderInstanceModels(cfg)))
-	sb.WriteString("\nIn a bot topic, /model &lt;slug&gt; overrides that bot. ")
+	sb.WriteString("\nIn a session topic, /model &lt;slug&gt; overrides that session. ")
 	sb.WriteString("/model &lt;engine&gt; &lt;slug&gt; sets the instance default. /model default clears.")
 	return sb.String()
 }
@@ -1397,7 +1418,7 @@ func (in *instance) handleSetGroupCommand(msg *TelegramMessage) {
 		return
 	}
 	in.setConfig(updated)
-	in.reply(msg, fmt.Sprintf("📌 This group is now ccc's home (<code>%d</code>).\nSend a message in General to create your first bot.", msg.Chat.ID))
+	in.reply(msg, fmt.Sprintf("📌 This group is now ccc's home (<code>%d</code>).\nSend a message in General to start your first session.", msg.Chat.ID))
 }
 
 // setConfig swaps the instance's configuration and hands the new one to the

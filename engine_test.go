@@ -505,15 +505,15 @@ func TestRenderSystemPromptOmitsMCPForGrok(t *testing.T) {
 	if !strings.Contains(got, "Grok Build") || !strings.Contains(got, "do NOT have the ccc MCP") {
 		t.Errorf("grok prompt should name the engine and skip MCP:\n%s", got)
 	}
-	if !strings.Contains(got, "ccc tell") {
-		t.Errorf("grok prompt should teach ccc tell:\n%s", got)
+	if strings.Contains(got, "ccc tell") || strings.Contains(got, "send_to_bot") {
+		t.Errorf("grok prompt must not teach inter-session crew messaging:\n%s", got)
 	}
 	if !strings.Contains(got, "ccc routine") {
 		t.Errorf("grok prompt should teach ccc routine:\n%s", got)
 	}
-	claude := renderSystemPrompt(promptBot{Name: "coder", Role: "writes go", Cwd: "/tmp"}, "host", nil, nil)
-	if !strings.Contains(claude, "a group of Claude bots") || !strings.Contains(claude, "remember/recall/forget") {
-		t.Error("Claude prompt must stay the original text")
+	claude := renderSystemPrompt(promptBot{Name: "coder", Cwd: "/tmp"}, "host", nil, nil)
+	if !strings.Contains(claude, "Telegram session") || !strings.Contains(claude, "remember/recall/forget") {
+		t.Error("Claude prompt should describe a session and the ccc tools")
 	}
 }
 

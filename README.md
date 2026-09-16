@@ -1,8 +1,7 @@
 # ccc
 
-**Crew Command Center** — a team of Claude, Grok or Antigravity bots living in
-one Telegram forum group. Each topic is a bot with its own role, memory and
-workspace; you talk to it like you talk to a person.
+**ccc** — coding sessions in one Telegram forum group. Each topic is a
+session: you write a prompt, it does the work, you keep talking there.
 
 [![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go)](https://go.dev)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -13,18 +12,18 @@ Phone client (MIT, public): [ccc-app](https://github.com/kidandcat/ccc-app) — 
 
 ## What ccc is
 
-Crew Command Center: a **topic is a bot**, not a session. Each bot has a name, a
-free-text role you set with `/role`, its own working directory, its own
-conversation and a memory shared with the rest of the team. You send it a
-message; it does the work and answers in the topic. There are no commands in
-the normal flow.
+A **topic is a session**. You write something in the group's **General**
+topic; ccc opens a new forum topic (title from the first line) and
+dispatches that same prompt as the first turn. You continue in that topic.
+Closing or archiving the topic ends the session; talking in an open topic
+continues it. There is no role, no `/role`, no «what should I be?» interview.
 
 Under the hood ccc drives a coding CLI as a **stateless runner**. The default
-engine is Claude Code: every message is one `claude -p` process with a session
-id ccc mints and resumes. A bot can also run on **Grok Build** (`grok`) or
-**Antigravity** (`agy`) — same topic, same envelope, that CLI's native
-print/resume flags. ccc owns everything the runner does not — bot identity,
-memory, inter-bot messaging, scheduling, account management, access control and
+engine is Claude Code: every message is one `claude -p` process with a
+conversation id ccc mints and resumes. A session can also run on **Grok
+Build** (`grok`) or **Antigravity** (`agy`) — same topic, same envelope, that
+CLI's native print/resume flags. ccc owns everything the runner does not —
+session lifecycle, memory, scheduling, account management, access control and
 the Telegram UX.
 
 ```
@@ -35,8 +34,8 @@ the Telegram UX.
                                   ▲                                    │
                                   │        ccc mcp (stdio)             │
                                   └────────────────────────────────────┘
-              remember · recall · ask_owner · send_to_bot · watch ·
-              schedule_wakeup · run_background · set_name · get_project · send_file
+              remember · recall · ask_owner · watch · schedule_wakeup ·
+              run_background · set_name · get_project · send_file
 ```
 
 ### Concepts
@@ -44,14 +43,14 @@ the Telegram UX.
 | | |
 |---|---|
 | **Instance** | One `ccc listen` process on one machine, bound to one Telegram bot token and one forum group. |
-| **Bot** | One forum topic. A name, a role, a working directory and a memory scope. |
-| **Turn** | One engine process (`claude -p`, `grok --single`, or `agy --print`): one input, one answer. One turn per bot at a time; messages that arrive meanwhile are folded into the next turn. |
-| **Engine** | Which CLI an **account** runs: `claude`, `grok` / `grok-build`, or `antigravity` / `agy`. Set when you add the account (`/account add <identity> <engine>`). A bot's turns pick a healthy account from that engine's pool. `/engine` is a secondary way to assign a bot onto another pool. |
+| **Session** | One forum topic. A name, a working directory, an engine and a conversation. Closing the topic retires it. |
+| **Turn** | One engine process (`claude -p`, `grok --single`, or `agy --print`): one input, one answer. One turn per session at a time; messages that arrive meanwhile are folded into the next turn. |
+| **Engine** | Which CLI an **account** runs: `claude`, `grok` / `grok-build`, or `antigravity` / `agy`. Set when you add the account (`/account add <identity> <engine>`). A session's turns pick a healthy account from that engine's pool. `/engine` is a secondary way to assign a session onto another pool. |
 | **Account** | One login for one engine. Claude = `CLAUDE_CONFIG_DIR`. Grok = isolated `GROK_HOME`. Antigravity = isolated `HOME` (`~/.gemini`). One ccc process can hold several Claude emails + several Grok logins + several agy logins at once. Failover stays inside the same engine. |
-| **Memory** | Durable facts in three scopes: `user` (about you, shared by all bots), `project` (about one code base) and `bot` (private). |
-| **Watch** | A command re-run on an interval. The bot is woken **only when the output changes**, with a diff. Nothing changing costs nothing. Lives 4 hours, then it is cancelled and the bot is woken to re-set it. Standing jobs are routines. |
+| **Memory** | Durable facts in `user` (about you, shared across sessions) and `project` (about one code base). A leftover per-session scope still exists internally; it is not a persona. |
+| **Watch** | A command re-run on an interval. The session is woken **only when the output changes**, with a diff. Nothing changing costs nothing. Lives 4 hours, then it is cancelled and the session is woken to re-set it. Standing jobs are routines. |
 | **Schedule** | A wakeup at a time, or on a cron expression. |
-| **Background job** | A long shell command in the same topic. The bot stays responsive; it is woken when the job finishes. |
+| **Background job** | A long shell command in the same topic. The session stays responsive; it is woken when the job finishes. |
 
 ### Phone app
 
@@ -64,13 +63,12 @@ ccc pair          # on the machine
 
 The default hub (`wss://hub.mentasystems.com`) is a free encrypted relay. It cannot read chats. `ccc hub` runs your own.
 
-### What a bot sees
+### What a session sees
 
-- A system prompt with its name, role, machine, working directory and the other
-  bots on the team.
-- Per message, a small `<context>` envelope: today's date, the most relevant
-  memories and a summary of anything waiting in its inbox.
-- **No `CLAUDE.md`, no user/project settings, no skills.** Bots run with
+- A system prompt with its name, machine and working directory.
+- Per message, a small `<context>` envelope: today's date and the most relevant
+  memories.
+- **No `CLAUDE.md`, no user/project settings, no skills.** Sessions run with
   `--setting-sources ''`, so nothing you have installed for yourself leaks into
   them. They run with bypassed permissions in their own working directory.
 
@@ -209,7 +207,7 @@ Add more accounts the same way. Mix engines in one instance:
 Turns pick a healthy account whose engine matches the bot. Failover stays
 Claude↔Claude or Grok↔Grok — ccc does not jump Claude→Grok mid-conversation.
 
-### 7. Make your first bot
+### 7. Start your first session
 
 Send a message in the group's **General** topic:
 
@@ -217,13 +215,9 @@ Send a message in the group's **General** topic:
 keep an eye on the fecha deploy and tell me if anything breaks
 ```
 
-ccc creates a topic named after the first line, with a bot behind it, and
-dispatches your message. From then on, talk in that topic.
-
-A brand new bot has no role yet, so it introduces itself and asks what it should
-be responsible for. Answer in the topic and it stores the answer as its role and
-picks a fitting name and topic icon for itself — or set them yourself with
-`/role` and `/name`.
+ccc creates a topic named after the first line and dispatches that same
+prompt as the first turn. From then on, talk in that topic. Closing the
+topic ends the session; opening it again continues it.
 
 ---
 
@@ -233,11 +227,12 @@ picks a fitting name and topic icon for itself — or set them yourself with
 
 | Where | What happens |
 |---|---|
-| Text in **General** | Creates a new bot named after the first line, and sends it your message. |
-| Text in a **bot's topic** | An input for that bot. |
-| A photo or document | Saved into the bot's `inbox/`, with the path passed in the message. |
+| Text in **General** | Creates a new session named after the first line, and sends it your message as the first turn. |
+| Text in a **session topic** | Continues that session. |
+| Close / archive a topic | Ends the session. Reopen it to continue. |
+| A photo or document | Saved into the session's `inbox/`, with the path passed in the message. |
 | A voice note | Transcribed if the `voice` build is installed, else the file path is passed. |
-| A reply to a question | Answers it. Any text while a bot is waiting counts as the answer too. |
+| A reply to a question | Answers it. Any text while a session is waiting counts as the answer too. |
 
 While a turn runs, one progress message in the topic is edited in place with
 what the bot is doing (no Telegram notification). The answer is posted when
@@ -245,17 +240,16 @@ the turn finishes — that is the ping you get — and your message gets a ✅.
 
 ### Commands
 
-**In a bot's topic**
+**In a session topic**
 
 | Command | Effect |
 |---|---|
-| `/role [text]` | Show or set the bot's role. Setting it starts a fresh conversation. |
-| `/name [name] [emoji]` | Show or set the bot's name. It renames the topic, sets the topic icon and starts a fresh conversation (the name is in the system prompt). Names are unique; renaming the topic in Telegram renames the bot too. |
+| `/name [name] [emoji]` | Show or set the session's name. It renames the topic, sets the topic icon and starts a fresh conversation (the name is in the system prompt). Names are unique; renaming the topic in Telegram renames the session too. |
 | `/new` | Fresh conversation. Memories are kept. |
 | `/stop` | Kill the running turn and drop the queue. |
-| `/cwd [path]` | Show or set the bot's working directory. |
-| `/engine [name]` | Show this bot's engine pool, or assign it to another (`claude`, `grok`, `antigravity`). Secondary: engine is set when you add the account. Switching pools starts a fresh conversation. |
-| `/memory [query]` | List or search the memories this bot can see. |
+| `/cwd [path]` | Show or set the session's working directory. |
+| `/engine [name]` | Show this session's engine pool, or assign it to another (`claude`, `grok`, `antigravity`). Secondary: engine is set when you add the account. Switching pools starts a fresh conversation. |
+| `/memory [query]` | List or search the memories this session can see. |
 | `/memory stats` | Per scope: how many entries, how many bytes, whether it is due for compaction, and when it was last compacted. |
 | `/memory restore <id>` | Undo one memory compaction (owner only). The id is in the compaction message and in `/memory stats`. |
 | `/forget <scope> <key>` | Delete one memory. |
@@ -266,7 +260,7 @@ the turn finishes — that is the ping you get — and your message gets a ✅.
 
 | Command | Effect |
 |---|---|
-| `/bots` | Every bot, its status and when it last ran. |
+| `/sessions` | Every open session, its status and when it last ran. (`/bots` still works.) |
 | `/status` | Queue, running turns, accounts, watches, schedules, passthrough secrets (names only) and doctor findings. |
 | `/usage` | Tokens in/out, cache hit ratio, turns, average duration and cost — per bot and in total, for today and the last 7 days. |
 
@@ -281,19 +275,17 @@ the turn finishes — that is the ping you get — and your message gets a ✅.
 | `/model [name]` | Show or set the model every bot runs on. `/model default` clears it. |
 | `/setgroup` | Bind ccc to the forum group the command was sent in. |
 
-### What a bot can do for itself
+### What a session can do for itself
 
-Every bot has these tools, and uses them without being told:
+Every Claude session has these tools, and uses them without being told:
 
-- `remember` / `recall` / `forget` — durable memory in the three scopes.
-- `list_bots` / `send_to_bot` — message a teammate; the exchange is mirrored
-  into both topics as 🤝, and the recipient wakes up with it. Grok and
-  Antigravity bots do the same with `ccc tell <Name> <text>` (`--no-wake` for FYI).
+- `remember` / `recall` / `forget` — durable memory in `user` and `project`
+  (plus a leftover per-session scope).
 - `notify_owner` / `ask_owner` — reach you; `ask_owner` renders inline buttons
-  and the bot's turn ends until you answer.
+  and the turn ends until you answer.
 - `watch` / `unwatch` / `list_watches` — a command re-run on an interval that
-  wakes the bot only when its output changes. Lasts `watch_ttl_s` (default 4 h),
-  then it is cancelled and the bot is woken to re-set it. Standing jobs are
+  wakes the session only when its output changes. Lasts `watch_ttl_s` (default 4 h),
+  then it is cancelled and the session is woken to re-set it. Standing jobs are
   `set_routine`.
 - `schedule_wakeup` / `cancel_schedule` — one-off (or unnamed cron) wakeups.
 - `set_routine` / `list_routines` / `cancel_routine` — named recurring work,
@@ -301,53 +293,47 @@ Every bot has these tools, and uses them without being told:
   Grok/agy: `ccc routine add <name> --cron "0 9 * * 1-5" <prompt>`.
 - `run_background` / `list_background` / `get_background` / `cancel_background`
   — start a long shell command without blocking the turn (builds, installs,
-  waits). The bot is woken with the result when it finishes. Only the owner
-  creates bots (a message in General); bots cannot spawn teammates.
-- `archive_bot` — retire a bot (usually itself) and close its topic.
-- `get_project` / `set_project` — the team's shared notes about a code base.
-- `update_instructions` — rewrite its own role.
-- `set_name` — rename itself and set its topic icon. The icon must be one of the
+  waits). The session is woken with the result when it finishes. Only the owner
+  creates sessions (a message in General).
+- `archive_bot` — end this session and close its topic.
+- `get_project` / `set_project` — shared notes about a code base.
+- `set_name` — rename this session and set its topic icon. The icon must be one of the
   emoji Telegram allows for forum topics; the tool lists them, and an emoji
   outside the set leaves the icon unchanged.
-- `send_file` — send a file into its topic (refuses credential paths).
+- `send_file` — send a file into this topic (refuses credential paths).
 
 ### What it costs, and what keeps it small
 
 **One turn per burst, not per message.** When you send three lines in a row, an
-idle bot waits `debounce_ms` (default 2500) for you to stop typing and answers
+idle session waits `debounce_ms` (default 2500) for you to stop typing and answers
 all of them in ONE `claude -p` run. Messages that arrive while a turn is running
-already queue and are delivered together on the next one. A watch, a schedule,
-a background job or another bot is never delayed. `ccc config set debounce_ms 0`
+already queue and are delivered together on the next one. A watch, a schedule
+or a background job is never delayed. `ccc config set debounce_ms 0`
 turns the wait off.
 
 **Resumed turns are mostly cache reads.** The system prompt of a session is
-byte-stable from turn to turn (the roster and icon list are sorted, nothing that
+byte-stable from turn to turn (the icon list is sorted, nothing that
 changes per turn is in it), so the API's prompt cache covers the conversation
 and only the new message is charged as fresh input. `/usage` reports the cache
-hit ratio per bot — if it drops, something started varying the prompt.
+hit ratio per session — if it drops, something started varying the prompt.
 
-**Idle sessions are rotated.** After `idle_compact_s` (default 1 h) without a
+**Idle conversations are rotated.** After `idle_compact_s` (default 1 h) without a
 turn, ccc does the same as `/new`: memories stay, the conversation does not.
 Claude's prompt cache expires on that same horizon; resuming a cold fat session
 would re-charge the whole history. A silent 🧹 lands in the topic.
-
-**Bots are told not to wake each other for nothing.** `send_to_bot(wake=true)`
-starts a turn on the recipient; the system prompt tells them to use
-`wake=false` for anything the other bot only needs to know, and to send one
-message instead of five.
 
 ### Maintenance (it cleans up after itself)
 
 Once a day at `maintenance_hour` (default 04:00 local) — or on demand with
 `ccc maintain` — ccc keeps its own database small:
 
-- **Turns**: it keeps 30 days OR the last 200 per bot, whichever keeps more, and
+- **Turns**: it keeps 30 days OR the last 200 per session, whichever keeps more, and
   after a week it replaces a turn's text with the first 500 characters. The
   status and the token usage are kept, so `/usage` still works on old turns.
-- **Memories**: when one scope (your `user` memories, a project's, a bot's)
+- **Memories**: when one scope (your `user` memories, a project's, a session's)
   passes 120 entries or 48 KB, ONE turn on a cheap model (`compaction_model`,
   default `haiku`) merges the duplicates and drops what a newer entry
-  contradicts. It runs outside every bot, with no tools and no access to
+  contradicts. It runs outside every session, with no tools and no access to
   anything. You get a message in **General**:
 
   ```
@@ -357,8 +343,8 @@ Once a day at `maintenance_hour` (default 04:00 local) — or on demand with
   The originals are archived, so `/memory restore 4` puts them back exactly.
   If the result does not parse, or if it dropped more than 60% of the entries,
   **nothing is applied** and you are told why instead.
-- **Cleanup**: delivered bot-to-bot messages and answered questions older than
-  30 days, the private notes of bots archived over a month ago, and memory
+- **Cleanup**: delivered leftover inbox rows and answered questions older than
+  30 days, the private notes of sessions archived over a month ago, and memory
   archives older than 90 days.
 
 Tuning knobs. These live in `config.json` and have no Telegram command: the
@@ -393,11 +379,11 @@ allowed; nobody else can do anything until you approve them.
 - You approve with the button or `/access pair <code>`.
 - `/access list`, `/access add <id>`, `/access remove <id>`, `/access block <id>`.
 
-An approved user can talk to the bots. They cannot use `/account`, `/access`,
+An approved user can talk to the sessions. They cannot use `/account`, `/access`,
 `/model` or `/setgroup` — those stay yours.
 
-> Bots run with bypassed permissions on your machine. **The chat is the trust
-> boundary**, which is why this is not optional. Secrets reach bots only through
+> Sessions run with bypassed permissions on your machine. **The chat is the trust
+> boundary**, which is why this is not optional. Secrets reach sessions only through
 > `env_passthrough`; ccc never posts environment values or credential files, and
 > `send_file` refuses anything inside a config or credentials directory.
 
@@ -408,22 +394,22 @@ An approved user can talk to the bots. They cannot use `/account`, `/access`,
 Engine is a property of an **account**, set when you add it. One ccc process
 can mix several Claude emails, several Grok logins, several Antigravity
 logins and several Codex logins — including the **same email on different
-engines**. A bot's turns pick a healthy account from
-the pool that matches what that bot runs on. New bots inherit the default
+engines**. A session's turns pick a healthy account from
+the pool that matches what that session runs on. New sessions inherit the default
 account's engine (or `default_engine` if you set one). `/engine` only assigns
-a bot onto another already-registered pool — it is not the way you introduce
+a session onto another already-registered pool — it is not the way you introduce
 an engine.
 
-The **model** is not a property of the account. `/model <slug>` in a bot's
-topic overrides that bot; `/model <engine> <slug>` in General (or a DM) sets
+The **model** is not a property of the account. `/model <slug>` in a session
+topic overrides that session; `/model <engine> <slug>` in General (or a DM) sets
 the instance default for that engine. Empty means the CLI's own default.
 
 | Engine | Add account | Isolated home | Binary | Session | MCP |
 |---|---|---|---|---|---|
-| **Claude Code** | `/account add you@x.com claude` | `CLAUDE_CONFIG_DIR` under `<data_dir>/profiles/` | `claude` | ccc mints a UUID; `--session-id` then `--resume` | ccc MCP (`remember`, `send_to_bot`, …) |
-| **Grok Build** | `/account add work grok` | `GROK_HOME` = `<data_dir>/accounts/grok/<id>` (`auth.json`) | `grok` (`~/.grok/bin/grok`) | ccc mints a UUID; `--session-id` then `--resume` | not wired — teammates via `ccc tell` (🤝 in both topics) |
-| **Antigravity** | `/account add lab agy` | isolated `HOME` + `GEMINI_HOME` + `GEMINI_FORCE_FILE_STORAGE` under `<data_dir>/accounts/antigravity/<id>` | `agy` (`~/.local/bin/agy`) | first turn lets `agy` mint a `conversation_id`; later turns pass `--conversation` | not wired — teammates via `ccc tell` (🤝 in both topics) |
-| **Codex** | `/account add openai codex` | `CODEX_HOME` = `<data_dir>/accounts/codex/<id>` (`auth.json`) | `codex` (PATH / `~/.local/bin/codex`) | first turn lets Codex mint a `thread_id`; later turns `codex exec resume <id>` | not wired — teammates via `ccc tell` (🤝 in both topics) |
+| **Claude Code** | `/account add you@x.com claude` | `CLAUDE_CONFIG_DIR` under `<data_dir>/profiles/` | `claude` | ccc mints a UUID; `--session-id` then `--resume` | ccc MCP (`remember`, `ask_owner`, `run_background`, …) |
+| **Grok Build** | `/account add work grok` | `GROK_HOME` = `<data_dir>/accounts/grok/<id>` (`auth.json`) | `grok` (`~/.grok/bin/grok`) | ccc mints a UUID; `--session-id` then `--resume` | not wired |
+| **Antigravity** | `/account add lab agy` | isolated `HOME` + `GEMINI_HOME` + `GEMINI_FORCE_FILE_STORAGE` under `<data_dir>/accounts/antigravity/<id>` | `agy` (`~/.local/bin/agy`) | first turn lets `agy` mint a `conversation_id`; later turns pass `--conversation` | not wired |
+| **Codex** | `/account add openai codex` | `CODEX_HOME` = `<data_dir>/accounts/codex/<id>` (`auth.json`) | `codex` (PATH / `~/.local/bin/codex`) | first turn lets Codex mint a `thread_id`; later turns `codex exec resume <id>` | not wired |
 
 ```
 /account add you@example.com claude
@@ -434,12 +420,12 @@ the instance default for that engine. Empty means the CLI's own default.
 /account                         # mixed list: identity, engine, health
 /account login you@example.com/codex # required when that email is on several engines
 
-/engine                          # which pool this bot uses
-/engine grok                     # assign this bot to the Grok pool (secondary)
+/engine                          # which pool this session uses
+/engine grok                     # assign this session to the Grok pool (secondary)
 /model grok grok-4               # instance default for that engine
-/model gpt-5.4                   # this bot (in its topic)
+/model gpt-5.4                   # this session (in its topic)
 
-ccc config set default_engine grok    # optional override for new bots
+ccc config set default_engine grok    # optional override for new sessions
 ccc config get default_engine
 ```
 

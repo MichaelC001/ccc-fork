@@ -7,15 +7,15 @@ import (
 	"time"
 )
 
-func TestRenderSystemPromptCarriesIdentityAndRoster(t *testing.T) {
+func TestRenderSystemPromptCarriesIdentity(t *testing.T) {
 	got := renderSystemPrompt(
-		promptBot{Name: "deployer", Role: "ships fecha to prod", Cwd: "/srv/fecha"},
+		promptBot{Name: "deployer", Cwd: "/srv/fecha"},
 		"jairo.local",
 		[]otherBot{{Name: "watcher", Role: "watches CI"}},
 		[]string{"🚀", "📝"},
 	)
-	for _, want := range []string{"deployer", "ships fecha to prod", "jairo.local", "/srv/fecha", "watcher", "watches CI",
-		"set_name", "🚀"} {
+	for _, want := range []string{"deployer", "jairo.local", "/srv/fecha",
+		"set_name", "🚀", "session"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("system prompt is missing %q:\n%s", want, got)
 		}
@@ -27,7 +27,7 @@ func TestRenderSystemPromptCarriesIdentityAndRoster(t *testing.T) {
 		t.Error("system prompt does not describe routines")
 	}
 	if !strings.Contains(got, "4 hours") {
-		t.Error("system prompt must say watches expire so bots re-set them")
+		t.Error("system prompt must say watches expire so they can be re-set")
 	}
 	if !strings.Contains(got, "run_background") {
 		t.Error("system prompt does not describe background jobs")
@@ -35,15 +35,27 @@ func TestRenderSystemPromptCarriesIdentityAndRoster(t *testing.T) {
 	if strings.Contains(got, "spawn_bot") {
 		t.Error("system prompt must not offer spawn_bot")
 	}
+	if strings.Contains(got, "Role:") || strings.Contains(got, "/role") {
+		t.Errorf("system prompt must not talk about roles:\n%s", got)
+	}
+	if strings.Contains(got, "send_to_bot") || strings.Contains(got, "list_bots") || strings.Contains(got, "update_instructions") {
+		t.Errorf("system prompt still offers crew-of-bots tools:\n%s", got)
+	}
+	if strings.Contains(got, "Other bots") || strings.Contains(got, "watches CI") {
+		t.Errorf("system prompt must not list other sessions as teammates:\n%s", got)
+	}
 }
 
-func TestRenderSystemPromptWithoutRole(t *testing.T) {
+func TestRenderSystemPromptHasNoRoleCeremony(t *testing.T) {
 	got := renderSystemPrompt(promptBot{Name: "fresh", Cwd: "/tmp"}, "host", nil, nil)
-	if !strings.Contains(got, "/role") {
-		t.Errorf("a role-less bot should be told how a role gets set:\n%s", got)
+	if strings.Contains(got, "/role") || strings.Contains(got, "no specific role") {
+		t.Errorf("a new session must not be told to pick a role:\n%s", got)
 	}
 	if strings.Contains(got, "Other bots:") {
-		t.Error("no roster should be rendered when there are no other bots")
+		t.Error("no roster should be rendered")
+	}
+	if !strings.Contains(got, "Telegram session") {
+		t.Errorf("prompt should describe a session:\n%s", got)
 	}
 }
 
@@ -62,7 +74,7 @@ func TestRenderEnvelopeShape(t *testing.T) {
 		"<context>", "</context>", "2026-09-14",
 		"user memories:", "tz: Europe/Madrid",
 		"project memories:", "deploy: systemd on vps3",
-		"your memories:", "last-run: green",
+		"session memories:", "last-run: green",
 		"pending inbox: 2 message(s) (2 from watcher)",
 		`<message source="bot:watcher">`, "the deploy failed", "</message>",
 	} {
@@ -136,7 +148,7 @@ func TestBuildEnvelopePullsLiveContext(t *testing.T) {
 	}
 }
 
-func TestBuildEnvelopeKeepsOtherBotsMemoriesOut(t *testing.T) {
+func TestBuildEnvelopeKeepsOtherSessionsMemoriesOut(t *testing.T) {
 	in, _, _ := testInstance(t)
 	mine, _ := in.createBot("mine", "")
 	theirs, _ := in.createBot("theirs", "")
@@ -145,35 +157,25 @@ func TestBuildEnvelopeKeepsOtherBotsMemoriesOut(t *testing.T) {
 	}
 	got := buildEnvelope(in.db, mine, sourceUser, "hi", time.Now())
 	if strings.Contains(got, "not for you") {
-		t.Error("a bot's private memory leaked into another bot's envelope")
+		t.Error("a session's private memory leaked into another session's envelope")
 	}
 }
 
-// A bot with no role is onboarded through the envelope, so the instruction can
-// disappear the moment update_instructions runs (the system prompt could not).
-func TestEnvelopeOnboardsARoleLessBot(t *testing.T) {
+func TestEnvelopeDoesNotOnboardANewSession(t *testing.T) {
 	in, _, _ := testInstance(t)
 	b, err := in.createBot("nameless", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	got := buildEnvelope(in.db, b, sourceUser, "hello", time.Now())
-	for _, want := range []string{"no role yet", "update_instructions", "set_name"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("a role-less bot was not onboarded (missing %q):\n%s", want, got)
+	got := buildEnvelope(in.db, b, sourceUser, "help me with the deploy", time.Now())
+	if !strings.Contains(got, "help me with the deploy") {
+		t.Errorf("the owner's prompt was dropped:\n%s", got)
+	}
+	for _, banned := range []string{"no role yet", "update_instructions", "what you should be responsible"} {
+		if strings.Contains(got, banned) {
+			t.Errorf("a new session was given role onboarding (%q):\n%s", banned, got)
 		}
-	}
-
-	if err := in.db.Model(&Bot{}).Where("id = ?", b.ID).Update("role", "ships things").Error; err != nil {
-		t.Fatal(err)
-	}
-	withRole, err := botByID(in.db, b.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := buildEnvelope(in.db, withRole, sourceUser, "hello", time.Now()); strings.Contains(got, "no role yet") {
-		t.Errorf("the onboarding instruction survived the role being set:\n%s", got)
 	}
 }
 
@@ -181,11 +183,11 @@ func TestEnvelopeOnboardsARoleLessBot(t *testing.T) {
 // API's prompt cache only helps while it is byte-identical from turn to turn
 // (DESIGN §14.20). Nothing that moves on its own may appear in it.
 func TestSystemPromptIsByteStableAcrossTurns(t *testing.T) {
-	b := promptBot{Name: "deployer", Role: "ships fecha", Cwd: "/srv/fecha"}
+	b := promptBot{Name: "deployer", Cwd: "/srv/fecha"}
 	first := renderSystemPrompt(b, "jairo.local",
 		[]otherBot{{Name: "watcher", Role: "watches CI"}, {Name: "archivist", Role: "keeps notes"}},
 		[]string{"🚀", "📝"})
-	// Same facts, different order, and the bots have been busy meanwhile.
+	// Same facts, different leftover roster order — the roster is not rendered.
 	second := renderSystemPrompt(b, "jairo.local",
 		[]otherBot{{Name: "archivist", Role: "keeps notes"}, {Name: "watcher", Role: "watches CI"}},
 		[]string{"📝", "🚀"})
@@ -193,36 +195,34 @@ func TestSystemPromptIsByteStableAcrossTurns(t *testing.T) {
 		t.Errorf("the system prompt changed between turns:\n--- first ---\n%s\n--- second ---\n%s", first, second)
 	}
 	if strings.Contains(first, botIdle) || strings.Contains(first, botRunning) {
-		t.Error("a bot's live status must not be in the system prompt: it changes every turn")
+		t.Error("a session's live status must not be in the system prompt: it changes every turn")
 	}
 	if strings.Contains(first, time.Now().Format("2006-01-02")) {
 		t.Error("the date belongs in the envelope, not in the system prompt")
 	}
 }
 
-// The prompt tells bots how to spend a teammate's tokens.
+// The prompt tells the session how to do long work without spawning teammates.
 func TestSystemPromptTeachesBackgroundInsteadOfSpawn(t *testing.T) {
 	got := renderSystemPrompt(promptBot{Name: "a", Cwd: "/tmp"}, "host", nil, nil)
-	for _, want := range []string{"run_background", "source=background", "60 seconds", "You cannot create other bots"} {
+	for _, want := range []string{"run_background", "source=background", "60 seconds", "You cannot create other sessions"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("the system prompt does not teach background jobs (%q):\n%s", want, got)
 		}
 	}
-	if strings.Contains(got, "Spawn a bot") || strings.Contains(got, "spawn_bot") {
-		t.Errorf("the system prompt still offers spawning bots:\n%s", got)
+	if strings.Contains(got, "Spawn a bot") || strings.Contains(got, "spawn_bot") || strings.Contains(got, "send_to_bot") {
+		t.Errorf("the system prompt still offers spawning or messaging teammates:\n%s", got)
 	}
 }
 
-func TestSystemPromptTeachesWakeDiscipline(t *testing.T) {
+func TestSystemPromptHasNoWakeDiscipline(t *testing.T) {
 	got := renderSystemPrompt(promptBot{Name: "a", Cwd: "/tmp"}, "host", nil, nil)
-	for _, want := range []string{"wake=false", "wake=true", "ONE message"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("the system prompt does not teach bot-to-bot wake discipline (%q):\n%s", want, got)
-		}
+	if strings.Contains(got, "wake=false") || strings.Contains(got, "wake=true") {
+		t.Errorf("wake discipline is a crew-of-bots leftover:\n%s", got)
 	}
 }
 
-// The roster is sorted wherever it is built, not only where it is rendered.
+// The roster helper is still sorted wherever it is built.
 func TestBotRosterIsSortedByName(t *testing.T) {
 	in, _, _ := testInstance(t)
 	for _, name := range []string{"zeta", "alpha", "mu"} {

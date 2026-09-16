@@ -148,15 +148,15 @@ func setup(botToken string) error {
 	}
 
 	fmt.Println()
-	fmt.Println("✅ Setup complete. Send a message in the group's General topic to create")
-	fmt.Println("   your first bot, or /account add you@example.com claude.")
+	fmt.Println("✅ Setup complete. Send a message in the group's General topic to start")
+	fmt.Println("   your first session, or /account add you@example.com claude.")
 	startListenerService()
 	return nil
 }
 
 // setGroup records the forum group from the next message the owner sends there.
 func setGroup(config *Config) error {
-	fmt.Println("Send a message in the group where you want your bots to live...")
+	fmt.Println("Send a message in the group where you want your sessions to live...")
 	fmt.Println("(Topics must be enabled and the bot must be an admin.)")
 
 	offset := 0
@@ -365,20 +365,19 @@ COMMANDS:
     profile <cmd>           Manage accounts (list/add/remove/default/
                             login/accept-disclaimer); engine is set at add
     mcp --bot <id>          MCP server for one turn (spawned by Claude Code)
-    tell [--no-wake] <bot>  Message another bot (mirrored as 🤝 in both topics)
     routine add|list|cancel Named recurring wakeup (⏰ in the topic)
-    send <file>             Send a file into the topic of the bot owning this directory
+    send <file>             Send a file into the topic of the session owning this directory
     relay [port]            Relay server for files over 50 MB (default port: 8080)
     pair                    Print a QR / URI to add this machine to the mobile app
     unpair [device]         List or revoke paired mobile devices
     hub [addr]              Run the public pairing hub (default :8787)
 
 TELEGRAM (in the forum group):
-    Text in General         Create a new bot from your message
-    Text in a bot's topic   Talk to that bot
-    /role /new /stop /cwd /memory /forget /watches /schedules           per bot
-    /engine                 assign this bot to an engine's account pool
-    /bots /status /usage                                        anywhere
+    Text in General         Start a new session from your message
+    Text in a session topic Continue that session
+    /new /stop /cwd /memory /forget /watches /schedules         per session
+    /engine                 assign this session to an engine's account pool
+    /sessions /status /usage                                    anywhere
     /memory stats|restore <id>                                  memory upkeep
     /account add <id> <engine> /access /model [engine] <slug> /setgroup  owner only
 

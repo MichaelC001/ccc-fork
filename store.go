@@ -27,8 +27,9 @@ import (
 // `ccc mcp` server spawned per turn. WAL + busy_timeout is what makes that
 // safe; every write is short.
 
-// Bot is one forum topic: an identity (name + role) with its own memory scope,
-// workspace, engine (claude|grok|antigravity) and conversation session.
+// Bot is one forum topic: a session with a name, workspace, engine
+// (claude|grok|antigravity|codex) and conversation id. The table is still
+// called bots; user-visible language is "session". Role is unused leftover.
 type Bot struct {
 	ID          int64  `gorm:"primaryKey"`
 	Name        string `gorm:"uniqueIndex;not null"`
@@ -353,10 +354,21 @@ func ensureMemoryFTS(db *gorm.DB) error {
 // Bots
 // ---------------------------------------------------------------------------
 
-// botByTopic finds the live bot behind a forum topic.
+// botByTopic finds the live session behind a forum topic.
 func botByTopic(db *gorm.DB, topicID int64) (*Bot, error) {
 	var b Bot
 	err := db.Where("topic_id = ? AND archived_at IS NULL", topicID).First(&b).Error
+	if err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
+// botByTopicAny finds the session behind a forum topic, including archived
+// ones. Close/reopen and talking in a just-reopened topic need the retired row.
+func botByTopicAny(db *gorm.DB, topicID int64) (*Bot, error) {
+	var b Bot
+	err := db.Where("topic_id = ?", topicID).Order("id DESC").First(&b).Error
 	if err != nil {
 		return nil, err
 	}
@@ -880,9 +892,8 @@ func createBotRow(db *gorm.DB, config *Config, name, role, cwd string) (*Bot, er
 	return b, nil
 }
 
-// archiveBotRow retires a bot: the row is marked archived, its queue is
-// dropped and its automation stops. Memories are deliberately kept — a bot's
-// notes outliving it is the point of them being in the database.
+// archiveBotRow retires a session: the row is marked archived, its queue is
+// dropped and its automation stops. Memories are deliberately kept.
 func archiveBotRow(db *gorm.DB, botID int64) error {
 	now := time.Now()
 	if err := db.Model(&Bot{}).Where("id = ?", botID).
@@ -890,7 +901,7 @@ func archiveBotRow(db *gorm.DB, botID int64) error {
 		return err
 	}
 	db.Model(&Turn{}).Where("bot_id = ? AND status = ?", botID, turnQueued).
-		Updates(map[string]any{"status": turnFailed, "stop_reason": "bot archived"})
+		Updates(map[string]any{"status": turnFailed, "stop_reason": "session archived"})
 	db.Model(&Watch{}).Where("bot_id = ?", botID).Update("enabled", false)
 	db.Model(&Schedule{}).Where("bot_id = ? AND fired_at IS NULL", botID).Update("fired_at", now)
 	var running []BackgroundJob
@@ -901,6 +912,16 @@ func archiveBotRow(db *gorm.DB, botID int64) error {
 		}
 	}
 	db.Model(&BackgroundJob{}).Where("bot_id = ? AND status IN ?", botID, []string{jobQueued, jobRunning}).
-		Updates(map[string]any{"status": jobFailed, "error": "bot archived", "ended_at": now, "cancel_requested": true})
+		Updates(map[string]any{"status": jobFailed, "error": "session archived", "ended_at": now, "cancel_requested": true})
 	return nil
+}
+
+// unarchiveBotRow brings a retired session back so talking in the reopened
+// topic continues the same conversation. Watches and schedules stay off —
+// those were cancelled when the topic closed; the owner can set them again.
+func unarchiveBotRow(db *gorm.DB, botID int64) error {
+	// Select is required: GORM otherwise skips the nil archived_at.
+	return db.Model(&Bot{}).Where("id = ?", botID).
+		Select("archived_at", "status").
+		Updates(map[string]any{"archived_at": nil, "status": botIdle}).Error
 }

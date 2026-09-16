@@ -524,11 +524,11 @@ func TestCommandsInTopic(t *testing.T) {
 
 	in.handleMessage(ownerMessage(b.TopicID, "/role ships the deploy"))
 	after, _ := botByID(in.db, b.ID)
-	if after.Role != "ships the deploy" {
-		t.Errorf("role = %q", after.Role)
+	if after.Role != "" {
+		t.Errorf("/role must not set a role anymore: %q", after.Role)
 	}
-	if after.SessionID != "" {
-		t.Error("/role must rotate the session: the system prompt is recorded per conversation")
+	if after.SessionID != "abc-123" {
+		t.Error("/role must not rotate the session")
 	}
 
 	in.db.Model(&Bot{}).Where("id = ?", b.ID).Update("session_id", "def-456")
@@ -598,10 +598,13 @@ func TestBotsCommandWorksAnywhere(t *testing.T) {
 	if _, err := in.createBot("alpha", "does alpha things"); err != nil {
 		t.Fatal(err)
 	}
-	in.handleMessage(ownerMessage(0, "/bots"))
+	in.handleMessage(ownerMessage(0, "/sessions"))
 	joined := strings.Join(api.texts(""), "\n")
-	if !strings.Contains(joined, "alpha") || !strings.Contains(joined, "does alpha things") {
-		t.Errorf("/bots output missing the bot: %q", joined)
+	if !strings.Contains(joined, "alpha") {
+		t.Errorf("/sessions output missing the session: %q", joined)
+	}
+	if strings.Contains(joined, "does alpha things") {
+		t.Errorf("/sessions must not list leftover roles: %q", joined)
 	}
 }
 
@@ -850,26 +853,96 @@ func TestSetNameToolRenamesAndSetsTheIcon(t *testing.T) {
 	}
 }
 
-// A bot created from General has no role, so its very first turn must carry the
-// onboarding instruction. The fake runner records the raw input; the envelope
-// the real runner would build from it is rendered here.
-func TestNewBotIsOnboardedOnItsFirstTurn(t *testing.T) {
+// A session created from General goes straight to the engine with the owner's
+// text. No role interview, no /role, no update_instructions.
+func TestNewSessionDispatchesThePromptStraightToTheEngine(t *testing.T) {
 	in, runner, _ := testInstance(t)
 	in.handleMessage(ownerMessage(0, "help me with the deploy"))
 
 	last, ok := runner.last()
 	if !ok {
-		t.Fatal("nothing enqueued for the new bot")
+		t.Fatal("nothing enqueued for the new session")
+	}
+	if last.Text != "help me with the deploy" || last.Source != sourceUser {
+		t.Errorf("first turn = %+v, want the owner's exact prompt", last)
 	}
 	b, err := botByID(in.db, last.BotID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	envelope := buildEnvelope(in.db, b, last.Source, last.Text, time.Now())
-	for _, want := range []string{"no role yet", "update_instructions", "set_name", "help me with the deploy"} {
-		if !strings.Contains(envelope, want) {
-			t.Errorf("the first turn is missing %q:\n%s", want, envelope)
+	if !strings.Contains(envelope, "help me with the deploy") {
+		t.Errorf("the first turn is missing the owner's prompt:\n%s", envelope)
+	}
+	for _, banned := range []string{"no role yet", "update_instructions", "what you should be responsible", "/role"} {
+		if strings.Contains(envelope, banned) {
+			t.Errorf("the first turn still has role ceremony (%q):\n%s", banned, envelope)
 		}
+	}
+}
+
+func TestClosingATopicRetiresTheSession(t *testing.T) {
+	in, runner, _ := testInstance(t)
+	b, err := in.createBot("worker", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := ownerMessage(b.TopicID, "")
+	closed.ForumTopicClosed = &ForumTopicClosed{}
+	in.handleMessage(closed)
+
+	after, err := botByID(in.db, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.ArchivedAt == nil {
+		t.Fatal("closing the topic must archive the session")
+	}
+	if after.Status != botDisabled {
+		t.Errorf("status = %q, want disabled", after.Status)
+	}
+
+	in.handleMessage(ownerMessage(b.TopicID, "are you still there?"))
+	// Talking in a closed-then-reopened topic (no service message) continues it.
+	last, ok := runner.last()
+	if !ok || last.Text != "are you still there?" {
+		t.Fatalf("talking in the topic after close should continue the session: %+v", last)
+	}
+	live, err := botByTopic(in.db, b.TopicID)
+	if err != nil || live.ID != b.ID {
+		t.Fatal("the session should be live again after a message in its topic")
+	}
+}
+
+func TestReopeningATopicContinuesTheSession(t *testing.T) {
+	in, runner, _ := testInstance(t)
+	b, err := in.createBot("worker", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := archiveBotRow(in.db, b.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened := ownerMessage(b.TopicID, "")
+	reopened.ForumTopicReopened = &ForumTopicReopened{}
+	in.handleMessage(reopened)
+
+	after, err := botByID(in.db, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.ArchivedAt != nil {
+		t.Fatal("reopening the topic must unarchive the session")
+	}
+	if after.Status != botIdle {
+		t.Errorf("status = %q, want idle", after.Status)
+	}
+
+	in.handleMessage(ownerMessage(b.TopicID, "continue the deploy"))
+	last, ok := runner.last()
+	if !ok || last.BotID != b.ID || last.Text != "continue the deploy" {
+		t.Errorf("talking in a reopened topic must continue the same session: %+v", last)
 	}
 }
 

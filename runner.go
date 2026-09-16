@@ -84,7 +84,7 @@ import (
 //	                            launch passed a different --system-prompt still
 //	                            answered with the ORIGINAL prompt's secret word
 //	                            with the flag set to off. DESIGN §9's envelope
-//	                            is therefore load-bearing, and /role rotates the
+//	                            is therefore load-bearing, and /name rotates the
 //	                            session.
 //	--include-partial-messages  per-message granularity is enough for progress.
 //
@@ -450,7 +450,6 @@ func foldQueue(db *gorm.DB, botID int64) (*Turn, string, []int64, bool) {
 // execute runs one turn end to end, including profile failover (DESIGN §3.4).
 func (r *Runner) execute(b *Bot, t *Turn, input string, triggers []int64) {
 	now := time.Now()
-	roleAtStart := b.Role
 	nameAtStart := b.Name
 	r.db.Model(&Turn{}).Where("id = ?", t.ID).
 		Updates(map[string]any{"status": turnRunning, "started_at": now, "input": input})
@@ -544,13 +543,10 @@ func (r *Runner) execute(b *Bot, t *Turn, input string, triggers []int64) {
 		prog.finish(failureMessage(class, lastErr))
 	}
 
-	// update_instructions or set_name may have rewritten the role or the name
-	// mid-turn. Both are in the system prompt, which is recorded per
-	// conversation, so they can only take effect in a new one — rotate the
-	// session now that the turn has written its id. Doing it here also repairs
-	// the session id a mid-turn rename cleared and the fresh-session write
-	// above put back.
-	if after, err := botByID(r.db, b.ID); err == nil && (after.Role != roleAtStart || after.Name != nameAtStart) {
+	// set_name may have rewritten the name mid-turn. The name is in the system
+	// prompt, which is recorded per conversation, so it can only take effect
+	// in a new one — rotate the session now that the turn has written its id.
+	if after, err := botByID(r.db, b.ID); err == nil && after.Name != nameAtStart {
 		r.db.Model(&Bot{}).Where("id = ?", b.ID).Update("session_id", "")
 	}
 
