@@ -441,15 +441,10 @@ func (h *hubClient) rpcArchive(params json.RawMessage, out *hubRPC) {
 		out.OK, out.Error = false, err.Error()
 		return
 	}
-	cfg := h.in.config()
-	if cfg != nil && cfg.BotToken != "" && cfg.GroupID != 0 {
-		if _, err := sendMessageHTMLGetIDSilent(cfg, cfg.GroupID, b.TopicID,
-			"📦 Session <b>"+htmlEscape(b.Name)+"</b> archived from the phone."); err != nil {
-			hookLog("hub archive note %d: %v", b.ID, err)
-		}
-		if err := closeForumTopic(cfg, b.TopicID); err != nil {
-			hookLog("hub close topic %d: %v", b.TopicID, err)
-		}
+	// Close the topic quietly. Do not post a note: archiving from the phone
+	// should not ping Telegram.
+	if err := closeForumTopic(h.in.config(), b.TopicID); err != nil {
+		hookLog("hub close topic %d: %v", b.TopicID, err)
 	}
 	out.Body, _ = json.Marshal(map[string]any{"archived": true, "bot": b.Name})
 }

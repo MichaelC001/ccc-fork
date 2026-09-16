@@ -89,12 +89,16 @@ func TestHubArchiveHidesFromBotsList(t *testing.T) {
 	live, _ := in.createBot("keep", "")
 	gone, _ := in.createBot("gone", "")
 	params, _ := json.Marshal(map[string]any{"bot_id": gone.ID})
+	before := len(api.since("sendMessage"))
 	res := h.dispatch(hubRPC{Kind: "req", ID: "1", Method: "archive", Params: params})
 	if !res.OK {
 		t.Fatalf("archive: %s", res.Error)
 	}
 	if len(api.since("closeForumTopic")) == 0 {
 		t.Error("archive must close the Telegram topic")
+	}
+	if extra := len(api.since("sendMessage")) - before; extra != 0 {
+		t.Fatalf("archive must not post a Telegram alert, extra sendMessage=%d", extra)
 	}
 	listed := h.dispatch(hubRPC{Kind: "req", ID: "2", Method: "bots"})
 	var liveList []hubBotInfo
