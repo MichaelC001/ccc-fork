@@ -836,3 +836,9 @@ Phone RPC (plaintext inside the box, instance `hubClient.dispatch`):
 | `rename` | `bot_id`, `name` | `validateBotName` + `renameBot` + `editForumTopic`. |
 | `archive` | `bot_id` | `archiveBotRow` + close the forum topic. Drops off `bots`. |
 | `unarchive` | `bot_id` | `unarchiveBotRow` + reopen the topic. |
+
+Keepalive: clients send `{v:1,t:ping}` every ~30s; the hub replies `{t:pong}`.
+The hub's 2-minute read deadline resets on any data frame. The phone keeps one
+websocket per paired machine (foreground service on Android) and shows a local
+notification on `post` events — the same posts Telegram would ping. `progress`
+is silent.

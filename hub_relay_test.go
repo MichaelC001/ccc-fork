@@ -94,3 +94,40 @@ func TestHubRelayForwardsBox(t *testing.T) {
 		t.Fatalf("name %q", parsed.Name)
 	}
 }
+
+func TestHubPingGetsPong(t *testing.T) {
+	s := newHubRelay()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/ws", s.handleWS)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/v1/ws"
+
+	dev, err := generateHubIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dc, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dc.Close()
+	if err := dc.WriteJSON(hubFrame{V: 1, T: "open", Role: "device", PK: dev.ID()}); err != nil {
+		t.Fatal(err)
+	}
+	var ack hubFrame
+	if err := dc.ReadJSON(&ack); err != nil {
+		t.Fatal(err)
+	}
+	if err := dc.WriteJSON(hubFrame{V: 1, T: "ping"}); err != nil {
+		t.Fatal(err)
+	}
+	dc.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var pong hubFrame
+	if err := dc.ReadJSON(&pong); err != nil {
+		t.Fatal(err)
+	}
+	if pong.T != "pong" {
+		t.Fatalf("want pong, got %+v", pong)
+	}
+}

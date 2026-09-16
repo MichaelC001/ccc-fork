@@ -36,7 +36,7 @@ func hubEnabled(cfg *Config) bool {
 // hub; rpc/event bodies travel only as Box.
 type hubFrame struct {
 	V    int    `json:"v"`
-	T    string `json:"t"`              // open|pair|fwd|err
+	T    string `json:"t"`              // open|pair|fwd|err|ping|pong
 	Role string `json:"role,omitempty"` // instance|device (open)
 	PK   string `json:"pk,omitempty"`
 	To   string `json:"to,omitempty"`

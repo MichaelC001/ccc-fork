@@ -27,6 +27,7 @@ type hubClient struct {
 	name string
 
 	mu    sync.Mutex
+	wmu   sync.Mutex
 	conn  *websocket.Conn
 	peers map[string][32]byte // device pk hex -> pubkey
 }
@@ -117,8 +118,12 @@ func (h *hubClient) connect() error {
 	}
 	h.offerPending()
 	c.SetReadLimit(1 << 20)
+	armHubConn(c)
+	stopPing := make(chan struct{})
+	defer close(stopPing)
+	go h.pingLoop(stopPing)
 	for {
-		_ = c.SetReadDeadline(time.Now().Add(2 * time.Minute))
+		_ = c.SetReadDeadline(time.Now().Add(hubIdle))
 		_, raw, err := c.ReadMessage()
 		if err != nil {
 			return err
@@ -130,10 +135,27 @@ func (h *hubClient) connect() error {
 		switch f.T {
 		case "open":
 			h.offerPending()
+		case "ping":
+			h.send(hubFrame{V: 1, T: "pong"})
+		case "pong":
+			// keepalive
 		case "pair":
 			h.handlePair(f)
 		case "fwd":
 			h.handleFwd(f)
+		}
+	}
+}
+
+func (h *hubClient) pingLoop(stop <-chan struct{}) {
+	t := time.NewTicker(hubPingEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+			h.send(hubFrame{V: 1, T: "ping"})
 		}
 	}
 }
@@ -154,6 +176,8 @@ func (h *hubClient) send(f hubFrame) {
 	if c == nil {
 		return
 	}
+	h.wmu.Lock()
+	defer h.wmu.Unlock()
 	_ = c.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	_ = c.WriteJSON(f)
 }

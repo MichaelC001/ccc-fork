@@ -12,6 +12,22 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const hubIdle = 2 * time.Minute
+const hubPingEvery = 30 * time.Second
+
+// armHubConn resets the idle deadline on websocket ping/pong so a quiet
+// phone still receives events. JSON `{t:ping}` is handled in the read loop.
+func armHubConn(c *websocket.Conn) {
+	_ = c.SetReadDeadline(time.Now().Add(hubIdle))
+	c.SetPongHandler(func(string) error {
+		return c.SetReadDeadline(time.Now().Add(hubIdle))
+	})
+	c.SetPingHandler(func(appData string) error {
+		_ = c.SetReadDeadline(time.Now().Add(hubIdle))
+		return c.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(10*time.Second))
+	})
+}
+
 // runHubServer is `ccc hub [addr]`. It is a dumb encrypted pipe: it learns
 // public keys and pairing codes, never plaintext. Anyone can run one; the
 // public default is wss://hub.mentasystems.com.
@@ -67,7 +83,7 @@ type hubConn struct {
 func newHubRelay() *hubRelay {
 	s := &hubRelay{
 		upgrader: websocket.Upgrader{
-			CheckOrigin:  func(*http.Request) bool { return true },
+			CheckOrigin:     func(*http.Request) bool { return true },
 			ReadBufferSize:  64 << 10,
 			WriteBufferSize: 64 << 10,
 		},
@@ -133,9 +149,10 @@ func (s *hubRelay) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 	}()
 	_ = hc.write(hubFrame{V: 1, T: "open", PK: open.PK, Role: open.Role})
+	armHubConn(c)
 
 	for {
-		_ = c.SetReadDeadline(time.Now().Add(2 * time.Minute))
+		_ = c.SetReadDeadline(time.Now().Add(hubIdle))
 		_, raw, err := c.ReadMessage()
 		if err != nil {
 			return
@@ -146,6 +163,8 @@ func (s *hubRelay) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 		f.V = 1
 		switch f.T {
+		case "ping":
+			_ = hc.write(hubFrame{V: 1, T: "pong"})
 		case "offer":
 			if hc.role != "instance" || f.Code == "" {
 				continue
