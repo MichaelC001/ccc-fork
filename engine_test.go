@@ -526,7 +526,7 @@ func TestRenderSystemPromptGrokGetsMCP(t *testing.T) {
 		t.Errorf("agy should still skip MCP and teach ccc routine:\n%s", agy)
 	}
 	claude := renderSystemPrompt(promptBot{Name: "coder", Cwd: "/tmp"}, "host", nil)
-	if !strings.Contains(claude, "Telegram session") || !strings.Contains(claude, "remember/recall/forget") {
+	if !strings.Contains(claude, "backend session") || !strings.Contains(claude, "remember/recall/forget") {
 		t.Error("Claude prompt should describe a session and the ccc tools")
 	}
 }

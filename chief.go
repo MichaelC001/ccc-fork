@@ -10,13 +10,46 @@ import (
 	"gorm.io/gorm"
 )
 
-// General is the persistent dispatcher session that lives in the forum group's
-// root topic (Telegram thread id 0). It sees the roster, can spawn and tell
-// sessions, and is the only place sessions may report back to.
+// General is the persistent dispatcher session. The owner's 1:1 DM with the
+// bot IS General. Sessions live in the backend (TopicID < 0); they have no
+// Telegram topic. A leftover forum topic (TopicID > 0) from the old
+// group+topics setup still works until it is archived.
 const generalBotName = "General"
 
 func isGeneralBot(b *Bot) bool {
 	return b != nil && b.TopicID == 0
+}
+
+// hasForumTopic is true when this session still has a Telegram forum topic
+// (legacy group+topics). Backend-only workers and General do not.
+func hasForumTopic(b *Bot) bool {
+	return b != nil && b.TopicID > 0
+}
+
+// ownerTopic is where owner-facing Telegram posts for this session go:
+// the leftover forum topic if it has one, otherwise General (the DM).
+func ownerTopic(b *Bot) int64 {
+	if hasForumTopic(b) {
+		return b.TopicID
+	}
+	return 0
+}
+
+// markBackendTopic assigns a negative TopicID so a worker cannot collide
+// with General (0) or a real forum topic (>0). Call after the row has an id.
+func markBackendTopic(db *gorm.DB, b *Bot) error {
+	if b == nil || b.ID == 0 {
+		return fmt.Errorf("bot has no id")
+	}
+	if b.TopicID != 0 {
+		return nil
+	}
+	id := -b.ID
+	if err := db.Model(b).Update("topic_id", id).Error; err != nil {
+		return err
+	}
+	b.TopicID = id
+	return nil
 }
 
 // chiefTurnTimeout caps one General turn. Workers have no such cap. Tests may
@@ -48,7 +81,7 @@ func isChiefTimeoutFollowUp(input string) bool {
 }
 
 func idleRemindText(name string) string {
-	return fmt.Sprintf("⏳ «%s» sigue esperando que hagas algo. Responde en su tema, dime qué hacer, o archívala.", name)
+	return fmt.Sprintf("⏳ «%s» sigue esperando que hagas algo. Dime qué hacer, o archívala.", name)
 }
 
 func generalBot(db *gorm.DB) (*Bot, error) {
@@ -61,7 +94,8 @@ func generalBot(db *gorm.DB) (*Bot, error) {
 }
 
 // ensureGeneralBot returns the dispatcher row, creating it if needed. It does
-// not create a forum topic: General already exists as the group root.
+// not create a forum topic: General is the owner's DM (and, if a leftover
+// group is bound, also the group root).
 func (in *instance) ensureGeneralBot() (*Bot, error) {
 	return ensureGeneralBotRow(in.db, in.config())
 }

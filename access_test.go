@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -44,7 +43,7 @@ func TestStrangerInGroupIsIgnoredSilently(t *testing.T) {
 	if got := len(api.since("sendMessage")) - before; got != 0 {
 		t.Errorf("ccc sent %d message(s) to a stranger in the group, want 0", got)
 	}
-	if len(api.since("createForumTopic")) != 1 {
+	if len(api.since("createForumTopic")) != 0 {
 		t.Error("a stranger must not be able to create a bot")
 	}
 	var rows int64
@@ -127,7 +126,7 @@ func TestApprovedUserCanTalkButNotAdminister(t *testing.T) {
 	for _, cmd := range []string{"/account", "/access list", "/model haiku", "/setgroup"} {
 		in.handleMessage(groupMessage(999, b.TopicID, cmd))
 	}
-	joined := strings.Join(api.texts(fmt.Sprint(b.TopicID)), "\n")
+	joined := strings.Join(api.texts(""), "\n")
 	if strings.Count(joined, "owner-only") != 4 {
 		t.Errorf("owner commands were not all refused for an approved user:\n%s", joined)
 	}

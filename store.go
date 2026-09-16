@@ -25,9 +25,13 @@ import (
 // `ccc mcp` server spawned per turn. WAL + busy_timeout is what makes that
 // safe; every write is short.
 
-// Bot is one forum topic: a session with a name, workspace, engine
-// (claude|grok|antigravity|codex) and conversation id. The table is still
-// called bots; user-visible language is "session". Role is unused leftover.
+// Bot is one session: a name, workspace, engine (claude|grok|antigravity|codex)
+// and conversation id. The table is still called bots; user-visible language
+// is "session". Role is unused leftover.
+//
+// TopicID: 0 is General (the owner's DM). A positive id is a leftover Telegram
+// forum topic from the old group+topics setup. A negative id is a backend-only
+// worker (no Telegram topic; reports go to General).
 type Bot struct {
 	ID          int64  `gorm:"primaryKey"`
 	Name        string `gorm:"uniqueIndex;not null"`
@@ -746,15 +750,12 @@ func botByCwd(db *gorm.DB, path string) (*Bot, error) {
 // Bot lifecycle
 // ---------------------------------------------------------------------------
 
-// createBotRow creates a bot end to end: a unique name, a forum topic, a
-// workspace and the database row. Owner: /session. Dispatcher: spawn_session.
-// A cwd of "" means the bot gets its own workspace under <data_dir>/bots.
+// createBotRow creates a bot end to end: a unique name, a workspace and the
+// database row. Owner: /session. Dispatcher: spawn_session. New sessions are
+// backend workers — they do not get a Telegram forum topic. A cwd of "" means
+// the bot gets its own workspace under <data_dir>/bots.
 func createBotRow(db *gorm.DB, config *Config, name, role, cwd string) (*Bot, error) {
 	name = uniqueBotName(db, sanitizeBotName(name))
-	topicID, err := createForumTopic(config, name)
-	if err != nil {
-		return nil, err
-	}
 	if cwd == "" {
 		cwd = botWorkspace(config, name)
 	}
@@ -762,8 +763,11 @@ func createBotRow(db *gorm.DB, config *Config, name, role, cwd string) (*Bot, er
 		return nil, err
 	}
 	engine := defaultEngine(config)
-	b := &Bot{Name: name, TopicID: topicID, Role: role, Cwd: cwd, Engine: engine, Status: botIdle}
+	b := &Bot{Name: name, Role: role, Cwd: cwd, Engine: engine, Status: botIdle}
 	if err := db.Create(b).Error; err != nil {
+		return nil, err
+	}
+	if err := markBackendTopic(db, b); err != nil {
 		return nil, err
 	}
 	return b, nil

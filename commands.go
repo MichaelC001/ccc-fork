@@ -117,8 +117,8 @@ func setup(botToken string) error {
 		}
 	}
 
-	fmt.Println("Step 2/3: create a Telegram group with Topics enabled, add the bot as")
-	fmt.Println("          an admin and send a message there (30 s, or skip with ctrl-c)...")
+	fmt.Println("Step 2/3: optional leftover group — skip with ctrl-c. The happy path is")
+	fmt.Println("          this bot's DM (General). A forum group is not required...")
 	deadline := time.Now().Add(30 * time.Second)
 	for config.GroupID == 0 && time.Now().Before(deadline) {
 		updates, next, err := pollUpdates(client, botToken, offset, 5)
@@ -137,7 +137,7 @@ func setup(botToken string) error {
 		}
 	}
 	if config.GroupID == 0 {
-		fmt.Println("⏭️  Skipped — run `ccc setgroup`, or send /setgroup in the group later.")
+		fmt.Println("⏭️  No group — the bot's DM is General. That is the happy path.")
 		fmt.Println()
 	}
 
@@ -148,8 +148,8 @@ func setup(botToken string) error {
 	}
 
 	fmt.Println()
-	fmt.Println("✅ Setup complete. Send a message in the group's General topic to start")
-	fmt.Println("   your first session, or /account add you@example.com claude.")
+	fmt.Println("✅ Setup complete. DM the bot (that chat is General), or")
+	fmt.Println("   /account add you@example.com claude.")
 	startListenerService()
 	return nil
 }
@@ -275,8 +275,7 @@ func doctor(fix bool) {
 			hint  string
 		}{
 			{"bot_token", config.BotToken != "", "configured", "ccc config set bot_token <token>"},
-			{"chat_id", config.ChatID != 0, fmt.Sprint(config.ChatID), "ccc config set chat_id <your telegram user id>"},
-			{"group_id", config.GroupID != 0, fmt.Sprint(config.GroupID), "ccc config set group_id <id>, or send /setgroup in the group"},
+			{"chat_id", config.ChatID != 0, fmt.Sprint(config.ChatID), "ccc config set chat_id <your telegram user id> — this DM is General"},
 		} {
 			fmt.Printf("  %-14s ", check.label)
 			if check.ok {
@@ -286,6 +285,9 @@ func doctor(fix bool) {
 			fmt.Println("❌ missing")
 			fmt.Printf("   %s\n", check.hint)
 			allGood = false
+		}
+		if config.GroupID != 0 {
+			fmt.Printf("  %-14s %d (legacy forum group; new sessions are DM-only)\n", "group_id", config.GroupID)
 		}
 		fmt.Printf("  %-14s %s\n", "data_dir", dataDir(config))
 		fmt.Printf("  %-14s %s\n", "model", renderInstanceModels(config))
@@ -354,9 +356,9 @@ USAGE:
     ccc listen              Run the instance (normally done by the service)
 
 COMMANDS:
-    setup <bot_token>       Interactive bootstrap (owner, group, service)
+    setup <bot_token>       Interactive bootstrap (owner DM, optional group, service)
     config set <key> <val>  Non-interactive bootstrap; keys: bot_token, chat_id,
-                            group_id, model, default_engine, data_dir, env_passthrough
+                            group_id (legacy), model, default_engine, data_dir, env_passthrough
     config get <key>        Show one value
     config                  Show the whole configuration
     setgroup                Record the forum group from your next message in it
@@ -369,18 +371,17 @@ COMMANDS:
     profile <cmd>           Manage accounts (list/add/remove/default/
                             login/accept-disclaimer); engine is set at add
     mcp --bot <id>          MCP server for one turn (spawned by claude/grok/codex)
-    routine add|list|cancel Named recurring wakeup (⏰ in the topic)
-    send <file>             Send a file into the topic of the session owning this directory
+    routine add|list|cancel Named recurring wakeup (⏰ in General)
+    send <file>             Send a file to the owner from the session owning this directory
     relay [port]            Relay server for files over 50 MB (default port: 8080)
     pair                    Print a QR / URI to add this machine to the mobile app
     unpair [device]         List or revoke paired mobile devices
     hub [addr]              Run the public pairing hub (default :8787)
 
-TELEGRAM (in the forum group):
-    Text in General         Talk to the dispatcher (sees sessions, can spawn them)
-    Text in a session topic Continue that session
-    /session <prompt>       Start a session without going through General
-    /new /stop /cwd /memory /forget /watches /schedules         per session
+TELEGRAM (the bot's 1:1 DM is General):
+    Text in the DM          Talk to the dispatcher (sees sessions, can spawn them)
+    /session <prompt>       Start a backend session without going through General
+    /new /stop /cwd /memory /forget /watches /schedules         General, in the DM
     /engine                 assign this session to an engine's account pool
     /sessions /status /usage                                    anywhere
     /memory stats|restore <id>                                  memory upkeep

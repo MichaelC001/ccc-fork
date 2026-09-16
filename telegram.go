@@ -554,6 +554,35 @@ func downloadTelegramFile(config *Config, fileID string, destPath string) error 
 	return err
 }
 
+// destForTopic is where a session's Telegram posts go.
+//
+//	topicID == 0  General: the owner's 1:1 DM (falls back to the forum
+//	              group root if a leftover group is bound and ChatID is unset)
+//	topicID > 0   a leftover forum topic in the bound group
+//	topicID < 0   a backend-only worker: no Telegram destination
+//	              (the hub still sees the event; owner-facing pings use 0)
+func destForTopic(cfg *Config, topicID int64) (chatID, threadID int64, ok bool) {
+	if cfg == nil || cfg.BotToken == "" {
+		return 0, 0, false
+	}
+	if topicID < 0 {
+		return 0, 0, false
+	}
+	if topicID > 0 {
+		if cfg.GroupID == 0 {
+			return 0, 0, false
+		}
+		return cfg.GroupID, topicID, true
+	}
+	if cfg.ChatID != 0 {
+		return cfg.ChatID, 0, true
+	}
+	if cfg.GroupID != 0 {
+		return cfg.GroupID, 0, true
+	}
+	return 0, 0, false
+}
+
 func createForumTopic(config *Config, name string) (int64, error) {
 	if config.GroupID == 0 {
 		return 0, fmt.Errorf("no group configured. Add bot to a group with topics enabled and run: ccc setgroup")
@@ -584,6 +613,9 @@ func createForumTopic(config *Config, name string) (int64, error) {
 // which is how the Bot API spells "keep the current one". Topic icons are
 // not used (idle reminders + General's timeout replaced that indicator).
 func editForumTopic(config *Config, topicID int64, name string) error {
+	if topicID <= 0 {
+		return nil
+	}
 	if config.GroupID == 0 {
 		return fmt.Errorf("no group configured")
 	}
@@ -731,7 +763,7 @@ func sendMessageKeyboardGetID(config *Config, chatID int64, threadID int64, text
 // reopenForumTopic reopens a closed forum topic. TOPIC_NOT_MODIFIED means it
 // was already open, which is success for unarchive.
 func reopenForumTopic(config *Config, topicID int64) error {
-	if config == nil || config.BotToken == "" || config.GroupID == 0 || topicID == 0 {
+	if config == nil || config.BotToken == "" || config.GroupID == 0 || topicID <= 0 {
 		return nil
 	}
 	params := url.Values{}
@@ -750,7 +782,7 @@ func reopenForumTopic(config *Config, topicID int64) error {
 // closeForumTopic closes a topic without deleting it, which is what archiving a
 // bot does: the conversation stays readable, but nothing new lands in it.
 func closeForumTopic(config *Config, topicID int64) error {
-	if config == nil || config.BotToken == "" || config.GroupID == 0 || topicID == 0 {
+	if config == nil || config.BotToken == "" || config.GroupID == 0 || topicID <= 0 {
 		return nil
 	}
 	params := url.Values{}

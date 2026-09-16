@@ -476,7 +476,7 @@ func (s *scheduler) notifyJobResumed(j *BackgroundJob) {
 	if err != nil || b.ArchivedAt != nil {
 		return
 	}
-	s.in.notifyTopic(b.TopicID, renderJobResumedNotice(j))
+	s.in.notifyBot(b, renderJobResumedNotice(j))
 }
 
 // watchBackgroundJob waits for exit.code or process death without requiring
@@ -625,7 +625,7 @@ func (s *scheduler) enqueueBackgroundWake(j *BackgroundJob) {
 		hookLog("background %d: enqueue failed: %v", j.ID, err)
 	}
 	if j.Status == jobFailed && j.Error != "cancelled" {
-		s.in.notifyTopic(b.TopicID, renderJobFailedNotice(j))
+		s.in.notifyBot(b, renderJobFailedNotice(j))
 	}
 }
 

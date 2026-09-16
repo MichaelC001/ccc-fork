@@ -397,8 +397,8 @@ func TestArchiveBotClosesTheTopicAndStopsAutomation(t *testing.T) {
 	if _, err := botByName(in.db, "done"); err == nil {
 		t.Error("the bot is still live after being archived")
 	}
-	if len(api.since("closeForumTopic")) != 1 {
-		t.Error("the topic was not closed")
+	if len(api.since("closeForumTopic")) != 0 {
+		t.Error("backend sessions have no Telegram topic to close")
 	}
 	var w Watch
 	in.db.Where("bot_id = ?", b.ID).First(&w)
@@ -528,13 +528,8 @@ func TestIdleSessionIsRotatedAfterIdle(t *testing.T) {
 		t.Errorf("idle compact must not spend a turn: %+v", runner.enqueued)
 	}
 	texts := api.texts("")
-	if !strings.Contains(strings.Join(texts, "\n"), "Fresh conversation") {
-		t.Errorf("expected a silent compact notice, got %q", texts)
-	}
-	for _, c := range api.since("sendMessage") {
-		if strings.Contains(c.Params.Get("text"), "Fresh conversation") && c.Params.Get("disable_notification") != "true" {
-			t.Error("idle compact must not ping Telegram")
-		}
+	if strings.Contains(strings.Join(texts, "\n"), "Fresh conversation") {
+		t.Errorf("backend idle compact must not spam General, got %q", texts)
 	}
 }
 

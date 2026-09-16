@@ -44,12 +44,13 @@ func postOverflow(ui botUI, topicID int64, html string) (int64, error) {
 
 // Delete retracts a message from the bot's topic. It lives next to the only
 // caller rather than with the rest of telegramUI.
-func (t telegramUI) Delete(_ int64, msgID int64) error {
+func (t telegramUI) Delete(topicID, msgID int64) error {
 	cfg := t.in.config()
-	if cfg.BotToken == "" || cfg.GroupID == 0 || msgID == 0 {
+	chat, _, ok := destForTopic(cfg, topicID)
+	if !ok || msgID == 0 {
 		return nil
 	}
-	return deleteMessage(cfg, cfg.GroupID, msgID)
+	return deleteMessage(cfg, chat, msgID)
 }
 
 type progress struct {

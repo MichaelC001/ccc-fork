@@ -2,7 +2,6 @@ package main
 
 import (
 	"os/exec"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -79,8 +78,11 @@ func TestRecoverAfterRestartReportsInterruptedTurns(t *testing.T) {
 	if got.Params.Get("disable_notification") == "true" {
 		t.Fatal("the retry ping must notify")
 	}
-	if got.Params.Get("message_thread_id") != strconv.FormatInt(b.TopicID, 10) {
-		t.Errorf("retry ping thread = %q, want the bot topic", got.Params.Get("message_thread_id"))
+	if got.Params.Get("message_thread_id") != "" {
+		t.Errorf("retry ping thread = %q, want General (the DM)", got.Params.Get("message_thread_id"))
+	}
+	if !strings.Contains(got.Params.Get("text"), "dev") {
+		t.Errorf("retry ping should name the session: %s", got.Params.Get("text"))
 	}
 	if !strings.Contains(got.Params.Get("text"), "ship the fix") {
 		t.Errorf("retry ping missing the input: %s", got.Params.Get("text"))
@@ -197,7 +199,7 @@ func TestRecoverAfterRestartResumesLiveBackgroundJob(t *testing.T) {
 	if !strings.Contains(got.Params.Get("text"), "still-going") {
 		t.Errorf("resume ping missing the job name: %s", got.Params.Get("text"))
 	}
-	if got.Params.Get("message_thread_id") != strconv.FormatInt(b.TopicID, 10) {
-		t.Errorf("resume ping thread = %q, want the bot topic", got.Params.Get("message_thread_id"))
+	if got.Params.Get("message_thread_id") != "" {
+		t.Errorf("resume ping thread = %q, want General (the DM)", got.Params.Get("message_thread_id"))
 	}
 }

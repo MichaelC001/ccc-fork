@@ -50,9 +50,10 @@ func handleSendFile(filePath string) error {
 	if err != nil {
 		return fmt.Errorf("no bot owns %s — run this from a bot's working directory", cwd)
 	}
-	sessionName, topicID := bot.Name, bot.TopicID
-	if config.GroupID == 0 {
-		return fmt.Errorf("no Telegram group configured")
+	sessionName, topicID := bot.Name, ownerTopic(bot)
+	chat, thread, ok := destForTopic(config, topicID)
+	if !ok {
+		return fmt.Errorf("no Telegram destination configured")
 	}
 
 	fileName := filepath.Base(filePath)
@@ -61,7 +62,7 @@ func handleSendFile(filePath string) error {
 	// Small file: send directly via Telegram
 	if fileSize < maxTelegramFileSize {
 		fmt.Printf("📤 Sending %s (%d MB) via Telegram...\n", fileName, fileSize/(1024*1024))
-		return sendFile(config, config.GroupID, topicID, filePath, "")
+		return sendFile(config, chat, thread, filePath, "")
 	}
 
 	// Large file: use streaming relay
@@ -95,7 +96,7 @@ func handleSendFile(filePath string) error {
 	msg := fmt.Sprintf("📦 %s (%d MB)\n\n🔗 Download:\n%s", fileName, fileSize/(1024*1024), downloadURL)
 
 	fmt.Printf("📤 Sending link to %s...\n", sessionName)
-	if err := sendMessage(config, config.GroupID, topicID, msg); err != nil {
+	if err := sendMessage(config, chat, thread, msg); err != nil {
 		return err
 	}
 

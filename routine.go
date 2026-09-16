@@ -127,13 +127,9 @@ func cancelRoutine(db *gorm.DB, botID int64, name string) (bool, error) {
 }
 
 func (s *scheduler) postRoutineFired(b *Bot, sc Schedule) {
-	cfg := s.in.config()
-	if cfg == nil || cfg.BotToken == "" || cfg.GroupID == 0 || b.TopicID == 0 {
-		return
-	}
 	html := fmt.Sprintf("⏰ <b>%s</b> routine <code>%s</code>\n%s",
 		htmlEscape(b.Name), htmlEscape(sc.Name), renderTelegramHTML(truncate(sc.Note, 1500)))
-	_, _ = sendMessageHTMLGetID(cfg, cfg.GroupID, b.TopicID, html) // safe-ignore: a missed ⏰ must not block the turn
+	s.in.notifyBot(b, html)
 }
 
 // ---------------------------------------------------------------------------

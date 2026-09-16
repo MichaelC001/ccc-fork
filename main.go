@@ -17,7 +17,7 @@ const version = "3.0.0"
 type Config struct {
 	BotToken          string              `json:"bot_token"`
 	ChatID            int64               `json:"chat_id"`                      // the owner's Telegram user id — also their DM chat
-	GroupID           int64               `json:"group_id,omitempty"`           // the forum group the bots live in
+	GroupID           int64               `json:"group_id,omitempty"`           // leftover forum group; new sessions are DM-only
 	TranscriptionLang string              `json:"transcription_lang,omitempty"` // language code for whisper (e.g. "es")
 	RelayURL          string              `json:"relay_url,omitempty"`          // relay server for files over 50 MB
 	HubURL            string              `json:"hub_url,omitempty"`            // public ccc hub (default wss://hub.getccc.dev; "-" disables)

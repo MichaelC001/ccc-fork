@@ -37,16 +37,25 @@ func queueBotMessage(db *gorm.DB, cfg *Config, from *Bot, toName, body string, w
 }
 
 func postBotMirror(cfg *Config, from, to *Bot, body string) {
-	if cfg == nil || cfg.BotToken == "" || cfg.GroupID == 0 || from == nil || to == nil {
+	if cfg == nil || cfg.BotToken == "" || from == nil || to == nil {
 		return
 	}
 	html := fmt.Sprintf("🤝 <b>%s</b> → <b>%s</b>: %s",
 		htmlEscape(from.Name), htmlEscape(to.Name), renderTelegramHTML(truncate(body, 1500)))
-	if to.TopicID != 0 {
-		_, _ = sendMessageHTMLGetID(cfg, cfg.GroupID, to.TopicID, html) // safe-ignore: a failed mirror must not fail the send
+	// Owner-facing: one copy in General (the DM) so the dispatcher traffic
+	// is visible. Leftover forum topics also get a copy.
+	if chat, thread, ok := destForTopic(cfg, 0); ok {
+		_, _ = sendMessageHTMLGetID(cfg, chat, thread, html) // safe-ignore: a failed mirror must not fail the send
 	}
-	if from.TopicID != 0 && from.TopicID != to.TopicID {
-		_, _ = sendMessageHTMLGetID(cfg, cfg.GroupID, from.TopicID, html) // safe-ignore: same
+	if hasForumTopic(to) {
+		if chat, thread, ok := destForTopic(cfg, to.TopicID); ok {
+			_, _ = sendMessageHTMLGetID(cfg, chat, thread, html) // safe-ignore: same
+		}
+	}
+	if hasForumTopic(from) && from.TopicID != to.TopicID {
+		if chat, thread, ok := destForTopic(cfg, from.TopicID); ok {
+			_, _ = sendMessageHTMLGetID(cfg, chat, thread, html) // safe-ignore: same
+		}
 	}
 }
 

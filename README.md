@@ -1,7 +1,7 @@
 # ccc
 
-**ccc** — coding sessions in one Telegram forum group. Each topic is a
-session: you write a prompt, it does the work, you keep talking there.
+**ccc** — coding sessions in Telegram. You talk to **General** in the bot's
+1:1 DM; it spawns backend workers. Sessions have no Telegram topic.
 
 [![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go)](https://go.dev)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -12,19 +12,20 @@ Phone client (MIT, public): [ccc-app](https://github.com/kidandcat/ccc-app) — 
 
 ## What ccc is
 
-A **topic is a session**. **General** is the dispatcher: you talk to it, it
-sees live sessions, and it can open a new topic (`spawn_session`) or message
-one (`tell_session`). It has a 30s cap — longer work must go to a session.
-Idle sessions waiting on you get a short reminder in General every 10 minutes.
-`/session <prompt>` still opens a worker without going through General.
-Closing a worker topic ends that session. Sessions report only to General
-(`report_to_general`). There is no role, no `/role`, no «what should I be?»
-interview.
+The bot's **1:1 DM is General**, the dispatcher: you talk to it, it sees
+live sessions, and it can start a backend worker (`spawn_session`) or message
+one (`tell_session`). Sessions live in the backend — no Telegram topic. It
+has a 30s cap — longer work must go to a session. Idle sessions waiting on
+you get a short reminder in General every 10 minutes. `/session <prompt>`
+still starts a worker without going through General. Sessions report only
+to General (`report_to_general`). There is no role, no `/role`, no «what
+should I be?» interview. A leftover forum group from older installs still
+routes if its topics exist; new sessions do not create topics.
 
 Under the hood ccc drives a coding CLI as a **stateless runner**. The default
 engine is Claude Code: every message is one `claude -p` process with a
 conversation id ccc mints and resumes. A session can also run on **Grok
-Build** (`grok`) or **Antigravity** (`agy`) — same topic, same envelope, that
+Build** (`grok`) or **Antigravity** (`agy`) — same session, same envelope, that
 CLI's native print/resume flags. ccc owns everything the runner does not —
 session lifecycle, memory, scheduling, account management, access control and
 the Telegram UX.
@@ -32,7 +33,7 @@ the Telegram UX.
 ```
 ┌────────────┐   message    ┌──────────┐   claude -p --resume  ┌──────────────┐
 │  Telegram  │─────────────▶│   ccc    │──────────────────────▶│   one turn   │
-│   topic    │◀─────────────│  listen  │◀──  stream-json   ────│              │
+│  DM = Gen. │◀─────────────│  listen  │◀──  stream-json   ────│              │
 └────────────┘   progress   └──────────┘                       └───────┬──────┘
                                   ▲                                    │
                                   │        ccc mcp (stdio)             │
@@ -46,15 +47,15 @@ the Telegram UX.
 
 | | |
 |---|---|
-| **Instance** | One `ccc listen` process on one machine, bound to one Telegram bot token and one forum group. |
-| **Session** | One forum topic. A name, a working directory, an engine and a conversation. Closing the topic retires it. |
+| **Instance** | One `ccc listen` process on one machine, bound to one Telegram bot token. The owner's DM is General. A leftover forum group is optional. |
+| **Session** | A backend worker. A name, a working directory, an engine and a conversation. The owner never writes into a session chat; reports come to General. |
 | **Turn** | One engine process (`claude -p`, `grok --single`, or `agy --print`): one input, one answer. One turn per session at a time; messages that arrive meanwhile are folded into the next turn. |
 | **Engine** | Which CLI an **account** runs: `claude`, `grok` / `grok-build`, or `antigravity` / `agy`. Set when you add the account (`/account add <identity> <engine>`). A session's turns pick a healthy account from that engine's pool. `/engine` is a secondary way to assign a session onto another pool. |
 | **Account** | One login for one engine. Claude = `CLAUDE_CONFIG_DIR`. Grok = isolated `GROK_HOME`. Antigravity = isolated `HOME` (`~/.gemini`). One ccc process can hold several Claude emails + several Grok logins + several agy logins at once. Failover stays inside the same engine. |
 | **Memory** | Durable facts in `user` (about you, shared across sessions) and `project` (about one code base). A leftover per-session scope still exists internally; it is not a persona. |
 | **Watch** | A command re-run on an interval. The session is woken **only when the output changes**, with a diff. Nothing changing costs nothing. Lives 4 hours, then it is cancelled and the session is woken to re-set it. Standing jobs are routines. |
 | **Schedule** | A wakeup at a time, or on a cron expression. |
-| **Background job** | A long shell command in the same topic. The session stays responsive; it is woken when the job finishes. |
+| **Background job** | A long shell command on a session. The session stays responsive; it is woken when the job finishes. |
 
 ### Phone app
 
@@ -101,15 +102,13 @@ curl -fsSL https://claude.com/install.sh | bash    # or your usual install metho
 claude --version
 ```
 
-### 3. Create the Telegram bot and the group
+### 3. Create the Telegram bot
 
 On your phone:
 
 1. Talk to [@BotFather](https://t.me/BotFather) → `/newbot` → copy the token.
-2. Create a **group**, open its settings and enable **Topics**.
-3. Add your bot to the group and make it an **admin** (it must be able to
-   create and close topics).
-4. Get your own numeric Telegram user id from [@userinfobot](https://t.me/userinfobot).
+2. Get your own numeric Telegram user id from [@userinfobot](https://t.me/userinfobot).
+3. DM the bot — that chat **is General**. A forum group is not required.
 
 ### 4. Configure ccc (no interaction needed)
 
@@ -162,15 +161,9 @@ journalctl --user -u ccc -f
 > With `enable-linger` on, that directory exists even when you are not logged
 > in. If it does not, `loginctl enable-linger $USER` and log in again.
 
-### 6. Bind the group and log an account in — from your phone
+### 6. Log an account in — from your phone
 
-In the forum group, send:
-
-```
-/setgroup
-```
-
-ccc records the group id. Then, anywhere:
+DM the bot (or anywhere):
 
 ```
 /account add you@example.com claude
@@ -213,15 +206,15 @@ Claude↔Claude or Grok↔Grok — ccc does not jump Claude→Grok mid-conversat
 
 ### 7. Start your first session
 
-Send a message in the group's **General** topic:
+DM the bot:
 
 ```
 keep an eye on the fecha deploy and tell me if anything breaks
 ```
 
-General is the dispatcher: it will `spawn_session` (or you can `/session`
-the prompt yourself). Talk in the worker topic from then on. Closing the
-topic ends the session; opening it again continues it.
+That chat is General, the dispatcher: it will `spawn_session` (or you can
+`/session` the prompt yourself). Sessions run in the backend and report
+back here. There is no worker topic to talk in.
 
 ---
 
@@ -231,25 +224,25 @@ topic ends the session; opening it again continues it.
 
 | Where | What happens |
 |---|---|
-| Text in **General** | A turn of the dispatcher (30s cap). It sees live sessions and can spawn or tell them. Idle workers waiting on you get a reminder here every 10 minutes. |
-| `/session <prompt>` | Opens a worker topic named after the first line, first turn = that prompt. |
-| Text in a **session topic** | Continues that session. |
-| Close / archive a topic | Ends the session. Reopen it to continue. |
-| A photo or document | Saved into the session's `inbox/`, with the path passed in the message. |
+| Text in the **DM** (General) | A turn of the dispatcher (30s cap). It sees live sessions and can spawn or tell them. Idle workers waiting on you get a reminder here every 10 minutes. |
+| `/session <prompt>` | Starts a backend worker named after the first line, first turn = that prompt. |
+| A leftover **session topic** | Continues that old session (legacy group+topics). New sessions have no topic. |
+| A photo or document | Saved into General's `inbox/` (or the leftover topic's), with the path passed in the message. |
 | A voice note | Transcribed if the `voice` build is installed, else the file path is passed. |
-| A reply to a question | Answers it. Any text while a session is waiting counts as the answer too. |
+| A reply to a question / a button | Answers that session's `ask_owner`. Free text in the DM is always General. |
 
-While a turn runs, one progress message in the topic is edited in place with
-what the session is doing (no Telegram notification). The answer is posted when
-the turn finishes — that is the ping you get — and your message gets a ✅.
+While a General turn runs, one progress message in the DM is edited in place
+(no Telegram notification). The answer is posted when the turn finishes — that
+is the ping you get — and your message gets a ✅. Workers report back through
+General (`report_to_general`).
 
 ### Commands
 
-**In a session topic**
+**In the DM (General)**
 
 | Command | Effect |
 |---|---|
-| `/name [name]` | Show or set the session's name. It renames the topic and starts a fresh conversation (the name is in the system prompt). Names are unique; renaming the topic in Telegram renames the session too. |
+| `/name [name]` | Show or set the session's name (General stays General). Starts a fresh conversation (the name is in the system prompt). Names are unique. |
 | `/new` | Fresh conversation. Memories are kept. |
 | `/stop` | Kill the running turn and drop the queue. |
 | `/cwd [path]` | Show or set the session's working directory. |
@@ -278,7 +271,7 @@ the turn finishes — that is the ping you get — and your message gets a ✅.
 | `/account login\|remove\|default <identity> [engine]` | Relogin, remove, or make default (new sessions inherit that account's engine). If the same email exists on several engines, pass `email/codex` or `email codex`. |
 | `/access` | Who may talk to ccc (see below). |
 | `/model [name]` | Show or set the model every session runs on. `/model default` clears it. |
-| `/setgroup` | Bind ccc to the forum group the command was sent in. |
+| `/setgroup` | Bind a leftover forum group (optional; new sessions do not use topics). |
 
 ### What a session can do for itself
 
@@ -295,17 +288,17 @@ use `ccc routine` there). Grok calls them through `search_tool` / `use_tool`.
   `set_routine`.
 - `schedule_wakeup` / `cancel_schedule` — one-off (or unnamed cron) wakeups.
 - `set_routine` / `list_routines` / `cancel_routine` — named recurring work,
-  timezone-aware (default `Europe/Madrid`), ⏰ in the topic when it fires.
+  timezone-aware (default `Europe/Madrid`), ⏰ in General when it fires.
   Agy: `ccc routine add <name> --cron "0 9 * * 1-5" <prompt>`.
 - `run_background` / `list_background` / `get_background` / `cancel_background`
   — start a long shell command without blocking the turn (builds, installs,
   waits). The session is woken with the result when it finishes.
 - **General only:** `list_sessions`, `spawn_session`, `tell_session`.
 - **Workers only:** `report_to_general` — the only way a session talks back.
-- `archive_bot` — end this session and close its topic.
+- `archive_bot` — end this session.
 - `get_project` / `set_project` — shared notes about a code base.
-- `set_name` — rename this session (and the forum topic, when there is one).
-- `send_file` — send a file into this topic (refuses credential paths).
+- `set_name` — rename this session (and a leftover forum topic, when there is one).
+- `send_file` — send a file to the owner (refuses credential paths).
 
 ### What it costs, and what keeps it small
 
@@ -325,7 +318,7 @@ hit ratio per session — if it drops, something started varying the prompt.
 **Idle conversations are rotated.** After `idle_compact_s` (default 1 h) without a
 turn, ccc does the same as `/new`: memories stay, the conversation does not.
 Claude's prompt cache expires on that same horizon; resuming a cold fat session
-would re-charge the whole history. A silent 🧹 lands in the topic.
+would re-charge the whole history. A leftover forum topic gets a silent 🧹.
 
 ### Maintenance (it cleans up after itself)
 
@@ -532,9 +525,9 @@ consolidates badly.
 `XDG_RUNTIME_DIR=/run/user/$(id -u)` and make sure `loginctl enable-linger
 $USER` is on. See step 5.
 
-**Nothing responds in the group.** Check `/status` in the owner's DM. The usual
-causes are a `group_id` that does not match the group (`/setgroup` fixes it),
-the bot not being an admin, or Topics not enabled.
+**Nothing responds in the DM.** Check `/status`. The usual causes are a
+`chat_id` that is not your user id, or the bot token. A leftover group is
+optional (`/setgroup`).
 
 **A message got no reply and no error.** You are probably not the owner and not
 approved — access control drops group messages from unknown users silently. Ask
@@ -554,9 +547,9 @@ it (the same write as `ccc profile accept-disclaimer <email>`).
 
 ```
 ccc listen                    Run the instance (the service does this)
-ccc setup <bot_token>         Interactive bootstrap (owner, group, service)
+ccc setup <bot_token>         Interactive bootstrap (owner DM, optional group, service)
 ccc config [get|set] …        Non-interactive bootstrap
-ccc setgroup                  Record the group from your next message in it
+ccc setgroup                  Record a leftover forum group from your next message in it
 ccc install                   Install the service (launchd / systemd --user)
 ccc env sync                  Snapshot env_passthrough secrets into ~/.config/ccc/env
                               (run from a login shell: bash -lc 'ccc env sync')
@@ -565,7 +558,7 @@ ccc doctor [--fix]            Check dependencies and configuration; --fix record
                               the bypass disclaimer for accounts missing it
 ccc profile <cmd>             Manage accounts from a shell
                               (list/add/remove/default/login/accept-disclaimer)
-ccc send <file>               Send a file into the topic of the session owning this directory
+ccc send <file>               Send a file to the owner from the session owning this directory
 ccc relay [port]              Relay server for files over 50 MB
 ccc pair                      Print a URI to add this machine to the CCC phone app
 ccc unpair                    List or revoke paired devices

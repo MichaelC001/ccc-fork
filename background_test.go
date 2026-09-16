@@ -188,8 +188,8 @@ func TestBackgroundJobWakesTheBotOnFailure(t *testing.T) {
 	if !strings.Contains(ping.Params.Get("text"), "failed") {
 		t.Errorf("failure ping = %s", ping.Params.Get("text"))
 	}
-	if ping.Params.Get("message_thread_id") != strconv.FormatInt(b.TopicID, 10) {
-		t.Errorf("failure ping thread = %q", ping.Params.Get("message_thread_id"))
+	if ping.Params.Get("message_thread_id") != "" {
+		t.Errorf("failure ping thread = %q, want General (the DM)", ping.Params.Get("message_thread_id"))
 	}
 }
 

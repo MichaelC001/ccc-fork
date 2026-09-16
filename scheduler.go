@@ -234,8 +234,10 @@ func (s *scheduler) compactIdleSessions(now time.Time) {
 		if res.Error != nil || res.RowsAffected == 0 {
 			continue
 		}
-		s.in.notifyTopicSilent(b.TopicID, fmt.Sprintf(
-			"🧹 Fresh conversation after %s idle. Memories are kept.", humanDuration(after)))
+		if hasForumTopic(&b) {
+			s.in.notifyTopicSilent(b.TopicID, fmt.Sprintf(
+				"🧹 Fresh conversation after %s idle. Memories are kept.", humanDuration(after)))
+		}
 	}
 }
 
@@ -541,15 +543,39 @@ func (s *scheduler) runMaintenanceNow(now time.Time) {
 	listenLog("maintenance: %s", strings.ReplaceAll(strings.TrimSpace(rep.String()), "\n", "; "))
 }
 
-// notifyGeneral posts into the group's General topic: maintenance belongs to
-// the instance, not to any one bot, so it is not written into a bot's topic.
+// notifyGeneral posts into General (the owner's DM): maintenance belongs to
+// the instance, not to any one bot.
 func (in *instance) notifyGeneral(text string) {
 	in.notifyTopic(0, htmlEscape(text))
 }
 
-// notifyTopic posts HTML into a forum topic (0 = General). The send is a
-// notifying sendMessage: Telegram does not ping on edits, and these are the
-// events the owner must actually see (boot, a failed job, a resumed job).
+// notifyBot posts owner-facing HTML for a session: leftover forum topic if
+// it has one, otherwise General (the DM), labelled with the session name.
+func (in *instance) notifyBot(b *Bot, html string) {
+	in.notifyBotOpts(b, html, false)
+}
+
+func (in *instance) notifyBotSilent(b *Bot, html string) {
+	in.notifyBotOpts(b, html, true)
+}
+
+func (in *instance) notifyBotOpts(b *Bot, html string, silent bool) {
+	if b == nil || strings.TrimSpace(html) == "" {
+		return
+	}
+	topic := int64(0)
+	body := html
+	if hasForumTopic(b) {
+		topic = b.TopicID
+	} else if !isGeneralBot(b) {
+		body = fmt.Sprintf("<b>%s</b> · %s", htmlEscape(b.Name), html)
+	}
+	in.notifyTopicOpts(topic, body, silent)
+}
+
+// notifyTopic posts HTML to a Telegram destination (0 = General / the DM).
+// The send is a notifying sendMessage: Telegram does not ping on edits, and
+// these are the events the owner must actually see (boot, a failed job).
 func (in *instance) notifyTopic(topicID int64, html string) {
 	in.notifyTopicOpts(topicID, html, false)
 }
@@ -562,14 +588,15 @@ func (in *instance) notifyTopicSilent(topicID int64, html string) {
 
 func (in *instance) notifyTopicOpts(topicID int64, html string, silent bool) {
 	cfg := in.config()
-	if cfg.BotToken == "" || cfg.GroupID == 0 || strings.TrimSpace(html) == "" {
+	chat, thread, ok := destForTopic(cfg, topicID)
+	if !ok || strings.TrimSpace(html) == "" {
 		return
 	}
 	var err error
 	if silent {
-		_, err = sendMessageHTMLGetIDSilent(cfg, cfg.GroupID, topicID, html)
+		_, err = sendMessageHTMLGetIDSilent(cfg, chat, thread, html)
 	} else {
-		_, err = sendMessageHTMLGetID(cfg, cfg.GroupID, topicID, html)
+		_, err = sendMessageHTMLGetID(cfg, chat, thread, html)
 	}
 	if err != nil {
 		hookLog("topic %d notification: %v", topicID, err)

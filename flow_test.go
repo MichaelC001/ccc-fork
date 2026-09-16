@@ -151,6 +151,20 @@ func isolateConfigEnv(t *testing.T) {
 	t.Setenv("CCC_DB", "")
 }
 
+// attachForumTopic pretends this session still has a leftover Telegram forum
+// topic (legacy group+topics). New sessions do not get one.
+func attachForumTopic(t *testing.T, in *instance, b *Bot) {
+	t.Helper()
+	id, err := createForumTopic(in.config(), b.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := in.db.Model(&Bot{}).Where("id = ?", b.ID).Update("topic_id", id).Error; err != nil {
+		t.Fatal(err)
+	}
+	b.TopicID = id
+}
+
 func testInstance(t *testing.T) (*instance, *fakeRunner, *fakeBotAPI) {
 	t.Helper()
 	// Commands that write the configuration (/model, /setgroup, /account) go
@@ -243,12 +257,57 @@ func TestTextInGeneralGoesToDispatcher(t *testing.T) {
 	}
 }
 
+func TestOwnerDMGoesToGeneral(t *testing.T) {
+	in, runner, api := testInstance(t)
+
+	in.handleMessage(dmMessage(42, "watch the deploy"))
+
+	if got := len(api.since("createForumTopic")); got != 0 {
+		t.Fatalf("a DM must not open a topic, created %d", got)
+	}
+	b, err := generalBot(in.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last, ok := runner.last()
+	if !ok || last.BotID != b.ID || last.Text != "watch the deploy" {
+		t.Errorf("DM did not go to General: %+v", last)
+	}
+}
+
+func TestSessionFromDMCreatesBackendWorker(t *testing.T) {
+	in, runner, api := testInstance(t)
+	in.handleMessage(dmMessage(42, "/session fix the login"))
+
+	if got := len(api.since("createForumTopic")); got != 0 {
+		t.Fatalf("/session must not create a topic, got %d", got)
+	}
+	last, ok := runner.last()
+	if !ok {
+		t.Fatal("nothing enqueued")
+	}
+	b, err := botByID(in.db, last.BotID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isGeneralBot(b) {
+		t.Fatal("/session must not enqueue on General")
+	}
+	if b.TopicID >= 0 {
+		t.Fatalf("worker TopicID = %d, want < 0 (backend-only)", b.TopicID)
+	}
+	if last.Text != "fix the login" {
+		t.Errorf("first turn = %q", last.Text)
+	}
+}
+
 func TestTextInTopicEnqueuesTurnForThatBot(t *testing.T) {
 	in, runner, _ := testInstance(t)
 	b, err := in.createBot("deployer", "ships things")
 	if err != nil {
 		t.Fatalf("createBot: %v", err)
 	}
+	attachForumTopic(t, in, b)
 
 	msg := ownerMessage(b.TopicID, "status?")
 	msg.MessageID = 99
@@ -398,22 +457,18 @@ func TestSendToBotMirrorsIntoBothTopics(t *testing.T) {
 		t.Fatalf("inbox row not written correctly: %+v", queued)
 	}
 
-	fromTopic := fmt.Sprint(a.TopicID)
-	toTopic := fmt.Sprint(bb.TopicID)
-	seenFrom, seenTo := false, false
+	n := 0
 	for _, c := range api.since("sendMessage") {
 		if !strings.Contains(c.Params.Get("text"), "please review PR 12") {
 			continue
 		}
-		switch c.Params.Get("message_thread_id") {
-		case fromTopic:
-			seenFrom = true
-		case toTopic:
-			seenTo = true
+		n++
+		if c.Params.Get("message_thread_id") != "" {
+			t.Errorf("backend mirror should land in General, got thread %q", c.Params.Get("message_thread_id"))
 		}
 	}
-	if !seenFrom || !seenTo {
-		t.Errorf("mirror missing (sender topic: %v, target topic: %v)", seenFrom, seenTo)
+	if n != 1 {
+		t.Errorf("want 1 General mirror, got %d", n)
 	}
 }
 
@@ -423,8 +478,7 @@ func TestQueueBotMessageMirrorsIntoBothTopics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bb, err := in.createBot("beta", "")
-	if err != nil {
+	if _, err := in.createBot("beta", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -432,25 +486,21 @@ func TestQueueBotMessageMirrorsIntoBothTopics(t *testing.T) {
 		t.Fatalf("queueBotMessage: %v", err)
 	}
 
-	fromTopic := fmt.Sprint(a.TopicID)
-	toTopic := fmt.Sprint(bb.TopicID)
-	seenFrom, seenTo := false, false
+	n := 0
 	for _, c := range api.since("sendMessage") {
 		if !strings.Contains(c.Params.Get("text"), "please review PR 12") {
 			continue
 		}
+		n++
 		if !strings.Contains(c.Params.Get("text"), "🤝") {
 			t.Errorf("mirror is missing the handshake mark: %q", c.Params.Get("text"))
 		}
-		switch c.Params.Get("message_thread_id") {
-		case fromTopic:
-			seenFrom = true
-		case toTopic:
-			seenTo = true
+		if c.Params.Get("message_thread_id") != "" {
+			t.Errorf("backend mirror should land in General, got thread %q", c.Params.Get("message_thread_id"))
 		}
 	}
-	if !seenFrom || !seenTo {
-		t.Errorf("mirror missing (sender topic: %v, target topic: %v)", seenFrom, seenTo)
+	if n != 1 {
+		t.Errorf("want 1 General mirror, got %d", n)
 	}
 }
 
@@ -487,8 +537,8 @@ func TestTellCommandUsesCCCBotID(t *testing.T) {
 			n++
 		}
 	}
-	if n != 2 {
-		t.Errorf("expected 🤝 in both topics, got %d posts", n)
+	if n != 1 {
+		t.Errorf("expected 🤝 in General, got %d posts", n)
 	}
 }
 
@@ -548,7 +598,7 @@ func TestCommandsInTopic(t *testing.T) {
 	}
 	in.handleMessage(ownerMessage(b.TopicID, "/memory deploy"))
 	found := false
-	for _, txt := range api.texts(fmt.Sprint(b.TopicID)) {
+	for _, txt := range api.texts("") {
 		if strings.Contains(txt, "deploy-target") {
 			found = true
 		}
@@ -624,6 +674,7 @@ func TestNameCommandRenamesTheBotAndTheTopic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	attachForumTopic(t, in, b)
 	in.db.Model(&Bot{}).Where("id = ?", b.ID).Update("session_id", "abc-123")
 
 	// No argument shows the current name and changes nothing.
@@ -692,7 +743,7 @@ func TestNameCommandRejectsACollision(t *testing.T) {
 	if len(api.since("editForumTopic")) != 0 {
 		t.Error("a rejected rename must not touch the topic")
 	}
-	joined := strings.Join(api.texts(fmt.Sprint(b.TopicID)), "\n")
+	joined := strings.Join(api.texts(""), "\n")
 	if !strings.Contains(joined, "alpha") {
 		t.Errorf("the rejection should say which bot holds the name: %q", joined)
 	}
@@ -704,6 +755,7 @@ func TestTopicRenameSyncsTheBotName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	attachForumTopic(t, in, b)
 	in.db.Model(&Bot{}).Where("id = ?", b.ID).Update("session_id", "abc-123")
 
 	renamed := ownerMessage(b.TopicID, "")
@@ -735,6 +787,7 @@ func TestTopicRenameKeepsTheOldNameOnACollision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	attachForumTopic(t, in, b)
 
 	renamed := ownerMessage(b.TopicID, "")
 	renamed.ForumTopicEdited = &ForumTopicEdited{Name: "alpha"}
@@ -786,6 +839,7 @@ func TestSetNameToolRenamesTheTopic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	attachForumTopic(t, in, b)
 	s := &mcpServer{db: in.db, config: in.cfg, botID: b.ID}
 
 	res, _, err := s.setName(t.Context(), nil, setNameIn{Name: "shipper"})
@@ -826,8 +880,8 @@ func TestNewSessionDispatchesThePromptStraightToTheEngine(t *testing.T) {
 	in, runner, api := testInstance(t)
 	in.handleMessage(ownerMessage(0, "/session help me with the deploy"))
 
-	if len(api.since("createForumTopic")) != 1 {
-		t.Fatalf("expected one worker topic, got %d", len(api.since("createForumTopic")))
+	if len(api.since("createForumTopic")) != 0 {
+		t.Fatalf("new sessions must not create a Telegram topic, got %d", len(api.since("createForumTopic")))
 	}
 	last, ok := runner.last()
 	if !ok {
@@ -860,6 +914,7 @@ func TestClosingATopicRetiresTheSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	attachForumTopic(t, in, b)
 	closed := ownerMessage(b.TopicID, "")
 	closed.ForumTopicClosed = &ForumTopicClosed{}
 	in.handleMessage(closed)
@@ -893,6 +948,7 @@ func TestReopeningATopicContinuesTheSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	attachForumTopic(t, in, b)
 	if err := archiveBotRow(in.db, b.ID); err != nil {
 		t.Fatal(err)
 	}

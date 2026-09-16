@@ -20,8 +20,8 @@ func TestSpawnSessionIsChiefOnly(t *testing.T) {
 	if !res.IsError {
 		t.Fatal("a worker must not spawn sessions")
 	}
-	if n := len(api.since("createForumTopic")); n != 1 {
-		t.Errorf("worker spawn created %d extra topics", n-1)
+	if n := len(api.since("createForumTopic")); n != 0 {
+		t.Errorf("worker spawn created %d topics; sessions are backend-only", n)
 	}
 
 	chief, err := in.ensureGeneralBot()
@@ -36,8 +36,15 @@ func TestSpawnSessionIsChiefOnly(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("chief spawn failed: %+v", res.Content)
 	}
-	if n := len(api.since("createForumTopic")); n != 2 {
-		t.Fatalf("expected worker + spawned topic, got %d", n)
+	if n := len(api.since("createForumTopic")); n != 0 {
+		t.Fatalf("spawn_session must not create a Telegram topic, got %d", n)
+	}
+	spawned, err := botByName(in.db, botNameFromText("fix the deploy"))
+	if err != nil {
+		t.Fatalf("spawned worker: %v", err)
+	}
+	if spawned.TopicID >= 0 {
+		t.Fatalf("spawned worker should be backend-only (TopicID < 0), got %+v", spawned)
 	}
 	var queued []InboxMessage
 	in.db.Where("from_bot_id = ?", chief.ID).Find(&queued)
@@ -183,6 +190,44 @@ func TestChiefPromptIsByteStable(t *testing.T) {
 	}
 	if !strings.Contains(first, "30 second") {
 		t.Errorf("chief prompt must mention the 30s cap:\n%s", first)
+	}
+}
+
+func TestCreateBotIsBackendOnly(t *testing.T) {
+	in, _, api := testInstance(t)
+	b, err := in.createBot("worker", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.TopicID >= 0 {
+		t.Fatalf("new session TopicID = %d, want < 0", b.TopicID)
+	}
+	if isGeneralBot(b) || hasForumTopic(b) {
+		t.Fatalf("new session must be a backend worker: %+v", b)
+	}
+	if n := len(api.since("createForumTopic")); n != 0 {
+		t.Errorf("createBot created %d forum topics", n)
+	}
+}
+
+func TestDestForTopic(t *testing.T) {
+	cfg := &Config{BotToken: "T", ChatID: 42, GroupID: -100}
+	chat, thread, ok := destForTopic(cfg, 0)
+	if !ok || chat != 42 || thread != 0 {
+		t.Errorf("General dest = %d/%d ok=%v, want DM 42/0", chat, thread, ok)
+	}
+	chat, thread, ok = destForTopic(cfg, 7)
+	if !ok || chat != -100 || thread != 7 {
+		t.Errorf("legacy topic dest = %d/%d ok=%v, want group -100/7", chat, thread, ok)
+	}
+	_, _, ok = destForTopic(cfg, -3)
+	if ok {
+		t.Error("backend worker must have no Telegram dest")
+	}
+	cfg.ChatID = 0
+	chat, thread, ok = destForTopic(cfg, 0)
+	if !ok || chat != -100 || thread != 0 {
+		t.Errorf("General without ChatID should fall back to group: %d/%d ok=%v", chat, thread, ok)
 	}
 }
 

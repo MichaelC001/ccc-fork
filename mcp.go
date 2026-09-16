@@ -136,7 +136,7 @@ type updateInstructionsIn struct {
 }
 
 type setNameIn struct {
-	Name string `json:"name" jsonschema:"the new title of this Telegram session and topic"`
+	Name string `json:"name" jsonschema:"the new title of this session"`
 }
 
 type sendFileIn struct {
@@ -146,7 +146,7 @@ type sendFileIn struct {
 
 type spawnSessionIn struct {
 	Prompt string `json:"prompt" jsonschema:"first message the new session should run"`
-	Name   string `json:"name,omitempty" jsonschema:"topic title; default is the first line of prompt"`
+	Name   string `json:"name,omitempty" jsonschema:"session name; default is the first line of prompt"`
 }
 
 type tellSessionIn struct {
@@ -177,7 +177,7 @@ func (s *mcpServer) register(server *mcp.Server) {
 	}, s.forget)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "notify_owner",
-		Description: "Tell the owner something in this Telegram topic. Use urgency=urgent only when it is worth an interruption.",
+		Description: "Tell the owner something. For workers this lands in General (the owner's DM). Use urgency=urgent only when it is worth an interruption.",
 	}, s.notifyOwner)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "ask_owner",
@@ -185,11 +185,11 @@ func (s *mcpServer) register(server *mcp.Server) {
 	}, s.askOwner)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "set_name",
-		Description: "Rename this session: the name is the title of the Telegram topic, so keep it short and unique. This starts a fresh conversation on your next message.",
+		Description: "Rename this session. Keep it short and unique. This starts a fresh conversation on your next message.",
 	}, s.setName)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "send_file",
-		Description: "Send a file from this machine to the owner: Telegram topic and paired phones (max 50 MB).",
+		Description: "Send a file from this machine to the owner: Telegram DM (or leftover topic) and paired phones (max 50 MB).",
 	}, s.sendFile)
 	s.registerAutomation(server)
 	s.registerCrew(server)
@@ -208,7 +208,7 @@ func (s *mcpServer) registerCrew(server *mcp.Server) {
 		}, s.listSessions)
 		mcp.AddTool(server, &mcp.Tool{
 			Name:        "spawn_session",
-			Description: "Open a new Telegram topic as a session and give it a first prompt. The session starts when this turn ends. Use this instead of doing long work yourself.",
+			Description: "Start a backend worker session (no Telegram topic) and give it a first prompt. The session starts when this turn ends. Use this instead of doing long work yourself. Reports come back here.",
 		}, s.spawnSession)
 		mcp.AddTool(server, &mcp.Tool{
 			Name:        "tell_session",
@@ -372,7 +372,7 @@ func (s *mcpServer) spawnSession(_ context.Context, _ *mcp.CallToolRequest, in s
 	if _, _, err := queueBotMessage(s.db, s.config, self, b.Name, prompt, true); err != nil {
 		return toolErr("started %s but could not queue the first prompt: %s", b.Name, err.Error()), nil, nil
 	}
-	return text("started session %q; it will run when this turn ends. Continue in its topic, or tell_session later.", b.Name), nil, nil
+	return text("started session %q; it will run when this turn ends. Reports come back here; tell_session to message it.", b.Name), nil, nil
 }
 
 func (s *mcpServer) tellSession(_ context.Context, _ *mcp.CallToolRequest, in tellSessionIn) (*mcp.CallToolResult, any, error) {
@@ -435,9 +435,13 @@ func (s *mcpServer) notifyOwner(_ context.Context, _ *mcp.CallToolRequest, in no
 	if strings.EqualFold(in.Urgency, "urgent") {
 		prefix = "🚨"
 	}
-	msg := fmt.Sprintf("%s %s", prefix, renderTelegramHTML(truncate(body, 3000)))
-	s.post(b.TopicID, msg)
-	if strings.EqualFold(in.Urgency, "urgent") && s.config.ChatID != 0 && s.config.BotToken != "" {
+	label := ""
+	if !isGeneralBot(b) {
+		label = fmt.Sprintf(" <b>%s</b>:", htmlEscape(b.Name))
+	}
+	msg := fmt.Sprintf("%s%s %s", prefix, label, renderTelegramHTML(truncate(body, 3000)))
+	s.post(ownerTopic(b), msg)
+	if strings.EqualFold(in.Urgency, "urgent") && s.config.ChatID != 0 && s.config.BotToken != "" && hasForumTopic(b) {
 		_, _ = sendMessageHTMLGetID(s.config, s.config.ChatID, 0,
 			fmt.Sprintf("%s <b>%s</b>: %s", prefix, htmlEscape(b.Name), renderTelegramHTML(truncate(body, 3000)))) // safe-ignore: the topic message already went out
 	}
@@ -478,7 +482,11 @@ func (s *mcpServer) askOwner(_ context.Context, _ *mcp.CallToolRequest, in askOw
 	if err := s.db.Create(&row).Error; err != nil {
 		return toolErr("could not record the question: %v", err), nil, nil
 	}
-	msgID := s.postQuestion(b.TopicID, row.ID, q, opts)
+	asked := q
+	if !isGeneralBot(b) {
+		asked = fmt.Sprintf("[%s] %s", b.Name, q)
+	}
+	msgID := s.postQuestion(ownerTopic(b), row.ID, asked, opts)
 	if msgID != 0 {
 		s.db.Model(&Question{}).Where("id = ?", row.ID).Update("asked_message_id", msgID)
 	}
@@ -507,10 +515,12 @@ func (s *mcpServer) setName(_ context.Context, _ *mcp.CallToolRequest, in setNam
 			return toolErr("could not rename: %v", err), nil, nil
 		}
 	}
-	if err := editForumTopic(s.config, b.TopicID, name); err != nil {
-		hookLog("edit topic %d: %v", b.TopicID, err)
+	if hasForumTopic(b) {
+		if err := editForumTopic(s.config, b.TopicID, name); err != nil {
+			hookLog("edit topic %d: %v", b.TopicID, err)
+		}
 	}
-	if name != old {
+	if name != old && hasForumTopic(b) {
 		s.post(b.TopicID, fmt.Sprintf("✏️ <b>%s</b> is now <b>%s</b>", htmlEscape(old), htmlEscape(name)))
 	}
 	out := fmt.Sprintf("renamed to %q; your next message starts a fresh conversation with it", name)
@@ -557,13 +567,13 @@ func (s *mcpServer) sendFile(_ context.Context, _ *mcp.CallToolRequest, in sendF
 		hookLog("hub file row: %v", err)
 	}
 	var tgErr error
-	if s.config.BotToken != "" && s.config.GroupID != 0 {
-		tgErr = sendFile(s.config, s.config.GroupID, b.TopicID, abs, in.Caption)
+	if chat, thread, ok := destForTopic(s.config, ownerTopic(b)); ok {
+		tgErr = sendFile(s.config, chat, thread, abs, in.Caption)
 	}
 	if tgErr != nil {
 		return toolErr("offered to phones; Telegram send failed: %v", tgErr), nil, nil
 	}
-	if s.config.BotToken == "" || s.config.GroupID == 0 {
+	if _, _, ok := destForTopic(s.config, ownerTopic(b)); !ok {
 		return text("offered %s to paired phones (no Telegram configured)", filepath.Base(abs)), nil, nil
 	}
 	return text("sent %s", filepath.Base(abs)), nil, nil
@@ -602,25 +612,27 @@ func sendFileForbidden(config *Config, abs string) (string, bool) {
 // Telegram side of the MCP process
 // ---------------------------------------------------------------------------
 
-// post writes into a topic, or does nothing when this instance has no Telegram
-// configured (which is how the runner is exercised in tests).
+// post writes into a Telegram destination, or does nothing when this instance
+// has nowhere to send (which is how the runner is exercised in tests).
 func (s *mcpServer) post(topicID int64, html string) {
-	if s.config == nil || s.config.BotToken == "" || s.config.GroupID == 0 {
+	chat, thread, ok := destForTopic(s.config, topicID)
+	if !ok {
 		return
 	}
-	_, _ = sendMessageHTMLGetID(s.config, s.config.GroupID, topicID, html) // safe-ignore: a failed mirror must not fail the tool call
+	_, _ = sendMessageHTMLGetID(s.config, chat, thread, html) // safe-ignore: a failed mirror must not fail the tool call
 }
 
 // postQuestion renders an ask_owner question with one button per option and
 // returns the message id so a tap can be matched back to the question.
 func (s *mcpServer) postQuestion(topicID, questionID int64, question string, options []string) int64 {
-	if s.config == nil || s.config.BotToken == "" || s.config.GroupID == 0 {
+	chat, thread, ok := destForTopic(s.config, topicID)
+	if !ok {
 		return 0
 	}
 	body := "❓ " + renderTelegramHTML(question)
 	if len(options) == 0 {
 		body += "\n<i>Reply to this message with your answer.</i>"
-		id, _ := sendMessageHTMLGetID(s.config, s.config.GroupID, topicID, body) // safe-ignore: a question with no message id can still be answered by reply
+		id, _ := sendMessageHTMLGetID(s.config, chat, thread, body) // safe-ignore: a question with no message id can still be answered by reply
 		return id
 	}
 	var rows [][]InlineKeyboardButton
@@ -630,7 +642,7 @@ func (s *mcpServer) postQuestion(topicID, questionID int64, question string, opt
 			CallbackData: fmt.Sprintf("q:%d:%d", questionID, i),
 		}})
 	}
-	id, err := sendMessageKeyboardGetID(s.config, s.config.GroupID, topicID, body, rows)
+	id, err := sendMessageKeyboardGetID(s.config, chat, thread, body, rows)
 	if err != nil {
 		return 0
 	}
@@ -781,7 +793,7 @@ func (s *mcpServer) registerAutomation(server *mcp.Server) {
 	}, s.cancelBackground)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "archive_bot",
-		Description: "End this session and close its Telegram topic. Defaults to yourself; use it when the work is done.",
+		Description: "End this session. Defaults to yourself; use it when the work is done.",
 	}, s.archiveBot)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "get_project",
@@ -975,8 +987,8 @@ func (s *mcpServer) archiveBot(_ context.Context, _ *mcp.CallToolRequest, in arc
 	if err := archiveBotRow(s.db, target.ID); err != nil {
 		return toolErr("could not archive: %v", err), nil, nil
 	}
-	s.post(target.TopicID, "📦 Session <b>"+htmlEscape(target.Name)+"</b> ended. The topic is closed; memories are kept.")
-	if s.config != nil && s.config.BotToken != "" && s.config.GroupID != 0 {
+	s.post(0, "📦 Session <b>"+htmlEscape(target.Name)+"</b> ended. Memories are kept.")
+	if hasForumTopic(target) {
 		if err := closeForumTopic(s.config, target.TopicID); err != nil {
 			hookLog("close topic %d: %v", target.TopicID, err)
 		}

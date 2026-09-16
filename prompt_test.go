@@ -56,7 +56,7 @@ func TestRenderSystemPromptHasNoRoleCeremony(t *testing.T) {
 	if strings.Contains(got, "Other bots:") {
 		t.Error("no roster should be rendered")
 	}
-	if !strings.Contains(got, "Telegram session") {
+	if !strings.Contains(got, "backend session") {
 		t.Errorf("prompt should describe a session:\n%s", got)
 	}
 }

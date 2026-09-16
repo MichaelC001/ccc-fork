@@ -247,8 +247,8 @@ func TestHubArchiveHidesFromBotsList(t *testing.T) {
 	if !res.OK {
 		t.Fatalf("archive: %s", res.Error)
 	}
-	if len(api.since("closeForumTopic")) == 0 {
-		t.Error("archive must close the Telegram topic")
+	if len(api.since("closeForumTopic")) != 0 {
+		t.Error("backend sessions have no Telegram topic to close")
 	}
 	if extra := len(api.since("sendMessage")) - before; extra != 0 {
 		t.Fatalf("archive must not post a Telegram alert, extra sendMessage=%d", extra)
@@ -339,7 +339,7 @@ func TestHubRename(t *testing.T) {
 	if err != nil || got.Name != "new-name" {
 		t.Fatalf("stored name = %q err=%v", got.Name, err)
 	}
-	if len(api.since("editForumTopic")) == 0 {
-		t.Error("rename must edit the forum topic title")
+	if len(api.since("editForumTopic")) != 0 {
+		t.Error("backend sessions have no forum topic to rename")
 	}
 }
