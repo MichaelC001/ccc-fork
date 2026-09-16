@@ -395,16 +395,22 @@ func botByName(db *gorm.DB, name string) (*Bot, error) {
 // through the public hub. The hub itself stores no devices — only this row
 // authorises RPC.
 type HubDevice struct {
-	ID        int64 `gorm:"primaryKey"`
-	PubKey    string `gorm:"uniqueIndex;not null"`
-	Name      string
-	PairedAt  time.Time
-	LastSeen  *time.Time
+	ID       int64  `gorm:"primaryKey"`
+	PubKey   string `gorm:"uniqueIndex;not null"`
+	Name     string
+	PairedAt time.Time
+	LastSeen *time.Time
 }
 
 func liveBots(db *gorm.DB) ([]Bot, error) {
 	var bots []Bot
 	err := db.Where("archived_at IS NULL").Order("id").Find(&bots).Error
+	return bots, err
+}
+
+func archivedBots(db *gorm.DB) ([]Bot, error) {
+	var bots []Bot
+	err := db.Where("archived_at IS NOT NULL").Order("archived_at DESC").Find(&bots).Error
 	return bots, err
 }
 

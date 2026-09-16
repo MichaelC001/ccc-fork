@@ -735,6 +735,33 @@ func (in *instance) handleAttachment(msg *TelegramMessage) bool {
 	}
 }
 
+// ingestOwnerBytes writes bytes the owner sent (phone app image, etc.) into
+// the session inbox and enqueues a turn the same way a Telegram photo does.
+func (in *instance) ingestOwnerBytes(b *Bot, data []byte, filename, caption string) error {
+	cfg := in.config()
+	inbox := filepath.Join(botCwd(cfg, b), "inbox")
+	if err := os.MkdirAll(inbox, 0o755); err != nil {
+		return err
+	}
+	name := sanitizeFileName(filename)
+	path := filepath.Join(inbox, name)
+	if _, err := os.Stat(path); err == nil {
+		ext := filepath.Ext(name)
+		base := strings.TrimSuffix(name, ext)
+		name = fmt.Sprintf("%s_%d%s", base, time.Now().UnixNano(), ext)
+		path = filepath.Join(inbox, name)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return err
+	}
+	caption = strings.TrimSpace(caption)
+	if caption == "" {
+		caption = "The owner sent an image."
+	}
+	_, err := in.runner.Enqueue(b.ID, sourceUser, fmt.Sprintf("%s It is saved at %s", caption, path), 0)
+	return err
+}
+
 // sanitizeFileName strips path separators from a Telegram-provided file name:
 // the name comes from the world, and it is used to build a path.
 func sanitizeFileName(name string) string {

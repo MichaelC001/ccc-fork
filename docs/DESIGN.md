@@ -823,3 +823,16 @@ The `k` is the instance public key (TOFU). The phone encrypts its identity
 to that key; the hub only routes. Paired devices live in SQLite on the
 instance (`hub_devices`). `ccc unpair` revokes them. `hub_url` `-` disables
 the client.
+
+Phone RPC (plaintext inside the box, instance `hubClient.dispatch`):
+
+| Method | Params | Behavior |
+|---|---|---|
+| `hello` | — | Instance name + live session count. |
+| `bots` | — | Live sessions, most recently active first (`last`, `last_text`). |
+| `archived` | — | Sessions with `archived_at` set. |
+| `history` | `bot_id`, `limit?` | Turns, oldest first. |
+| `send` | `bot_id`, `text?`, `image?` (`mime`, `name`, `data` base64) | Enqueue a user turn. An image is written to the session `inbox/` (≤512 KiB) the same way a Telegram photo is. |
+| `rename` | `bot_id`, `name` | `validateBotName` + `renameBot` + `editForumTopic`. |
+| `archive` | `bot_id` | `archiveBotRow` + close the forum topic. Drops off `bots`. |
+| `unarchive` | `bot_id` | `unarchiveBotRow` + reopen the topic. |

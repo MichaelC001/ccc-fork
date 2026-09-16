@@ -1,16 +1,20 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"gorm.io/gorm"
 )
 
 // hubClient is the instance side of the public hub: one outbound websocket
@@ -268,66 +272,239 @@ func (h *hubClient) dispatch(rpc hubRPC) hubRPC {
 		body, _ := json.Marshal(hubHello{Name: h.name, Hostname: h.name, Bots: h.botCount()})
 		out.Body = body
 	case "bots":
-		bots, _ := liveBots(h.in.db)
-		list := make([]hubBotInfo, 0, len(bots))
-		for i := range bots {
-			b := &bots[i]
-			info := hubBotInfo{ID: b.ID, Name: b.Name, Role: b.Role, Status: b.Status, Engine: botEngine(b)}
-			var last Turn
-			if err := h.in.db.Where("bot_id = ?", b.ID).Order("id DESC").First(&last).Error; err == nil {
-				info.Last = last.CreatedAt.UTC().Format(time.RFC3339)
-			}
-			list = append(list, info)
-		}
-		body, _ := json.Marshal(list)
-		out.Body = body
+		h.rpcBots(false, &out)
+	case "archived":
+		h.rpcBots(true, &out)
 	case "history":
-		var p struct {
-			BotID int64 `json:"bot_id"`
-			Limit int   `json:"limit"`
-		}
-		_ = json.Unmarshal(rpc.Params, &p)
-		if p.Limit <= 0 || p.Limit > 100 {
-			p.Limit = 40
-		}
-		var turns []Turn
-		h.in.db.Where("bot_id = ?", p.BotID).Order("id DESC").Limit(p.Limit).Find(&turns)
-		list := make([]hubTurnInfo, 0, len(turns))
-		for i := len(turns) - 1; i >= 0; i-- {
-			t := turns[i]
-			list = append(list, hubTurnInfo{
-				ID: t.ID, Source: t.Source, Input: t.Input, Output: t.Output,
-				Status: t.Status, At: t.CreatedAt.UTC().Format(time.RFC3339),
-			})
-		}
-		body, _ := json.Marshal(list)
-		out.Body = body
+		h.rpcHistory(rpc.Params, &out)
 	case "send":
-		var p struct {
-			BotID int64  `json:"bot_id"`
-			Text  string `json:"text"`
-		}
-		_ = json.Unmarshal(rpc.Params, &p)
-		p.Text = strings.TrimSpace(p.Text)
-		if p.Text == "" {
-			out.OK, out.Error = false, "empty message"
-			return out
-		}
-		b, err := botByID(h.in.db, p.BotID)
-		if err != nil {
-			out.OK, out.Error = false, "unknown bot"
-			return out
-		}
-		if _, err := h.in.runner.Enqueue(b.ID, sourceUser, p.Text, 0); err != nil {
-			out.OK, out.Error = false, err.Error()
-			return out
-		}
-		body, _ := json.Marshal(map[string]any{"queued": true, "bot": b.Name})
-		out.Body = body
+		h.rpcSend(rpc.Params, &out)
+	case "archive":
+		h.rpcArchive(rpc.Params, &out)
+	case "unarchive":
+		h.rpcUnarchive(rpc.Params, &out)
+	case "rename":
+		h.rpcRename(rpc.Params, &out)
 	default:
 		out.OK, out.Error = false, "unknown method"
 	}
 	return out
+}
+
+func (h *hubClient) rpcBots(archived bool, out *hubRPC) {
+	var bots []Bot
+	var err error
+	if archived {
+		bots, err = archivedBots(h.in.db)
+	} else {
+		bots, err = liveBots(h.in.db)
+	}
+	if err != nil {
+		out.OK, out.Error = false, err.Error()
+		return
+	}
+	list := make([]hubBotInfo, 0, len(bots))
+	for i := range bots {
+		list = append(list, fillBotInfo(h.in.db, &bots[i]))
+	}
+	if !archived {
+		sort.SliceStable(list, func(i, j int) bool { return list[i].Last > list[j].Last })
+	}
+	out.Body, _ = json.Marshal(list)
+}
+
+func fillBotInfo(db *gorm.DB, b *Bot) hubBotInfo {
+	info := hubBotInfo{ID: b.ID, Name: b.Name, Role: b.Role, Status: b.Status, Engine: botEngine(b), Archived: b.ArchivedAt != nil}
+	var last Turn
+	if err := db.Where("bot_id = ?", b.ID).Order("id DESC").First(&last).Error; err == nil {
+		info.Last = last.CreatedAt.UTC().Format(time.RFC3339)
+		preview := strings.TrimSpace(last.Output)
+		if preview == "" {
+			preview = strings.TrimSpace(last.Input)
+		}
+		info.LastText = truncate(preview, 80)
+	}
+	return info
+}
+
+func (h *hubClient) rpcHistory(params json.RawMessage, out *hubRPC) {
+	var p struct {
+		BotID int64 `json:"bot_id"`
+		Limit int   `json:"limit"`
+	}
+	_ = json.Unmarshal(params, &p)
+	if p.Limit <= 0 || p.Limit > 100 {
+		p.Limit = 40
+	}
+	var turns []Turn
+	h.in.db.Where("bot_id = ?", p.BotID).Order("id DESC").Limit(p.Limit).Find(&turns)
+	list := make([]hubTurnInfo, 0, len(turns))
+	for i := len(turns) - 1; i >= 0; i-- {
+		t := turns[i]
+		list = append(list, hubTurnInfo{
+			ID: t.ID, Source: t.Source, Input: t.Input, Output: t.Output,
+			Status: t.Status, At: t.CreatedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	out.Body, _ = json.Marshal(list)
+}
+
+func (h *hubClient) rpcSend(params json.RawMessage, out *hubRPC) {
+	var p struct {
+		BotID int64  `json:"bot_id"`
+		Text  string `json:"text"`
+		Image *struct {
+			MIME string `json:"mime"`
+			Name string `json:"name"`
+			Data string `json:"data"`
+		} `json:"image"`
+	}
+	_ = json.Unmarshal(params, &p)
+	p.Text = strings.TrimSpace(p.Text)
+	b, err := botByID(h.in.db, p.BotID)
+	if err != nil || b.ArchivedAt != nil {
+		out.OK, out.Error = false, "unknown bot"
+		return
+	}
+	if p.Image != nil && strings.TrimSpace(p.Image.Data) != "" {
+		data, err := decodeHubBytes(p.Image.Data)
+		if err != nil || len(data) == 0 {
+			out.OK, out.Error = false, "bad image"
+			return
+		}
+		if len(data) > hubImageMaxBytes {
+			out.OK, out.Error = false, "image too large"
+			return
+		}
+		ext := imageExt(p.Image.MIME, p.Image.Name)
+		if ext == "" {
+			out.OK, out.Error = false, "unsupported image type"
+			return
+		}
+		name := p.Image.Name
+		if filepath.Ext(name) == "" {
+			name = "photo" + ext
+		}
+		if err := h.in.ingestOwnerBytes(b, data, name, p.Text); err != nil {
+			out.OK, out.Error = false, err.Error()
+			return
+		}
+		out.Body, _ = json.Marshal(map[string]any{"queued": true, "bot": b.Name, "image": true})
+		return
+	}
+	if p.Text == "" {
+		out.OK, out.Error = false, "empty message"
+		return
+	}
+	if _, err := h.in.runner.Enqueue(b.ID, sourceUser, p.Text, 0); err != nil {
+		out.OK, out.Error = false, err.Error()
+		return
+	}
+	out.Body, _ = json.Marshal(map[string]any{"queued": true, "bot": b.Name})
+}
+
+func (h *hubClient) rpcArchive(params json.RawMessage, out *hubRPC) {
+	var p struct {
+		BotID int64 `json:"bot_id"`
+	}
+	_ = json.Unmarshal(params, &p)
+	b, err := botByID(h.in.db, p.BotID)
+	if err != nil || b.ArchivedAt != nil {
+		out.OK, out.Error = false, "unknown bot"
+		return
+	}
+	if err := archiveBotRow(h.in.db, b.ID); err != nil {
+		out.OK, out.Error = false, err.Error()
+		return
+	}
+	cfg := h.in.config()
+	if cfg != nil && cfg.BotToken != "" && cfg.GroupID != 0 {
+		if _, err := sendMessageHTMLGetIDSilent(cfg, cfg.GroupID, b.TopicID,
+			"📦 Session <b>"+htmlEscape(b.Name)+"</b> archived from the phone."); err != nil {
+			hookLog("hub archive note %d: %v", b.ID, err)
+		}
+		if err := closeForumTopic(cfg, b.TopicID); err != nil {
+			hookLog("hub close topic %d: %v", b.TopicID, err)
+		}
+	}
+	out.Body, _ = json.Marshal(map[string]any{"archived": true, "bot": b.Name})
+}
+
+func (h *hubClient) rpcUnarchive(params json.RawMessage, out *hubRPC) {
+	var p struct {
+		BotID int64 `json:"bot_id"`
+	}
+	_ = json.Unmarshal(params, &p)
+	b, err := botByID(h.in.db, p.BotID)
+	if err != nil || b.ArchivedAt == nil {
+		out.OK, out.Error = false, "unknown bot"
+		return
+	}
+	if err := unarchiveBotRow(h.in.db, b.ID); err != nil {
+		out.OK, out.Error = false, err.Error()
+		return
+	}
+	cfg := h.in.config()
+	if err := reopenForumTopic(cfg, b.TopicID); err != nil {
+		hookLog("hub reopen topic %d: %v", b.TopicID, err)
+	}
+	out.Body, _ = json.Marshal(map[string]any{"archived": false, "bot": b.Name})
+}
+
+func (h *hubClient) rpcRename(params json.RawMessage, out *hubRPC) {
+	var p struct {
+		BotID int64  `json:"bot_id"`
+		Name  string `json:"name"`
+	}
+	_ = json.Unmarshal(params, &p)
+	b, err := botByID(h.in.db, p.BotID)
+	if err != nil || b.ArchivedAt != nil {
+		out.OK, out.Error = false, "unknown bot"
+		return
+	}
+	name, err := validateBotName(h.in.db, b.ID, p.Name)
+	if err != nil {
+		out.OK, out.Error = false, err.Error()
+		return
+	}
+	old := b.Name
+	if name != old {
+		if err := renameBot(h.in.db, h.in.config(), b, name); err != nil {
+			out.OK, out.Error = false, err.Error()
+			return
+		}
+	}
+	if err := editForumTopic(h.in.config(), b.TopicID, name, ""); err != nil {
+		hookLog("hub rename topic %d: %v", b.TopicID, err)
+	}
+	out.Body, _ = json.Marshal(map[string]any{"name": name, "old": old})
+}
+
+func decodeHubBytes(s string) ([]byte, error) {
+	s = strings.TrimSpace(s)
+	if b, err := base64.RawURLEncoding.DecodeString(s); err == nil && len(b) > 0 {
+		return b, nil
+	}
+	return base64.StdEncoding.DecodeString(s)
+}
+
+func imageExt(mime, name string) string {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".jpg", ".jpeg", ".png", ".webp", ".gif":
+		return strings.ToLower(filepath.Ext(name))
+	}
+	switch strings.ToLower(strings.TrimSpace(mime)) {
+	case "image/jpeg", "image/jpg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/webp":
+		return ".webp"
+	case "image/gif":
+		return ".gif"
+	default:
+		return ""
+	}
 }
 
 // HubPairCode is a one-time pairing offer `ccc pair` writes; listen advertises
@@ -336,4 +513,3 @@ type HubPairCode struct {
 	Code      string    `gorm:"primaryKey"`
 	ExpiresAt time.Time `gorm:"index"`
 }
-

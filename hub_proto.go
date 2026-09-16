@@ -72,19 +72,25 @@ type hubRPC struct {
 	ID     string          `json:"id,omitempty"`
 	Method string          `json:"method,omitempty"`
 	Params json.RawMessage `json:"params,omitempty"`
-	OK     bool            `json:"ok,omitempty"`
+	OK     bool            `json:"ok"`
 	Error  string          `json:"error,omitempty"`
 	Body   json.RawMessage `json:"body,omitempty"`
 }
 
 type hubBotInfo struct {
-	ID     int64  `json:"id"`
-	Name   string `json:"name"`
-	Role   string `json:"role"`
-	Status string `json:"status"`
-	Engine string `json:"engine"`
-	Last   string `json:"last,omitempty"`
+	ID       int64  `json:"id"`
+	Name     string `json:"name"`
+	Role     string `json:"role"`
+	Status   string `json:"status"`
+	Engine   string `json:"engine"`
+	Last     string `json:"last,omitempty"`
+	LastText string `json:"last_text,omitempty"`
+	Archived bool   `json:"archived,omitempty"`
 }
+
+// hubImageMaxBytes is the decoded image cap on a hub `send`. The public hub
+// websocket is 1 MiB; a 512 KiB JPEG plus JSON/NaCl/base64 still fits.
+const hubImageMaxBytes = 512 * 1024
 
 type hubTurnInfo struct {
 	ID     int64  `json:"id"`

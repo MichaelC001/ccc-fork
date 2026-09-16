@@ -758,6 +758,25 @@ func sendMessageKeyboardGetID(config *Config, chatID int64, threadID int64, text
 	return msg.MessageID, nil
 }
 
+// reopenForumTopic reopens a closed forum topic. TOPIC_NOT_MODIFIED means it
+// was already open, which is success for unarchive.
+func reopenForumTopic(config *Config, topicID int64) error {
+	if config == nil || config.BotToken == "" || config.GroupID == 0 || topicID == 0 {
+		return nil
+	}
+	params := url.Values{}
+	params.Set("chat_id", fmt.Sprintf("%d", config.GroupID))
+	params.Set("message_thread_id", fmt.Sprintf("%d", topicID))
+	resp, err := telegramAPI(config, "reopenForumTopic", params)
+	if err != nil {
+		return err
+	}
+	if !resp.OK && !strings.Contains(resp.Description, "TOPIC_NOT_MODIFIED") {
+		return fmt.Errorf("reopenForumTopic: %s", resp.Description)
+	}
+	return nil
+}
+
 // closeForumTopic closes a topic without deleting it, which is what archiving a
 // bot does: the conversation stays readable, but nothing new lands in it.
 func closeForumTopic(config *Config, topicID int64) error {
