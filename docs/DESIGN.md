@@ -21,8 +21,9 @@ session. Closing the topic retires it. No role, no `/role`, no ceremony.
 
 Non-goals (explicitly dropped from v2): Claude Code background agents, the
 agents view, `claude attach` handoff, transcript scraping, the AskUserQuestion
-PreToolUse hook hack. Bots cannot create other bots (`spawn_bot` was removed
-on purpose). One ccc instance never talks to more than one Telegram bot.
+PreToolUse hook hack. Sessions cannot create other sessions (`spawn_bot` was
+removed on purpose). One ccc instance never talks to more than one Telegram
+bot.
 
 ## 2. Runtime model
 
@@ -31,9 +32,9 @@ on purpose). One ccc instance never talks to more than one Telegram bot.
 | **Instance** | One `ccc listen` process on one machine, bound to one Telegram bot token and one forum group. Instance-level config: model, env passthrough, default profile, data dir. |
 | **Profile** | One account for one engine (see `profiles.go`). Claude = one `CLAUDE_CONFIG_DIR`. Grok = isolated `GROK_HOME`. Antigravity = isolated HOME/`GEMINI_HOME`. Codex = isolated `CODEX_HOME`. Engine is set when the account is added. Same-engine accounts are interchangeable at turn granularity (§4). One instance may mix engines. |
 | **Session** (`bots` table) | One forum topic. Identity = `name` + an **engine** derived from the default account (or `default_engine`) + an optional **model** override. Turns pick a healthy account of that engine. `/engine` is a secondary pool assignment. `/model` in the topic overrides that session. Claude sessions share MCP tools. Grok/Antigravity/Codex sessions spawn that CLI and do not get ccc MCP. Optional per-session `cwd` (default: `<data_dir>/bots/<name>/workspace`). Role is unused leftover. Closing the topic archives the row. |
-| **Session** | The Claude Code conversation behind a bot: a UUID ccc mints and resumes. A bot has exactly one live session; `/new` rotates it. After `idle_compact_s` (default 1h) of no finished turn, ccc rotates it automatically — memories stay, the transcript does not. |
-| **Turn** | One `claude -p` process: input = one user/bot/system/background message (plus context envelope), output = streamed events until `result`. At most one turn per bot at a time; further inputs queue (FIFO) and are delivered together on the next turn. A background job is **not** a turn: it must not hold `turns.status=running`. |
-| **Background job** | A long-running shell command owned by a bot, started with `run_background`. It runs in the bot's cwd with `env_passthrough` while the topic stays responsive. Completion enqueues a `source=background` turn. |
+| **Conversation** | The engine transcript behind a session: a UUID ccc mints and resumes. A session has exactly one live conversation; `/new` rotates it. After `idle_compact_s` (default 1h) of no finished turn, ccc rotates it automatically — memories stay, the transcript does not. |
+| **Turn** | One `claude -p` process: input = one user/system/background message (plus context envelope), output = streamed events until `result`. At most one turn per session at a time; further inputs queue (FIFO) and are delivered together on the next turn. A background job is **not** a turn: it must not hold `turns.status=running`. |
+| **Background job** | A long-running shell command owned by a session, started with `run_background`. It runs in the session's cwd with `env_passthrough` while the topic stays responsive. Completion enqueues a `source=background` turn. |
 
 ## 3. Turn lifecycle
 
@@ -102,14 +103,14 @@ payloads are never dumped into the topic; `thinking` is never shown.
 
 - Persist `turns` row: profile used, duration, cost/usage from `result`,
   `stop_reason`, session id.
-- Deliver any `send_to_bot` messages produced during the turn (they were
-  written to `inbox` synchronously by the MCP tool; delivery = enqueue a turn
-  on the target bot if `wake=true`, labelled with the sender). `wake=false`
-  rows are not delivered as turns: they are summarized in the next envelope.
-- If the turn ended with `ask_owner` pending, the bot is marked `waiting` and
-  no queued inputs are delivered until the answer arrives (answers are inputs).
-- If `update_instructions` changed the role during the turn, rotate the session
-  now that the turn has recorded its id (§14.2).
+- If the turn ended with `ask_owner` pending, the session is marked `waiting`
+  and no queued inputs are delivered until the answer arrives (answers are
+  inputs).
+- If `set_name` changed the session name during the turn, rotate the
+  conversation now that the turn has recorded its id (§14.14).
+- Leftover `inbox` rows (from the old inter-session `send_to_bot` path) are
+  still delivered if any exist; that tool is not registered and is not a
+  product feature.
 
 ### 3.4 Failure classification and failover
 
@@ -225,9 +226,10 @@ refreshed daily, §14.16) and puts the allowed emoji into the `set_name` and
 exists. An emoji outside the set leaves the icon untouched and the tool result
 says which emoji were available.
 
-Bots cannot create other bots. Only the owner creates bots (plain text in
-General, or `/bot`). Long parallel work stays in the same topic via
-`run_background`. `archive_bot` remains so a bot can retire itself.
+Sessions cannot create other sessions. Only the owner starts a session
+(plain text in General, or `/session`). Long parallel work stays in the same
+topic via `run_background`. `archive_bot` remains so a session can retire
+itself.
 
 ## 7. Scheduler and watch engine
 
@@ -334,17 +336,17 @@ older than 90 days.
   (no role interview). `/session <name>` does the same explicitly. Sessions
   cannot create other sessions.
 - Telegram close / archive of a topic retires the session. Reopen continues it.
-- Photos/documents → saved into the bot's workspace `inbox/`, path passed in the
-  message. Voice → transcribed if the `voice` build is present, else the file
-  path is passed (keep the existing whisper integration).
+- Photos/documents → saved into the session's workspace `inbox/`, path passed
+  in the message. Voice → transcribed if the `voice` build is present, else
+  the file path is passed (keep the existing whisper integration).
 - `ask_owner` → inline buttons `q:<question_id>:<option_idx>`; tapping edits the
   message with ✓ and enqueues the answer. Free-text answers: replying to the
-  question message counts as the answer, and so does ANY text sent while the bot
-  is parked `waiting` (a reply-to takes priority when both apply, §14.3).
-- Bot→bot traffic is visible in both topics (`🤝`).
-- Renaming a topic in Telegram itself renames the bot: the `forum_topic_edited`
-  service message is validated like `/name` and, when it passes, `bots.name`
-  follows the title (§14.15).
+  question message counts as the answer, and so does ANY text sent while the
+  session is parked `waiting` (a reply-to takes priority when both apply,
+  §14.3).
+- Renaming a topic in Telegram itself renames the session: the
+  `forum_topic_edited` service message is validated like `/name` and, when it
+  passes, `bots.name` follows the title (§14.15).
 - An **edited** message is gated like any other update. If its text starts with
   `/` it goes through the same command dispatcher — editing a mistyped command
   in place is how a phone corrects one — deduped by
@@ -356,19 +358,18 @@ older than 90 days.
 | Command | Where | Effect |
 |---|---|---|
 | `/sessions` | anywhere | Table of open sessions. `/bots` is an alias. |
-| `/name [text] [emoji]` | topic | Show or set the bot's name: renames the forum topic, sets its icon and rotates the session (§14.14). |
-| `/new` | topic | Rotate the session (fresh conversation, memory kept). |
+| `/name [text] [emoji]` | topic | Show or set the session's name: renames the forum topic, sets its icon and rotates the conversation (§14.14). |
+| `/new` | topic | Rotate the conversation (fresh transcript, memory kept). |
 | `/stop` | topic | Kill the running turn (SIGTERM the `claude` process), drop the queue. |
-| `/cwd [path]` | topic | Show or set the bot's working dir. |
-| `/engine [name]` | topic | Secondary: assign this bot to an engine's account pool (`claude`, `grok`/`grok-build`, `antigravity`/`agy`). Rotates the session. Engine itself is set at `/account add`. New bots inherit the default account's engine, or `default_engine` if set. |
-| `/memory [query]` | topic | List/search memories visible to this bot; `/forget <scope> <key>`. |
+| `/cwd [path]` | topic | Show or set the session's working dir. |
+| `/engine [name]` | topic | Secondary: assign this session to an engine's account pool (`claude`, `grok`/`grok-build`, `antigravity`/`agy`). Rotates the conversation. Engine itself is set at `/account add`. New sessions inherit the default account's engine, or `default_engine` if set. |
+| `/memory [query]` | topic | List/search memories visible to this session; `/forget <scope> <key>`. |
 | `/memory stats` | topic | Per scope: entries, bytes, whether it is over the compaction threshold, last compaction (§7.1). |
 | `/memory restore <id>` | topic | Undo one compaction. Owner only. |
-| `/usage` | anywhere | Tokens, cache hit ratio, turns, average duration and cost per bot, today and last 7 days (§14.19). |
+| `/usage` | anywhere | Tokens, cache hit ratio, turns, average duration and cost per session, today and last 7 days (§14.19). |
 | `/watches`, `/schedules` | topic | List and cancel. |
-| `/bots` | anywhere | Table of bots, status, last activity. |
 | `/account` | anywhere | Status card per account (engine + health) with buttons; subcommands `status`, `add <identity> <engine>`, `login`, `remove`, `default`. |
-| `/model [engine] [slug]` | anywhere | Show/set models. In a bot topic, one slug overrides that bot. Two args (`/model grok grok-4`) set the instance default for that engine. `/model default` clears. |
+| `/model [engine] [slug]` | anywhere | Show/set models. In a session topic, one slug overrides that session. Two args (`/model grok grok-4`) set the instance default for that engine. `/model default` clears. |
 | `/access` | anywhere | Pairing/allowlist management (below). Owner only. |
 | `/watches`, `/schedules` | topic | List and cancel (also listed above). |
 | `/setgroup` | group | Bind the instance to this forum group. Owner only, and the headless alternative to `ccc setgroup`. |
@@ -376,7 +377,7 @@ older than 90 days.
 
 ### Account management from Telegram (login without a terminal)
 Engine is defined when the account is added (`/account add <identity> <engine>`),
-not by flipping `/engine` on a bot. Claude identities are the **email** of the
+not by flipping `/engine` on a session. Claude identities are the **email** of the
 Claude account; Grok, Antigravity and Codex accept a short name or email. The
 directory behind the account is never shown:
 
@@ -429,7 +430,7 @@ never by assuming a position.
 - Owner = the Telegram user id from bootstrap config; always allowed.
 - Unknown DM → 6-hex pairing code (1 h TTL, ≤3 pending, ≤2 replies per stranger
   and then silence); owner approves with `/access pair <code>` (or a button in
-  the owner's DM). Approved users may talk to bots in the group; only the owner
+  the owner's DM). Approved users may talk to sessions in the group; only the owner
   can use `/account`, `/access`, `/model` and `/setgroup`.
 - Every inbound update from a non-approved user is dropped silently after the
   pairing reply. Messages, EDITS and callback queries are gated the same way; an
@@ -439,8 +440,8 @@ never by assuming a position.
 
 ## 9. System prompt and context envelope
 
-**System prompt** (`--system-prompt`, rendered once per session; a change of
-role or template rotates the session):
+**System prompt** (`--system-prompt`, rendered once per conversation; a change
+of name or template rotates it):
 
 ```
 You are a coding assistant in a Telegram session named <name>.
@@ -462,7 +463,7 @@ project memories for cwd (if any)
 own session memories (top 10)
 pending inbox summary (N messages from X)
 </context>
-<message source="user|bot:<name>|watch:<name>|schedule|background">…</message>
+<message source="user|watch:<name>|schedule|background">…</message>
 ```
 
 Keep the envelope under ~4 KB; `recall` exists for everything else.
@@ -476,15 +477,14 @@ history is re-charged as fresh input. So the split above is not only about
 14.5's snapshot: it is what makes a resumed turn cheap.
 
 Audited and enforced (§14.20): the system prompt holds only facts fixed for the
-life of a session — name, role, hostname, cwd, the tool list — plus two lists
-that are SORTED before rendering (the other-bots roster, by name; the topic-icon
-emoji). A bot's live status was removed from the roster because it changes every
-turn; the date was never in the prompt. Everything per-turn (date, memories,
-inbox, onboarding) is in the envelope, which is the TAIL of the request: it
-costs only itself and invalidates nothing.
+life of a conversation — name, hostname, cwd, the tool list — plus the
+topic-icon emoji list, which is SORTED before rendering. There is no other-
+session roster and no role. The date was never in the prompt. Everything
+per-turn (date, memories, leftover inbox) is in the envelope, which is the
+TAIL of the request: it costs only itself and invalidates nothing.
 
 `/usage` reports the cache hit ratio (`cache_read / (cache_read + input)`) per
-bot, which is how a regression here is noticed: a resumed conversation that
+session, which is how a regression here is noticed: a resumed conversation that
 stops being mostly cache reads means something started varying the prefix.
 
 ## 10. Isolation from Claude Code defaults (implementer verifies each)
@@ -512,9 +512,10 @@ v3 instance and the first save rewrites it clean. Kept: `telegram.go`,
 
 ## 12. Security posture
 
-- Bots run with bypass permissions on the owner's machine: **the chat is the
-  trust boundary**. Access control (§8) is therefore mandatory, not optional.
-- Secrets reach bots only via `env_passthrough`; ccc never posts env values,
+- Sessions run with bypass permissions on the owner's machine: **the chat is
+  the trust boundary**. Access control (§8) is therefore mandatory, not
+  optional.
+- Secrets reach sessions only via `env_passthrough`; ccc never posts env values,
   tokens, or credential file contents to Telegram; `send_file` refuses paths
   under config dirs and `<data_dir>/profiles`.
 - Tool inputs and Telegram text are data. Pairing is never approved because a
@@ -523,17 +524,18 @@ v3 instance and the first save rewrites it clean. Kept: `telegram.go`,
 ## 13. Delivery plan
 
 - **2a — runner core**: SQLite/GORM schema, `runner.go` (§3), profile failover,
-  `ccc mcp` with `remember/recall/forget/list_bots/send_to_bot/notify_owner/
-  ask_owner/update_instructions/send_file`, Telegram conversation flow (§8
-  "Conversation" + `/role /new /stop /cwd /bots /memory /status`), envelope,
-  system prompt, progress rendering. E2E: two bots talking to each other via
-  `send_to_bot`, an `ask_owner` round trip, a failover forced by disabling a
-  profile.
+  `ccc mcp` with `remember/recall/forget/notify_owner/ask_owner/send_file`,
+  Telegram conversation flow (§8 "Conversation" + `/new /stop /cwd /sessions
+  /memory /status`), envelope, system prompt, progress rendering. E2E: an
+  `ask_owner` round trip, a failover forced by disabling a profile. (The
+  original 2a also shipped `list_bots` / `send_to_bot` / `update_instructions`
+  / `/role`; those are gone — a topic is a session, not a teammate.)
 - **2b — automation & accounts** (done): watches, schedules,
   `archive_bot`, project registry, doctor loop, `/account …` with PTY
   login and disclaimer, `/access` pairing, `/model`, `/setgroup`, headless
   bootstrap (`ccc config set`, systemd user unit, `make build-linux`), legacy
   removal (§11), README rewrite. `spawn_bot` was later removed (14.24).
+  Inter-session messaging and roles were dropped after 2b (14.17).
 
 Each phase: `go build && go vet && go test && gox check` green, conventional
 commits, no push until Jairo says so.
@@ -561,11 +563,12 @@ Only the empty value loads no `CLAUDE.md` at all, so `user` would leak the
 owner's personal memory into every bot. Auth is unaffected. `--disable-slash-
 commands` was added alongside it so no installed skill can steer a bot.
 
-**14.2 `update_instructions` rotates the session AFTER the turn.** A role change
-cannot take effect mid-conversation (the system prompt is recorded per
-conversation, 14.5), and rotating during the turn would lose the session id the
-turn is about to write. The runner compares the role before and after and
-clears `session_id` once the turn has been persisted.
+**14.2 Role tools are gone; `set_name` still rotates AFTER the turn.** A
+rename cannot take effect mid-conversation (the system prompt is recorded
+per conversation, 14.5), and rotating during the turn would lose the
+conversation id the turn is about to write. The runner compares the name
+before and after and clears `session_id` once the turn has been persisted.
+`update_instructions` / `/role` are not registered.
 
 **14.3 Any text to a `waiting` bot counts as the answer.** §8 only specified
 "replying to the question message". In practice people answer without using
@@ -581,8 +584,8 @@ it is — including the reverse link for the implicit `~/.claude` profile.
 `--system-prompt-snapshot off` does not change that.** Verified: a resumed
 session whose launch passed a DIFFERENT `--system-prompt` still answered with
 the original prompt's secret word, with the flag explicitly set to `off`. This
-is what makes §9's envelope load-bearing and what makes `/role` rotate the
-session.
+is what makes §9's envelope load-bearing and what makes `/name` rotate the
+conversation.
 
 **14.6 `WorkingAgents` comes from `turns.status = running`.** §4 inherited the
 v2 idea of counting "working background agents" from the fleet view. v3 has no
@@ -612,20 +615,20 @@ the option ORDER, the driver reads the numbered list off the screen and answers
 with the number beside the label it wants, and success is always verified
 against real state (`claude auth status --json`, `bypassAccepted`).
 
-**14.10 A waking inbox message becomes a turn.** §3.3 says delivery "= enqueue a
-turn on the target bot"; Phase 2a only kicked the target's queue, which had
-nothing in it, so `send_to_bot` never actually reached anybody. Phase 2b creates
-the queued turn, labelled with the sender. This is what makes bot-to-bot
-handoffs (including a child's report back, when the owner created both) work.
+**14.10 Leftover inbox delivery still enqueues a turn.** The old
+inter-session `send_to_bot` path wrote `inbox` rows and Phase 2a only
+kicked the target's queue, which had nothing in it. Phase 2b creates the
+queued turn, labelled with the sender. That machinery is still in the
+database; the tool is not registered and sessions are not a crew.
 
 **14.11 A watch's first run is a baseline.** §7 did not say what happens on the
 very first run, when `last_hash` is empty. Treating that as a change would wake
 the bot for "the watch exists", so the first run records the hash silently.
 Changing a watch's command resets the baseline for the same reason.
 
-**14.12 `/model` does not rotate sessions.** Unlike `/role`, `--model` is passed
-on every turn including resumes, so a model change takes effect immediately and
-there is nothing to rotate.
+**14.12 `/model` does not rotate conversations.** Unlike `/name`, `--model` is
+passed on every turn including resumes, so a model change takes effect
+immediately and there is nothing to rotate.
 
 **14.13 Headless bootstrap.** §8 assumed `ccc setup`'s interactive Telegram
 loop. A VM has no terminal to run it in, so `ccc config set <key> <value>` sets
@@ -633,25 +636,25 @@ every bootstrap key non-interactively and `/setgroup` binds the forum group from
 Telegram. `ccc install` writes a systemd **user** unit whose only `Environment=`
 lines are the `env_passthrough` names that are actually set.
 
-**14.14 Renaming rotates the session, like `/role`.** The bot's name is in the
-system prompt (`You are <name>, …`, §9), and the system prompt is recorded per
-conversation (14.5), so a rename would otherwise leave the model answering to
-its old name until the next compaction. `/name`, `set_name` and the topic-title
-sync therefore all clear `session_id` — memories are kept, exactly like `/role`,
-and the confirmation message says so. A `set_name` call made DURING a turn is
-rotated by the same post-turn check as `update_instructions` (14.2), which also
-repairs the id a fresh session wrote back after the tool cleared it. The OTHER
-bots keep their sessions: their system prompt roster goes stale, which is what
-`list_bots` is for, and `send_to_bot` resolves names against the live table.
+**14.14 Renaming rotates the conversation.** The session name is in the
+system prompt (`You are a coding assistant in a Telegram session named
+<name>`, §9), and the system prompt is recorded per conversation (14.5), so
+a rename would otherwise leave the model answering under the old title
+until the next compaction. `/name`, `set_name` and the topic-title sync
+therefore all clear `session_id` — memories are kept — and the confirmation
+message says so. A `set_name` call made DURING a turn is rotated by the
+same post-turn check (14.2), which also repairs the id a fresh conversation
+wrote back after the tool cleared it. Other open sessions are unaffected:
+there is no roster in their prompts.
 
 **14.15 The topic title and `bots.name` are kept in sync in both directions.**
-The name is unique and addressable (`send_to_bot`, `list_bots`), so
-it cannot be a free-text label; the topic title is the same string to the person
-reading the chat. `/name` and `set_name` rename the topic; a rename made in
-Telegram arrives as a `forum_topic_edited` service message and renames the bot.
-A title that fails validation (taken, empty, too long) is NOT renamed back —
-that would fight the person renaming it, and could loop — the old name is kept
-and the topic is told why.
+The name is unique (it is the forum topic title the owner reads), so it
+cannot be a free-text label that collides. `/name` and `set_name` rename
+the topic; a rename made in Telegram arrives as a `forum_topic_edited`
+service message and renames the session. A title that fails validation
+(taken, empty, too long) is NOT renamed back — that would fight the person
+renaming it, and could loop — the old name is kept and the topic is told
+why.
 
 **14.16 Topic icons come from a cached sticker set.** Forum topics cannot take
 an arbitrary emoji: `editForumTopic` wants an `icon_custom_emoji_id` from
@@ -698,17 +701,16 @@ was spent.
 Claude Code snapshots the system prompt per conversation. The prompt cache adds
 a second, sharper reason to keep it identical from turn to turn: it keys on a
 prefix of the request, so one differing byte re-charges the whole conversation
-as fresh input. The audit found two things that could move — the roster carried
-each bot's live status, and the icon list came back from Telegram in whatever
-order it liked. The status is gone (`list_bots` is where live status belongs)
-and both lists are sorted before rendering. The date was already in the
-envelope, and stays there. §9.1 has the rule.
+as fresh input. The audit found two things that could move — a leftover
+roster that carried each session's live status, and the icon list that came
+back from Telegram in whatever order it liked. The roster is gone (a topic
+is a session, not a teammate) and the icon list is sorted before rendering.
+The date was already in the envelope, and stays there. §9.1 has the rule.
 
-**14.21 `send_to_bot(wake=true)` is now taught as the expensive option.** Every
-waking message starts a turn on the recipient (14.10), so the system prompt
-tells bots to use `wake=false` for anything the other bot only needs to know and
-`wake=true` only when it must act now, and to say everything they have in ONE
-message rather than several.
+**14.21 Inter-session messaging is not a product feature.** The old
+`send_to_bot(wake=true)` path started a turn on another topic (14.10). The
+tool is not registered; the system prompt does not teach sessions to page
+each other. Leftover `inbox` delivery still works if a row exists.
 
 **14.22 The service reads its secrets from a 0600 file, not from the unit.**
 `ccc install` used to bake `Environment="NAME=value"` lines for every
@@ -745,14 +747,14 @@ process, no menu to answer. It runs at the end of `/account add` and
 which genuinely needs a terminal, is unchanged. 14.9 is now history: only the
 login strings are still matched against the TUI.
 
-**14.24 `spawn_bot` was removed.** Bots must not create other bots. Only the
-owner creates bots (plain text in General, or `/bot`). Long parallel work
-uses `run_background` in the same topic — a detached shell job the listen
-supervisor starts, reattaches across `ccc listen` / LaunchAgent restarts,
-and wakes with `source=background` when it finishes. That is
-closer to Grok Bot's background Task than to Claude Code background agents
-(which stay a non-goal: no transcript scraping, no `claude attach`).
-`archive_bot` stays so a bot can retire itself.
+**14.24 `spawn_bot` was removed.** Sessions must not create other sessions.
+Only the owner starts a session (plain text in General, or `/session`). Long
+parallel work uses `run_background` in the same topic — a detached shell
+job the listen supervisor starts, reattaches across `ccc listen` /
+LaunchAgent restarts, and wakes with `source=background` when it finishes.
+That is closer to Grok Bot's background Task than to Claude Code background
+agents (which stay a non-goal: no transcript scraping, no `claude attach`).
+`archive_bot` stays so a session can retire itself.
 
 **14.25 Progress is silent; the final answer notifies.** Telegram does not
 send a notification for `editMessageText`, so editing the "⏳ working"
@@ -791,8 +793,7 @@ Telegram. `/cancel` (including `/cancel@bot`) aborts the wait. Turns via
 `codex exec --json` with
 `--sandbox danger-full-access` and `--dangerously-bypass-approvals-and-sandbox`.
 The CLI mints a `thread_id` (like agy's `conversation_id`); later turns
-`codex exec resume <id>`. No ccc MCP; teammates are `ccc tell`. Verified
-against Codex CLI 0.133.0.
+`codex exec resume <id>`. No ccc MCP. Verified against Codex CLI 0.133.0.
 
 **14.29 Idle sessions rotate, and watches expire.** A day of CCC-only work on
 the work VM showed the expensive pattern: a bot's conversation grows to

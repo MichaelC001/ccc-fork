@@ -204,7 +204,7 @@ Add more accounts the same way. Mix engines in one instance:
 /account add lab agy
 ```
 
-Turns pick a healthy account whose engine matches the bot. Failover stays
+Turns pick a healthy account whose engine matches the session. Failover stays
 Claude↔Claude or Grok↔Grok — ccc does not jump Claude→Grok mid-conversation.
 
 ### 7. Start your first session
@@ -235,7 +235,7 @@ topic ends the session; opening it again continues it.
 | A reply to a question | Answers it. Any text while a session is waiting counts as the answer too. |
 
 While a turn runs, one progress message in the topic is edited in place with
-what the bot is doing (no Telegram notification). The answer is posted when
+what the session is doing (no Telegram notification). The answer is posted when
 the turn finishes — that is the ping you get — and your message gets a ✅.
 
 ### Commands
@@ -262,7 +262,7 @@ the turn finishes — that is the ping you get — and your message gets a ✅.
 |---|---|
 | `/sessions` | Every open session, its status and when it last ran. (`/bots` still works.) |
 | `/status` | Queue, running turns, accounts, watches, schedules, passthrough secrets (names only) and doctor findings. |
-| `/usage` | Tokens in/out, cache hit ratio, turns, average duration and cost — per bot and in total, for today and the last 7 days. |
+| `/usage` | Tokens in/out, cache hit ratio, turns, average duration and cost — per session and in total, for today and the last 7 days. |
 
 **Owner only**
 
@@ -270,9 +270,9 @@ the turn finishes — that is the ping you get — and your message gets a ✅.
 |---|---|
 | `/account` | Status card per account (engine + health), with buttons. |
 | `/account add <identity> <engine>` | Register an account for that engine and start its login. |
-| `/account login\|remove\|default <identity> [engine]` | Relogin, remove, or make default (new bots inherit that account's engine). If the same email exists on several engines, pass `email/codex` or `email codex`. |
+| `/account login\|remove\|default <identity> [engine]` | Relogin, remove, or make default (new sessions inherit that account's engine). If the same email exists on several engines, pass `email/codex` or `email codex`. |
 | `/access` | Who may talk to ccc (see below). |
-| `/model [name]` | Show or set the model every bot runs on. `/model default` clears it. |
+| `/model [name]` | Show or set the model every session runs on. `/model default` clears it. |
 | `/setgroup` | Bind ccc to the forum group the command was sent in. |
 
 ### What a session can do for itself
@@ -356,7 +356,7 @@ defaults are meant to be right, and `ccc config` prints what is in force.
 | `compaction_model` | `haiku` | The cheap model the memory compaction runs on. An unknown name falls back to the instance model. |
 | `maintenance_hour` | 4 | Local hour the daily job runs at. A machine that was off catches up when it wakes. |
 | `idle_compact_s` | 3600 | Seconds a conversation may sit unused before it is rotated (`/new`). 0 disables. |
-| `watch_ttl_s` | 14400 | Seconds a watch lives before it is cancelled and the bot is woken. 0 disables. Routines do not expire. |
+| `watch_ttl_s` | 14400 | Seconds a watch lives before it is cancelled and the session is woken. 0 disables. Routines do not expire. |
 
 ```bash
 ccc config                              # every key, with the defaults in force
@@ -560,7 +560,7 @@ ccc doctor [--fix]            Check dependencies and configuration; --fix record
                               the bypass disclaimer for accounts missing it
 ccc profile <cmd>             Manage accounts from a shell
                               (list/add/remove/default/login/accept-disclaimer)
-ccc send <file>               Send a file into the topic of the bot owning this directory
+ccc send <file>               Send a file into the topic of the session owning this directory
 ccc relay [port]              Relay server for files over 50 MB
 ccc pair                      Print a URI to add this machine to the CCC phone app
 ccc unpair                    List or revoke paired devices

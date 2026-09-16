@@ -127,7 +127,7 @@ func renderSystemdUnit(binary string, config *Config) string {
 		env.WriteString("EnvironmentFile=-%h/.config/ccc/env\n")
 	}
 	return fmt.Sprintf(`[Unit]
-Description=ccc - Crew Command Center: a team of bots in one Telegram forum group
+Description=ccc — sessions in Telegram
 After=network-online.target
 Wants=network-online.target
 
