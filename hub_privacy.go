@@ -25,7 +25,7 @@ const hubPrivacyHTML = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Privacy — CCC</title>
+<title>Privacy — ccc</title>
 <style>
   :root { color-scheme: light dark; }
   body { font: 16px/1.5 ui-sans-serif, system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1.25rem 4rem; }
@@ -37,10 +37,10 @@ const hubPrivacyHTML = `<!DOCTYPE html>
 </style>
 </head>
 <body>
-<h1>Privacy policy — CCC</h1>
-<p class="meta">Last updated: 2026-09-15 · Phone app: <a href="https://github.com/kidandcat/ccc-app">ccc-app</a> · Server: <a href="https://github.com/kidandcat/ccc">ccc</a></p>
+<h1>Privacy policy — ccc</h1>
+<p class="meta">Last updated: 2026-09-16 · Phone app: <a href="https://github.com/kidandcat/ccc-app">ccc-app</a> · Server: <a href="https://github.com/kidandcat/ccc">ccc</a></p>
 
-<p>CCC (Crew Command Center) is an open-source phone client for <em>your</em> <code>ccc listen</code> instance. There is no CCC user account.</p>
+<p>ccc is an open-source phone client for <em>your</em> <code>ccc listen</code> instance. There is no ccc user account.</p>
 
 <h2>What the app stores on the device</h2>
 <ul>
