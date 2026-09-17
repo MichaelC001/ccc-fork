@@ -384,6 +384,39 @@ func TestResolveModelPrecedence(t *testing.T) {
 	}
 }
 
+func TestProfileEffectiveModelUsesCLIWhenUnset(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"model":"fable[1m]"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := Profile{Name: "you@example.com", Engine: engineClaude, ConfigDir: dir}
+	if got := profileEffectiveModel(&Config{}, p); got != "fable[1m]" {
+		t.Errorf("cli stored = %q, want fable[1m]", got)
+	}
+	cfg := &Config{Models: map[string]string{engineClaude: "opus"}}
+	if got := profileEffectiveModel(cfg, p); got != "opus" {
+		t.Errorf("ccc override = %q, want opus", got)
+	}
+	grok := Profile{Name: "me/grok", Engine: engineGrok, ConfigDir: t.TempDir()}
+	if got := profileEffectiveModel(&Config{}, grok); got != "" {
+		t.Errorf("unset grok must stay empty, got %q", got)
+	}
+}
+
+func TestGrokCachedModelIDs(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "models_cache.json"), []byte(`{"models":{"grok-4.6":{},"grok-4.5":{}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := grokCachedModelIDs(Profile{Engine: engineGrok, ConfigDir: dir})
+	if len(got) != 2 || got[0] != "grok-4.5" || got[1] != "grok-4.6" {
+		t.Errorf("got %v, want sorted grok-4.5, grok-4.6", got)
+	}
+	if got := grokCachedModelIDs(Profile{Engine: engineGrok, ConfigDir: t.TempDir()}); len(got) != 0 {
+		t.Errorf("missing cache = %v", got)
+	}
+}
+
 func TestCodexTurnArgsMintAndResume(t *testing.T) {
 	first := strings.Join(codexTurnArgs("gpt-5.4", "", "do the thing", false), " ")
 	for _, want := range []string{

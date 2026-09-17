@@ -396,7 +396,7 @@ func setBotCommandsV3(botToken string) {
 		{"command": "usage", "description": "Tokens, cache hit ratio and cost per session"},
 		{"command": "account", "description": "Accounts by engine (owner only)"},
 		{"command": "access", "description": "Who may talk to ccc (owner only)"},
-		{"command": "model", "description": "Show or set the model (owner only)"},
+		{"command": "model", "description": "Each account's model, or set one (owner only)"},
 		{"command": "cancel", "description": "Cancel an in-progress account login"},
 		{"command": "secret", "description": "Owner vault: /secret add <name> | list | delete <name>"},
 	}
@@ -566,6 +566,11 @@ func (in *instance) handleCallback(cb *CallbackQuery) {
 	case "account":
 		if role == roleOwner {
 			in.handleAccountCallback(cb, parts)
+		}
+		return
+	case "model":
+		if role == roleOwner {
+			in.handleModelCallback(cb, parts)
 		}
 		return
 	}
@@ -1216,7 +1221,7 @@ func (in *instance) handleEngineCommand(msg *TelegramMessage, b *Bot, rest strin
 // handleModelCommand sets a model without rotating the session: --model is
 // passed on every turn, including resumes.
 //
-//	/model                         show instance defaults
+//	/model                         each account and the model it is on (picker)
 //	/model <slug>                  Claude's instance default
 //	/model <engine> <slug>         instance default for that engine
 //	/model default                 clear Claude's instance default
@@ -1227,7 +1232,7 @@ func (in *instance) handleEngineCommand(msg *TelegramMessage, b *Bot, rest strin
 func (in *instance) handleModelCommand(msg *TelegramMessage, rest string, b *Bot) {
 	rest = strings.TrimSpace(rest)
 	if rest == "" {
-		in.reply(msg, renderModelStatus(in.config(), b))
+		in.postModelStatus(msg.Chat.ID, msg.MessageThreadID, b)
 		return
 	}
 	first, more := splitFirstWord(rest)
@@ -1243,21 +1248,7 @@ func (in *instance) handleModelCommand(msg *TelegramMessage, rest string, b *Bot
 			in.reply(msg, htmlEscape(err.Error()))
 			return
 		}
-		slug := second
-		if strings.EqualFold(slug, "default") {
-			slug = ""
-		}
-		updated := updateConfig(func(c *Config) bool {
-			setEngineModel(c, engine, slug)
-			return true
-		})
-		if updated == nil {
-			in.reply(msg, "Could not write the configuration.")
-			return
-		}
-		in.setConfig(updated)
-		in.reply(msg, "🧠 "+htmlEscape(engineLabel(engine))+" model set to <code>"+
-			htmlEscape(firstNonEmpty(slug, "(engine default)"))+"</code>")
+		in.reply(msg, in.applyEngineModel(engine, second))
 		return
 	}
 
@@ -1272,16 +1263,7 @@ func (in *instance) handleModelCommand(msg *TelegramMessage, rest string, b *Bot
 				"</code>).")
 			return
 		}
-		updated := updateConfig(func(c *Config) bool {
-			setEngineModel(c, engineClaude, "")
-			return true
-		})
-		if updated == nil {
-			in.reply(msg, "Could not write the configuration.")
-			return
-		}
-		in.setConfig(updated)
-		in.reply(msg, "🧠 Claude model reset to <code>(engine default)</code>")
+		in.reply(msg, in.applyEngineModel(engineClaude, ""))
 		return
 	}
 
@@ -1302,19 +1284,101 @@ func (in *instance) handleModelCommand(msg *TelegramMessage, rest string, b *Bot
 		return
 	}
 
+	in.reply(msg, in.applyEngineModel(engineClaude, first))
+}
+
+// applyEngineModel writes the instance default for one engine and returns the
+// confirmation HTML. slug "default" (or empty) clears it.
+func (in *instance) applyEngineModel(engine, slug string) string {
+	if strings.EqualFold(slug, "default") {
+		slug = ""
+	}
 	updated := updateConfig(func(c *Config) bool {
-		setEngineModel(c, engineClaude, first)
+		setEngineModel(c, engine, slug)
 		return true
 	})
 	if updated == nil {
-		in.reply(msg, "Could not write the configuration.")
-		return
+		return "Could not write the configuration."
 	}
 	in.setConfig(updated)
-	in.reply(msg, "🧠 Model set to <code>"+htmlEscape(first)+"</code>")
+	if engine == engineClaude {
+		if slug == "" {
+			return "🧠 Claude model reset to <code>(engine default)</code>"
+		}
+		return "🧠 Model set to <code>" + htmlEscape(slug) + "</code>"
+	}
+	return "🧠 " + htmlEscape(engineLabel(engine)) + " model set to <code>" +
+		htmlEscape(firstNonEmpty(slug, "(engine default)")) + "</code>"
 }
 
-func renderModelStatus(cfg *Config, b *Bot) string {
+func (in *instance) postModelStatus(chatID, topicID int64, b *Bot) {
+	cfg := in.config()
+	body, buttons := renderModelStatus(cfg, b)
+	if cfg.BotToken == "" {
+		return
+	}
+	if len(buttons) == 0 {
+		_, _ = sendMessageHTMLGetID(cfg, chatID, topicID, body) // safe-ignore: a failed status card is not worth failing the command
+		return
+	}
+	_, _ = sendMessageKeyboardGetID(cfg, chatID, topicID, body, buttons) // safe-ignore: same
+}
+
+func (in *instance) postModelPicker(chatID, topicID int64, p Profile) {
+	cfg := in.config()
+	body, buttons := renderModelPicker(cfg, p)
+	if cfg.BotToken == "" {
+		return
+	}
+	if len(buttons) == 0 {
+		_, _ = sendMessageHTMLGetID(cfg, chatID, topicID, body) // safe-ignore: cosmetic
+		return
+	}
+	_, _ = sendMessageKeyboardGetID(cfg, chatID, topicID, body, buttons) // safe-ignore: same
+}
+
+// handleModelCallback answers the /model picker: pick an account, then a slug
+// for that account's engine (storage stays per-engine, DESIGN §14.27).
+func (in *instance) handleModelCallback(cb *CallbackQuery, parts []string) {
+	if len(parts) < 2 || cb.Message == nil {
+		return
+	}
+	chatID, topicID := cb.Message.Chat.ID, cb.Message.MessageThreadID
+	switch parts[1] {
+	case "pick":
+		if len(parts) < 3 {
+			return
+		}
+		p, ok := resolveAccountTarget(in.config(), parts[2])
+		if !ok {
+			in.editCallbackMessage(cb, "That account is gone.")
+			return
+		}
+		in.postModelPicker(chatID, topicID, p)
+	case "set":
+		if len(parts) < 4 {
+			return
+		}
+		engine, err := parseEngine(parts[2])
+		if err != nil {
+			in.editCallbackMessage(cb, htmlEscape(err.Error()))
+			return
+		}
+		in.post(chatID, topicID, in.applyEngineModel(engine, parts[3]))
+	case "clear":
+		if len(parts) < 3 {
+			return
+		}
+		engine, err := parseEngine(parts[2])
+		if err != nil {
+			in.editCallbackMessage(cb, htmlEscape(err.Error()))
+			return
+		}
+		in.post(chatID, topicID, in.applyEngineModel(engine, ""))
+	}
+}
+
+func renderModelStatus(cfg *Config, b *Bot) (string, [][]InlineKeyboardButton) {
 	var sb strings.Builder
 	sb.WriteString("<b>Model</b>\n")
 	if b != nil {
@@ -1327,11 +1391,80 @@ func renderModelStatus(cfg *Config, b *Bot) string {
 		}
 		sb.WriteByte('\n')
 	}
-	sb.WriteString("instance: ")
-	sb.WriteString(htmlEscape(renderInstanceModels(cfg)))
-	sb.WriteString("\n/model &lt;slug&gt; sets Claude's instance default. ")
+	profiles := listProfiles(cfg)
+	if len(profiles) == 0 {
+		sb.WriteString("No accounts. <code>/account add &lt;identity&gt; &lt;engine&gt;</code>")
+		return sb.String(), nil
+	}
+	var buttons [][]InlineKeyboardButton
+	for _, p := range profiles {
+		engine := profileEngine(p)
+		slug := profileEffectiveModel(cfg, p)
+		shown := firstNonEmpty(slug, "default")
+		name := accountDisplay(p)
+		fmt.Fprintf(&sb, "• %s · <code>%s</code>", htmlEscape(engine), htmlEscape(shown))
+		if name != "" && !strings.EqualFold(name, engine) {
+			fmt.Fprintf(&sb, " — %s", htmlEscape(name))
+		}
+		sb.WriteByte('\n')
+		label := engine + " · " + shown
+		if name != "" && !strings.EqualFold(name, engine) {
+			label = name + " · " + shown
+		}
+		buttons = append(buttons, []InlineKeyboardButton{{
+			Text:         clipButtonText(label),
+			CallbackData: "model:pick:" + accountTarget(p.Name),
+		}})
+	}
+	sb.WriteString("Tap an account to pick its model. /model &lt;slug&gt; sets Claude's instance default. ")
 	sb.WriteString("/model &lt;engine&gt; &lt;slug&gt; sets that engine. /model default clears.")
-	return sb.String()
+	return sb.String(), buttons
+}
+
+func renderModelPicker(cfg *Config, p Profile) (string, [][]InlineKeyboardButton) {
+	engine := profileEngine(p)
+	current := profileEffectiveModel(cfg, p)
+	shown := firstNonEmpty(current, "(engine default)")
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "<b>%s</b> — %s\nCurrent: <code>%s</code>\n",
+		htmlEscape(accountDisplay(p)), htmlEscape(engine), htmlEscape(shown))
+	sb.WriteString("Tap a slug, or /model " + htmlEscape(engine) + " &lt;slug&gt;.")
+
+	var buttons [][]InlineKeyboardButton
+	row := []InlineKeyboardButton{}
+	flush := func() {
+		if len(row) == 0 {
+			return
+		}
+		buttons = append(buttons, row)
+		row = nil
+	}
+	for _, slug := range engineModelChoices(engine, p, current) {
+		data := "model:set:" + engine + ":" + slug
+		if len(data) > 64 {
+			continue
+		}
+		text := slug
+		if slug == current {
+			text = "✓ " + slug
+		}
+		row = append(row, InlineKeyboardButton{Text: clipButtonText(text), CallbackData: data})
+		if len(row) == 2 {
+			flush()
+		}
+	}
+	flush()
+	buttons = append(buttons, []InlineKeyboardButton{{
+		Text: "engine default", CallbackData: "model:clear:" + engine,
+	}})
+	return sb.String(), buttons
+}
+
+func clipButtonText(s string) string {
+	if len(s) <= 64 {
+		return s
+	}
+	return s[:64]
 }
 
 func renderInstanceModels(cfg *Config) string {

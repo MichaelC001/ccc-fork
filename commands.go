@@ -329,7 +329,7 @@ TELEGRAM (the bot's 1:1 DM is General):
     /engine                 assign this session to an engine's account pool
     /sessions /status /usage                                    anywhere
     /memory stats|restore <id>                                  memory upkeep
-    /account add <id> <engine> /access /model [engine] <slug>  owner only
+    /account add <id> <engine> /access /model [engine] <slug>  owner only (/model lists each account)
     /secret add <name> | list | delete <name>                   owner vault (value is never shown)
 
 FLAGS:

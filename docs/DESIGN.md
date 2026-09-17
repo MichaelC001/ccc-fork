@@ -425,7 +425,7 @@ older than 90 days.
 | `/usage` | DM | Tokens, cache hit ratio, turns, average duration and cost per session, today and last 7 days (§14.19). |
 | `/watches`, `/schedules` | DM | List and cancel General's watches/schedules. |
 | `/account` | DM | Status card per account (engine + health + usage/limits) with buttons; subcommands `status`, `add <identity> <engine>`, `login`, `remove`, `default`. |
-| `/model [engine] [slug]` | DM | Show/set instance models. One slug sets Claude's default. Two args (`/model grok grok-4`) set that engine. `/model default` clears. |
+| `/model [engine] [slug]` | DM | Show each account with the model currently selected for it (inline picker). One slug sets Claude's default. Two args (`/model grok grok-4`) set that engine. `/model default` clears. |
 | `/access` | DM | Pairing/allowlist management (below). Owner only. |
 | `/secret add <name>` | DM | Owner only. Prompt for the value; the next owner message is captured by listen and never sent to the model (§16). |
 | `/secret list` | DM | Owner only. Names only. |
@@ -837,7 +837,10 @@ was a Claude leftover: passing `sonnet` to grok/agy/codex is a turn failure.
 `config.models` is a map of engine → slug; the legacy `model` field is still
 the Claude default. `/model <slug>` in a bot topic writes `bots.model` (an
 override). `/model <engine> <slug>` sets the instance default. The account
-does not carry a model — engine is the account's job.
+does not carry a model — engine is the account's job. `/model` with no args
+lists **each account** with that engine's stored slug (not a collapsed
+`claude=default · grok=…` line that hides which profile uses what), and the
+buttons open a per-account picker that writes the same per-engine map.
 
 **14.28 Codex is a fourth engine.** Same isolation pattern as Grok
 (`CODEX_HOME` under `<data_dir>/accounts/codex/<id>`), login via

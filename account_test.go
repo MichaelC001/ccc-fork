@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -358,8 +359,12 @@ func TestModelCommand(t *testing.T) {
 	}
 
 	in.handleMessage(ownerMessage("/model"))
-	if !strings.Contains(strings.Join(api.texts(""), "\n"), "claude=default") {
-		t.Error("/model with no argument should show the current model")
+	listed := strings.Join(api.texts(""), "\n")
+	if !strings.Contains(listed, "claude · <code>default</code>") {
+		t.Errorf("/model with no argument should list each account's model, got %q", listed)
+	}
+	if strings.Contains(listed, "claude=default") {
+		t.Errorf("/model must not hide accounts behind a global engine=slug list: %q", listed)
 	}
 
 	in.handleMessage(ownerMessage("/model sonnet"))
@@ -400,6 +405,158 @@ func TestModelCommand(t *testing.T) {
 	}
 	if got := in.config().Model; got != "haiku" {
 		t.Errorf("instance model = %q, want haiku", got)
+	}
+}
+
+func lastKeyboard(t *testing.T, api *fakeBotAPI) [][]InlineKeyboardButton {
+	t.Helper()
+	calls := api.since("sendMessage")
+	if len(calls) == 0 {
+		t.Fatal("no sendMessage")
+	}
+	raw := calls[len(calls)-1].Params.Get("reply_markup")
+	if raw == "" {
+		t.Fatal("last sendMessage has no reply_markup")
+	}
+	var markup struct {
+		InlineKeyboard [][]InlineKeyboardButton `json:"inline_keyboard"`
+	}
+	if err := json.Unmarshal([]byte(raw), &markup); err != nil {
+		t.Fatalf("reply_markup: %v (%s)", err, raw)
+	}
+	return markup.InlineKeyboard
+}
+
+func TestRenderModelStatusPerAccount(t *testing.T) {
+	cfg := &Config{
+		Profiles: map[string]*Profile{
+			"you@example.com":          {Engine: engineClaude, Label: "you@example.com"},
+			"kidandcat@gmail.com/grok": {Engine: engineGrok, Label: "kidandcat@gmail.com"},
+			"openai/codex":             {Engine: engineCodex, Label: "openai"},
+		},
+		Models: map[string]string{
+			engineClaude: "opus",
+			engineGrok:   "grok-4.6",
+			engineCodex:  "gpt-5.4",
+		},
+	}
+	body, buttons := renderModelStatus(cfg, nil)
+	for _, want := range []string{
+		"grok · <code>grok-4.6</code>",
+		"claude · <code>opus</code>",
+		"codex · <code>gpt-5.4</code>",
+		"kidandcat@gmail.com",
+		"you@example.com",
+		"openai",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("listing missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "claude=default") || strings.Contains(body, "instance:") {
+		t.Errorf("listing still uses the collapsed engine map:\n%s", body)
+	}
+	if len(buttons) != 3 {
+		t.Fatalf("%d account buttons, want 3", len(buttons))
+	}
+	var picks int
+	for _, row := range buttons {
+		for _, b := range row {
+			if strings.HasPrefix(b.CallbackData, "model:pick:") {
+				picks++
+			}
+		}
+	}
+	if picks != 3 {
+		t.Errorf("%d pick buttons, want one per account", picks)
+	}
+}
+
+func TestModelPickerSetsEngine(t *testing.T) {
+	in, _, api := testInstance(t)
+	in.setConfig(&Config{
+		BotToken: "TESTTOKEN", ChatID: 42, DataDir: in.dataDir,
+		Profiles: map[string]*Profile{
+			"you@example.com":          {Engine: engineClaude, Label: "you@example.com"},
+			"kidandcat@gmail.com/grok": {Engine: engineGrok, Label: "kidandcat@gmail.com", ConfigDir: t.TempDir()},
+		},
+		Models: map[string]string{engineGrok: "grok-4.6", engineClaude: "opus"},
+	})
+	if err := saveConfig(in.config()); err != nil {
+		t.Fatal(err)
+	}
+
+	in.handleMessage(ownerMessage("/model"))
+	listed := strings.Join(api.texts(""), "\n")
+	if !strings.Contains(listed, "grok · <code>grok-4.6</code>") || !strings.Contains(listed, "claude · <code>opus</code>") {
+		t.Errorf("expected one line per account, got %q", listed)
+	}
+	kb := lastKeyboard(t, api)
+	var grokPick string
+	for _, row := range kb {
+		for _, b := range row {
+			if strings.Contains(b.Text, "kidandcat@gmail.com") || strings.HasPrefix(b.CallbackData, "model:pick:kidandcat@gmail.com/grok") {
+				grokPick = b.CallbackData
+			}
+		}
+	}
+	if grokPick == "" {
+		t.Fatalf("no grok account button: %+v", kb)
+	}
+
+	cb := &CallbackQuery{ID: "m1", Data: grokPick}
+	cb.From.ID = 42
+	cb.Message = dmMessage(42, "")
+	in.handleCallback(cb)
+
+	picker := lastKeyboard(t, api)
+	var setGrok, clearGrok bool
+	for _, row := range picker {
+		for _, b := range row {
+			if b.CallbackData == "model:set:grok:grok-4.6" || strings.HasPrefix(b.CallbackData, "model:set:grok:") {
+				setGrok = true
+			}
+			if b.CallbackData == "model:clear:grok" {
+				clearGrok = true
+			}
+		}
+	}
+	if !setGrok {
+		t.Errorf("picker has no grok slug buttons: %+v", picker)
+	}
+	if !clearGrok {
+		t.Errorf("picker has no engine-default button: %+v", picker)
+	}
+
+	set := &CallbackQuery{ID: "m2", Data: "model:set:grok:grok-4.5"}
+	set.From.ID = 42
+	set.Message = dmMessage(42, "")
+	in.handleCallback(set)
+	if got := in.config().Models[engineGrok]; got != "grok-4.5" {
+		t.Errorf("picker did not set grok, got %q", got)
+	}
+	if got := in.config().Models[engineClaude]; got != "opus" {
+		t.Errorf("setting grok rewrote claude, got %q", got)
+	}
+}
+
+func TestRenderModelPickerClaudeAliases(t *testing.T) {
+	p := Profile{Name: "you@example.com", Engine: engineClaude, Label: "you@example.com"}
+	cfg := &Config{Models: map[string]string{engineClaude: "opus"}}
+	body, buttons := renderModelPicker(cfg, p)
+	if !strings.Contains(body, "you@example.com") || !strings.Contains(body, "opus") {
+		t.Errorf("picker body = %q", body)
+	}
+	found := map[string]bool{}
+	for _, row := range buttons {
+		for _, b := range row {
+			found[b.CallbackData] = true
+		}
+	}
+	for _, want := range []string{"model:set:claude:opus", "model:set:claude:sonnet", "model:set:claude:haiku", "model:clear:claude"} {
+		if !found[want] {
+			t.Errorf("missing %s in %+v", want, found)
+		}
 	}
 }
 

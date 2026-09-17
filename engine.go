@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -763,4 +764,84 @@ func setEngineModel(cfg *Config, engine, slug string) {
 	if engine == engineClaude {
 		cfg.Model = slug
 	}
+}
+
+// profileEffectiveModel is the slug /model shows for one account: the instance
+// default for that engine, else (Claude) the model field in that profile's
+// settings.json. Empty means the CLI's own default.
+func profileEffectiveModel(cfg *Config, p Profile) string {
+	if s := resolveModel(cfg, profileEngine(p), ""); s != "" {
+		return s
+	}
+	return cliStoredModel(p)
+}
+
+// cliStoredModel is the model the account's CLI would pick if ccc passes no
+// --model. Claude keeps it in settings.json; the others have no file ccc reads.
+func cliStoredModel(p Profile) string {
+	if profileEngine(p) != engineClaude {
+		return ""
+	}
+	data, err := os.ReadFile(profileSettings(p))
+	if err != nil {
+		return ""
+	}
+	var s struct {
+		Model string `json:"model"`
+	}
+	if json.Unmarshal(data, &s) != nil {
+		return ""
+	}
+	return strings.TrimSpace(s.Model)
+}
+
+// engineModelChoices is the picker list for one account: the current slug, the
+// well-known aliases that engine accepts, and (Grok) whatever models_cache.json
+// last listed. Order is stable; the empty "default" choice is a separate button.
+func engineModelChoices(engine string, p Profile, current string) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			return
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	add(current)
+	switch engine {
+	case engineClaude:
+		for _, s := range []string{"opus", "sonnet", "haiku"} {
+			add(s)
+		}
+	case engineGrok:
+		for _, s := range grokCachedModelIDs(p) {
+			add(s)
+		}
+	}
+	return out
+}
+
+// grokCachedModelIDs reads GROK_HOME/models_cache.json when present. Missing or
+// unreadable is not an error — the picker then only offers the current slug.
+func grokCachedModelIDs(p Profile) []string {
+	data, err := os.ReadFile(filepath.Join(engineHome(p), "models_cache.json"))
+	if err != nil {
+		return nil
+	}
+	var parsed struct {
+		Models map[string]json.RawMessage `json:"models"`
+	}
+	if json.Unmarshal(data, &parsed) != nil || len(parsed.Models) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(parsed.Models))
+	for id := range parsed.Models {
+		if strings.TrimSpace(id) != "" {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
