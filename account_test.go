@@ -496,27 +496,44 @@ func TestRenderAccountsShowsEngineAndMixedHealth(t *testing.T) {
 		{
 			Profile: Profile{Name: "work", Engine: engineGrok, Label: "work"},
 			State:   accountOK,
+			Usage: profileUsage{
+				FiveHour: 3, FiveHourKnown: true,
+				Windows: []usageWin{{Name: "week", Percent: 3}},
+			},
 		},
 		{
 			Profile: Profile{Name: "lab", Engine: engineAntigravity, Label: "lab"},
 			State:   accountLoggedOut,
+			Usage:   naProfileUsage("no public usage endpoint"),
+		},
+		{
+			Profile: Profile{Name: "openai", Engine: engineCodex, Label: "openai"},
+			State:   accountOK,
+			Usage: profileUsage{
+				FiveHour: 18, FiveHourKnown: true,
+				SevenDay: 40, SevenDayKnown: true,
+				Windows: []usageWin{
+					{Name: "5h", Percent: 18},
+					{Name: "7d", Percent: 40},
+				},
+			},
 		},
 	}
 	body, _ := renderAccounts(cards)
 	for _, want := range []string{
-		"<b>Accounts</b>", "Claude Code", "Grok Build", "Antigravity",
-		"you@example.com", "work", "lab", "✅ logged in", "❌ not logged in",
-		"5h 10%",
+		"<b>Accounts</b>", "Claude Code", "Grok Build", "Antigravity", "Codex",
+		"you@example.com", "work", "lab", "openai", "✅ logged in", "❌ not logged in",
+		"5h 10%", "week 3%", "n/a (no public usage endpoint)", "5h 18% · 7d 40%",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("mixed card missing %q:\n%s", want, body)
 		}
 	}
 	if strings.Contains(body, "bypass disclaimer") {
-		t.Errorf("grok/agy cards must not show the Claude disclaimer:\n%s", body)
+		t.Errorf("grok/agy/codex cards must not show the Claude disclaimer:\n%s", body)
 	}
-	if strings.Count(body, "usage:") != 1 {
-		t.Errorf("usage should be Claude-only:\n%s", body)
+	if strings.Count(body, "usage:") != 4 {
+		t.Errorf("every engine should show usage:\n%s", body)
 	}
 }
 

@@ -1128,13 +1128,9 @@ func (in *instance) renderStatus() string {
 		if p, ok := profileByKey(cfg, s.Name); ok {
 			shown = accountDisplay(p)
 		}
-		if s.Engine == engineClaude {
-			fmt.Fprintf(&sb, "• %s (%s) — 5h %d%%, 7d %d%%, %d running (%s)\n",
-				htmlEscape(shown), htmlEscape(s.Engine), s.FiveHour, s.SevenDay, s.WorkingAgents, state)
-		} else {
-			fmt.Fprintf(&sb, "• %s (%s) — %d running (%s)\n",
-				htmlEscape(shown), htmlEscape(s.Engine), s.WorkingAgents, state)
-		}
+		fmt.Fprintf(&sb, "• %s (%s) — %s, %d running (%s)\n",
+			htmlEscape(shown), htmlEscape(s.Engine), htmlEscape(profileUsageLine(s.Engine, s.Usage)),
+			s.WorkingAgents, state)
 	}
 	if findings := in.sched.findingsSnapshot(); len(findings) > 0 {
 		sb.WriteString("\n<b>Doctor</b>\n")

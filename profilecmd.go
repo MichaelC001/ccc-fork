@@ -154,13 +154,26 @@ func pct(v int, known bool) string {
 	return fmt.Sprintf("%d%%", v)
 }
 
+func usageSourceHint(engine string) string {
+	switch engine {
+	case engineGrok:
+		return "live cli-chat-proxy /v1/billing, 5 min cache"
+	case engineCodex:
+		return "live chatgpt.com/backend-api/wham/usage, 5 min cache"
+	case engineAntigravity:
+		return "no public usage endpoint"
+	default:
+		return "live /api/oauth/usage, 5 min cache"
+	}
+}
+
 // renderProfileTable renders the profile list as plain aligned text, used by
 // both `ccc profile list` and the /profiles Telegram command.
 func renderProfileTable(config *Config, probeLogin bool) string {
 	rows := collectProfileRows(config, probeLogin)
 	def := defaultProfile(config).Name
 	var sb strings.Builder
-	header := []string{"ACCOUNT", "ENGINE", "LABEL", "CONFIG DIR", "5h", "7d", "TURNS", "LOGIN"}
+	header := []string{"ACCOUNT", "ENGINE", "LABEL", "CONFIG DIR", "USAGE", "TURNS", "LOGIN"}
 	table := [][]string{header}
 	for _, r := range rows {
 		name := r.Profile.Name
@@ -186,8 +199,7 @@ func renderProfileTable(config *Config, probeLogin bool) string {
 			profileEngine(r.Profile),
 			orDash(r.Profile.Label),
 			r.Profile.ConfigDir,
-			pct(r.Usage.FiveHour, r.Usage.FiveHourKnown),
-			pct(r.Usage.SevenDay, r.Usage.SevenDayKnown),
+			profileUsageLine(profileEngine(r.Profile), r.Usage),
 			working,
 			login,
 		})
@@ -438,37 +450,35 @@ func doctorProfiles(fix bool) bool {
 			ok = false
 		}
 
-		if profileEngine(p) != engineClaude {
-			continue
-		}
-		// The bypass-permissions disclaimer is accepted ONCE PER CONFIG DIR,
-		// as one settings.json key ccc writes itself (acceptBypassDisclaimer).
-		// Without it `--permission-mode bypassPermissions` is refused, so an
-		// unaccepted profile is a real finding — and one --fix can close.
-		fmt.Printf("    disclaimer.... ")
-		accepted, known := bypassAccepted(p)
-		switch {
-		case accepted:
-			fmt.Println("✅ bypass-permissions accepted")
-		case fix:
-			if err := acceptBypassDisclaimer(p); err != nil {
-				fmt.Printf("❌ could not accept it: %v\n", err)
+		if profileEngine(p) == engineClaude {
+			// The bypass-permissions disclaimer is accepted ONCE PER CONFIG DIR,
+			// as one settings.json key ccc writes itself (acceptBypassDisclaimer).
+			// Without it `--permission-mode bypassPermissions` is refused, so an
+			// unaccepted profile is a real finding — and one --fix can close.
+			fmt.Printf("    disclaimer.... ")
+			accepted, known := bypassAccepted(p)
+			switch {
+			case accepted:
+				fmt.Println("✅ bypass-permissions accepted")
+			case fix:
+				if err := acceptBypassDisclaimer(p); err != nil {
+					fmt.Printf("❌ could not accept it: %v\n", err)
+					ok = false
+					break
+				}
+				fmt.Printf("🔧 accepted (written to %s)\n", profileSettings(p))
+			case !known:
+				fmt.Println("⚠️  unknown (no settings.json / .claude.json yet)")
+				fmt.Printf("       %s\n", bypassDisclaimerHint(p))
+			default:
+				fmt.Println("❌ not accepted")
+				fmt.Printf("       %s\n", bypassDisclaimerHint(p))
 				ok = false
-				break
 			}
-			fmt.Printf("🔧 accepted (written to %s)\n", profileSettings(p))
-		case !known:
-			fmt.Println("⚠️  unknown (no settings.json / .claude.json yet)")
-			fmt.Printf("       %s\n", bypassDisclaimerHint(p))
-		default:
-			fmt.Println("❌ not accepted")
-			fmt.Printf("       %s\n", bypassDisclaimerHint(p))
-			ok = false
 		}
 
 		u := refreshProfileUsage(p)
-		fmt.Printf("    usage......... 5h %s · 7d %s (live /api/oauth/usage, 5 min cache)\n",
-			pct(u.FiveHour, u.FiveHourKnown), pct(u.SevenDay, u.SevenDayKnown))
+		fmt.Printf("    usage......... %s (%s)\n", profileUsageLine(profileEngine(p), u), usageSourceHint(profileEngine(p)))
 	}
 	return ok
 }

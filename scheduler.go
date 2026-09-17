@@ -692,10 +692,9 @@ func (s *scheduler) runDoctor(now time.Time) {
 			if accepted, known := bypassAccepted(p); known && !accepted {
 				findings = append(findings, doctorFinding{accountDisplay(p), "bypass disclaimer not accepted"})
 			}
-			// Fetch /api/oauth/usage so /account and chooseProfile see live
-			// 5h/7d numbers. Cached 5 minutes; a failure falls back to disk.
-			refreshProfileUsage(p)
 		}
+		// Live usage for Claude / Grok / Codex (5 min cache). Antigravity is n/a.
+		refreshProfileUsage(p)
 	}
 	s.doctor.findings = findings
 }

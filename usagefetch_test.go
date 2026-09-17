@@ -148,6 +148,172 @@ func TestPatchOAuthJSONKeepsSiblingKeys(t *testing.T) {
 	}
 }
 
+func TestUsageWindowName(t *testing.T) {
+	cases := map[int]string{0: "win", 900: "15m", 18000: "5h", 604800: "7d"}
+	for sec, want := range cases {
+		if got := usageWindowName(sec); got != want {
+			t.Errorf("usageWindowName(%d) = %q, want %q", sec, got, want)
+		}
+	}
+}
+
+func TestUsageLine(t *testing.T) {
+	claude := profileUsage{FiveHour: 12, SevenDay: 40, FiveHourKnown: true, SevenDayKnown: true}
+	if got := profileUsageLine(engineClaude, claude); got != "5h 12% · 7d 40%" {
+		t.Errorf("claude = %q", got)
+	}
+	if got := profileUsageLine(engineClaude, unknownProfileUsage()); got != "5h ? · 7d ?" {
+		t.Errorf("claude unknown = %q", got)
+	}
+	grok := profileUsage{Windows: []usageWin{{Name: "week", Percent: 3}}, FiveHour: 3, FiveHourKnown: true}
+	if got := profileUsageLine(engineGrok, grok); got != "week 3%" {
+		t.Errorf("grok = %q", got)
+	}
+	if got := profileUsageLine(engineAntigravity, naProfileUsage("no public usage endpoint")); got != "n/a (no public usage endpoint)" {
+		t.Errorf("agy = %q", got)
+	}
+	if got := profileUsageLine(engineGrok, unknownProfileUsage()); got != "?" {
+		t.Errorf("grok unknown = %q", got)
+	}
+}
+
+func TestProfileUsageFromGrokWeekly(t *testing.T) {
+	pct := 3.0
+	u := profileUsageFromGrok(grokBillingConfig{
+		CreditUsagePercent: &pct,
+		CurrentPeriod:      grokPeriod{Type: "USAGE_PERIOD_TYPE_WEEKLY", End: "2026-09-23T20:26:20Z"},
+	})
+	if !u.FiveHourKnown || u.FiveHour != 3 {
+		t.Fatalf("5h = %d known=%v", u.FiveHour, u.FiveHourKnown)
+	}
+	if len(u.Windows) != 1 || u.Windows[0].Name != "week" || u.Windows[0].Percent != 3 {
+		t.Fatalf("windows = %+v", u.Windows)
+	}
+	if profileUsageLine(engineGrok, u) != "week 3%" {
+		t.Errorf("line = %q", profileUsageLine(engineGrok, u))
+	}
+}
+
+func TestProfileUsageFromCodexWindows(t *testing.T) {
+	u := profileUsageFromCodex(codexUsagePayload{RateLimit: &codexRateLimit{
+		PrimaryWindow:   &codexWindow{UsedPercent: 18, LimitWindowSeconds: 18000, ResetAt: 1730947200},
+		SecondaryWindow: &codexWindow{UsedPercent: 86, LimitWindowSeconds: 604800, ResetAt: 1730980800},
+	}})
+	if profileUsageLine(engineCodex, u) != "5h 18% · 7d 86%" {
+		t.Errorf("line = %q", profileUsageLine(engineCodex, u))
+	}
+	if u.FiveHour != 18 || u.SevenDay != 86 {
+		t.Errorf("selection 5h=%d 7d=%d", u.FiveHour, u.SevenDay)
+	}
+
+	weekly := profileUsageFromCodex(codexUsagePayload{RateLimit: &codexRateLimit{
+		PrimaryWindow: &codexWindow{UsedPercent: 0, LimitWindowSeconds: 604800, ResetAt: 1790246266},
+	}})
+	if profileUsageLine(engineCodex, weekly) != "7d 0%" {
+		t.Errorf("weekly-only = %q", profileUsageLine(engineCodex, weekly))
+	}
+}
+
+func TestRefreshProfileUsageGrokFetchesBilling(t *testing.T) {
+	usageMemClear()
+	t.Cleanup(usageMemClear)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/billing" || r.URL.RawQuery != "format=credits" {
+			t.Errorf("path = %s?%s", r.URL.Path, r.URL.RawQuery)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer grok-token" {
+			t.Errorf("authorization = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"config":{"creditUsagePercent":3.0,"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","end":"2026-09-23T20:26:20Z"}}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	oldURL, oldClient := grokBillingURL, usageHTTP
+	grokBillingURL = srv.URL + "/v1/billing?format=credits"
+	usageHTTP = srv.Client()
+	t.Cleanup(func() {
+		grokBillingURL = oldURL
+		usageHTTP = oldClient
+	})
+
+	dir := t.TempDir()
+	auth := `{"https://auth.x.ai::test":{"key":"grok-token","auth_mode":"oidc","expires_at":"` +
+		time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano) + `"}}`
+	if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte(auth), 0600); err != nil {
+		t.Fatal(err)
+	}
+	p := Profile{Name: "work", Engine: engineGrok, ConfigDir: dir}
+	u := refreshProfileUsage(p)
+	if profileUsageLine(engineGrok, u) != "week 3%" {
+		t.Fatalf("got %q (5h=%d known=%v)", profileUsageLine(engineGrok, u), u.FiveHour, u.FiveHourKnown)
+	}
+	srv.Close()
+	u2 := refreshProfileUsage(p)
+	if profileUsageLine(engineGrok, u2) != "week 3%" {
+		t.Fatalf("cached %q", profileUsageLine(engineGrok, u2))
+	}
+}
+
+func TestRefreshProfileUsageCodexFetchesWham(t *testing.T) {
+	usageMemClear()
+	t.Cleanup(usageMemClear)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/backend-api/wham/usage" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer codex-token" {
+			t.Errorf("authorization = %q", got)
+		}
+		if got := r.Header.Get("ChatGPT-Account-Id"); got != "acct-1" {
+			t.Errorf("account-id = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"plan_type":"plus","rate_limit":{"primary_window":{"used_percent":18,"limit_window_seconds":18000,"reset_at":1730947200},"secondary_window":{"used_percent":40,"limit_window_seconds":604800,"reset_at":1730980800}}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	oldURL, oldClient := codexUsageURL, usageHTTP
+	codexUsageURL = srv.URL + "/backend-api/wham/usage"
+	usageHTTP = srv.Client()
+	t.Cleanup(func() {
+		codexUsageURL = oldURL
+		usageHTTP = oldClient
+	})
+
+	dir := t.TempDir()
+	auth := `{"auth_mode":"chatgpt","tokens":{"access_token":"codex-token","refresh_token":"rt","account_id":"acct-1"}}`
+	if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte(auth), 0600); err != nil {
+		t.Fatal(err)
+	}
+	p := Profile{Name: "openai", Engine: engineCodex, ConfigDir: dir}
+	u := refreshProfileUsage(p)
+	if profileUsageLine(engineCodex, u) != "5h 18% · 7d 40%" {
+		t.Fatalf("got %q", profileUsageLine(engineCodex, u))
+	}
+}
+
+func TestRefreshProfileUsageAntigravityIsNA(t *testing.T) {
+	p := Profile{Name: "lab", Engine: engineAntigravity, ConfigDir: t.TempDir()}
+	u := refreshProfileUsage(p)
+	if u.Unavailable != "no public usage endpoint" {
+		t.Fatalf("unavailable = %q", u.Unavailable)
+	}
+	if profileUsageLine(engineAntigravity, u) != "n/a (no public usage endpoint)" {
+		t.Fatalf("line = %q", profileUsageLine(engineAntigravity, u))
+	}
+}
+
+func TestCodexAPIKeyHasNoQuota(t *testing.T) {
+	key := "sk-test"
+	auth := codexAuthFile{AuthMode: "apikey", OpenAIAPIKey: &key}
+	if got := codexUsageNA(auth); got != "API key, not ChatGPT quota" {
+		t.Fatalf("got %q", got)
+	}
+}
+
 func farExpiryMS() string {
 	return jsonNumber(time.Now().Add(8 * time.Hour).UnixMilli())
 }

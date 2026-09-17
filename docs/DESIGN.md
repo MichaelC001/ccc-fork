@@ -155,15 +155,32 @@ is not injected again (avoids a loop); the topic is told to use `/session`.
 ## 4. Profiles: selection and shared sessions
 
 - `pickAccount(engine)` chooses per **turn** among accounts of that engine:
-  lowest cached 5-hour utilization (Claude), tie-break fewer turns currently
-  running on that account (read from `turns.status = running`, §14.6), then
-  name; excludes profiles in cooldown or `needs_login`. Failover never crosses
-  engines (Claude↔Claude, Grok↔Grok) unless a future design documents it.
-  Claude utilization is fetched from `GET /api/oauth/usage` (5 min TTL) using
-  the profile's OAuth token (macOS keychain `Claude Code-credentials`, or
-  `<config_dir>/.credentials.json`). `.claude.json`'s `cachedUsageUtilization`
-  is a fallback: Claude Code 2.1.x often no longer writes it, which is why
-  `/account` used to show `5h ? · 7d ?`.
+  lowest cached 5-hour utilization (Claude; Grok/Codex map their first window
+  onto the same field), tie-break fewer turns currently running on that
+  account (read from `turns.status = running`, §14.6), then name; excludes
+  profiles in cooldown or `needs_login`. Failover never crosses engines
+  (Claude↔Claude, Grok↔Grok) unless a future design documents it.
+  Utilization is fetched on `/account`, `/status` and the doctor (5 min TTL):
+  - **Claude** — `GET https://api.anthropic.com/api/oauth/usage` with the
+    profile's OAuth token (macOS keychain `Claude Code-credentials`, or
+    `<config_dir>/.credentials.json`). `.claude.json`'s
+    `cachedUsageUtilization` is a fallback: Claude Code 2.1.x often no
+    longer writes it, which is why `/account` used to show `5h ? · 7d ?`.
+  - **Grok** (Grok Build / SuperGrok OAuth, not an xAI API key) —
+    `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` with the
+    access token in `$GROK_HOME/auth.json`. Display is the weekly pool
+    (`creditUsagePercent`, typically `week N%`). Token refresh is
+    `POST https://auth.x.ai/oauth2/token`. The Management API prepaid
+    balance (`GET /v1/billing/teams/{id}/prepaid/balance`) is API-key
+    billing and is not this login.
+  - **Codex** (ChatGPT subscription in isolated `CODEX_HOME`, not a
+    platform API key) — `GET https://chatgpt.com/backend-api/wham/usage`
+    with `Authorization: Bearer` + `ChatGPT-Account-Id` from
+    `$CODEX_HOME/auth.json`. Windows are labelled from
+    `limit_window_seconds` (5h / 7d). Token refresh is
+    `POST https://auth.openai.com/oauth/token`. An API-key Codex login
+    shows `n/a (API key, not ChatGPT quota)`.
+  - **Antigravity** — `n/a (no public usage endpoint)`.
 - **Shared sessions**: all profiles of an instance point their `projects/` at
   the same directory (`<data_dir>/projects`, symlinked into each config dir by
   `ccc` when a profile is added; for the implicit `~/.claude` profile the
@@ -407,13 +424,13 @@ older than 90 days.
 | `/memory restore <id>` | DM | Undo one compaction. Owner only. |
 | `/usage` | DM | Tokens, cache hit ratio, turns, average duration and cost per session, today and last 7 days (§14.19). |
 | `/watches`, `/schedules` | DM | List and cancel General's watches/schedules. |
-| `/account` | DM | Status card per account (engine + health) with buttons; subcommands `status`, `add <identity> <engine>`, `login`, `remove`, `default`. |
+| `/account` | DM | Status card per account (engine + health + usage/limits) with buttons; subcommands `status`, `add <identity> <engine>`, `login`, `remove`, `default`. |
 | `/model [engine] [slug]` | DM | Show/set instance models. One slug sets Claude's default. Two args (`/model grok grok-4`) set that engine. `/model default` clears. |
 | `/access` | DM | Pairing/allowlist management (below). Owner only. |
 | `/secret add <name>` | DM | Owner only. Prompt for the value; the next owner message is captured by listen and never sent to the model (§16). |
 | `/secret list` | DM | Owner only. Names only. |
 | `/secret delete <name>` | DM | Owner only. |
-| `/status` | DM | Instance health: profiles, running turns, queue, doctor findings. |
+| `/status` | DM | Instance health: profiles (with per-engine usage/limits), running turns, queue, doctor findings. |
 
 ### Account management from Telegram (login without a terminal)
 Engine is defined when the account is added (`/account add <identity> <engine>`),

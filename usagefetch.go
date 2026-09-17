@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/user"
@@ -18,13 +20,13 @@ import (
 	"time"
 )
 
-// usagefetch.go is how /account and the doctor learn a Claude account's
-// 5h/7d utilization. Claude Code 2.1.x still *reads* cachedUsageUtilization
-// from .claude.json, but it often never writes it (the cache lives in memory
-// and on GET /api/oauth/usage). ccc therefore fetches the same endpoint
-// Claude Code's /status uses, with the profile's OAuth token, and keeps a
-// 5-minute snapshot so chooseProfile can see numbers without hitting the
-// (rate-limited) API on every turn.
+// usagefetch.go is how /account, /status and the doctor learn an account's
+// rate/usage limits. Claude: GET /api/oauth/usage (5h/7d). Grok Build:
+// GET cli-chat-proxy.grok.com/v1/billing?format=credits (weekly SuperGrok
+// pool). Codex: GET chatgpt.com/backend-api/wham/usage (ChatGPT windows).
+// Antigravity has no public usage endpoint and is shown as n/a. Snapshots
+// live 5 minutes so chooseProfile can see numbers without hitting the
+// (rate-limited) APIs on every turn.
 
 const (
 	usageFetchTTL   = 5 * time.Minute
@@ -49,7 +51,7 @@ type usageMemEntry struct {
 }
 
 func usageMemKey(p Profile) string {
-	return profileEngine(p) + "\x00" + claudeHome(p)
+	return profileEngine(p) + "\x00" + engineHome(p)
 }
 
 func usageMemGet(p Profile) (profileUsage, bool) {
@@ -62,8 +64,12 @@ func usageMemGet(p Profile) (profileUsage, bool) {
 	return e.usage, true
 }
 
+func usageCacheable(u profileUsage) bool {
+	return u.FiveHourKnown || u.SevenDayKnown || len(u.Windows) > 0
+}
+
 func usageMemPut(p Profile, u profileUsage) {
-	if !u.FiveHourKnown && !u.SevenDayKnown {
+	if !usageCacheable(u) {
 		return
 	}
 	usageMemMu.Lock()
@@ -77,25 +83,40 @@ func usageMemClear() {
 	usageMemMu.Unlock()
 }
 
-// refreshProfileUsage is the on-demand path (/account, doctor, `ccc profile
-// list`): return a fresh snapshot, fetching from Anthropic when the memory
-// cache is cold. Failures fall back to the on-disk cache so a blip does not
-// blank the card.
+// refreshProfileUsage is the on-demand path (/account, /status, doctor,
+// `ccc profile list`): return a fresh snapshot. Claude hits Anthropic
+// GET /api/oauth/usage; Grok hits cli-chat-proxy billing; Codex hits
+// ChatGPT GET /backend-api/wham/usage. Failures fall back to Claude's
+// on-disk cache (other engines have none) so a blip does not blank the card.
 func refreshProfileUsage(p Profile) profileUsage {
-	if profileEngine(p) != engineClaude {
-		return unknownProfileUsage()
+	if profileEngine(p) == engineAntigravity {
+		return naProfileUsage("no public usage endpoint")
 	}
 	if u, ok := usageMemGet(p); ok {
 		return u
 	}
-	if u, err := fetchProfileUsage(p); err == nil && (u.FiveHourKnown || u.SevenDayKnown) {
+	if u, err := fetchProfileUsage(p); err == nil && usageCacheable(u) {
 		usageMemPut(p, u)
+		return u
+	} else if err == nil && u.Unavailable != "" {
 		return u
 	}
 	return readProfileUsageFromFile(p)
 }
 
 func fetchProfileUsage(p Profile) (profileUsage, error) {
+	switch profileEngine(p) {
+	case engineGrok:
+		return fetchGrokUsage(p)
+	case engineCodex:
+		return fetchCodexUsage(p)
+	case engineAntigravity:
+		return naProfileUsage("no public usage endpoint"), nil
+	}
+	return fetchClaudeUsage(p)
+}
+
+func fetchClaudeUsage(p Profile) (profileUsage, error) {
 	tok, err := claudeAccessToken(p)
 	if err != nil {
 		return unknownProfileUsage(), err
@@ -392,4 +413,72 @@ var securityAdd = func(service, account string, secret []byte) error {
 		return fmt.Errorf("security add-generic-password: %w (%s)", err, truncate(string(out), 120))
 	}
 	return nil
+}
+
+// jwtExpiry reads exp from an unverified JWT payload. Signature checks belong
+// to the issuer; we only need to know whether to refresh before calling usage.
+func jwtExpiry(tok string) time.Time {
+	parts := strings.Split(tok, ".")
+	if len(parts) != 3 {
+		return time.Time{}
+	}
+	payload := parts[1]
+	if m := len(payload) % 4; m != 0 {
+		payload += strings.Repeat("=", 4-m)
+	}
+	raw, err := base64.URLEncoding.DecodeString(payload)
+	if err != nil {
+		return time.Time{}
+	}
+	var c struct {
+		Exp int64 `json:"exp"`
+	}
+	if json.Unmarshal(raw, &c) != nil || c.Exp == 0 {
+		return time.Time{}
+	}
+	return time.Unix(c.Exp, 0)
+}
+
+func tokenExpired(exp time.Time, now time.Time) bool {
+	if exp.IsZero() {
+		return false
+	}
+	return !now.Before(exp.Add(-tokenSkew))
+}
+
+func httpJSON(method, rawURL, auth string, extra http.Header, body []byte) ([]byte, int, error) {
+	var rdr io.Reader
+	if len(body) > 0 {
+		rdr = bytes.NewReader(body)
+	}
+	req, err := http.NewRequest(method, rawURL, rdr)
+	if err != nil {
+		return nil, 0, err
+	}
+	if auth != "" {
+		req.Header.Set("Authorization", auth)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "ccc")
+	for k, vs := range extra {
+		for _, v := range vs {
+			req.Header.Set(k, v)
+		}
+	}
+	resp, err := usageHTTP.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, resp.StatusCode, err
+	}
+	return raw, resp.StatusCode, nil
+}
+
+func httpFormPost(rawURL string, form url.Values) ([]byte, int, error) {
+	h := http.Header{}
+	h.Set("Content-Type", "application/x-www-form-urlencoded")
+	return httpJSON(http.MethodPost, rawURL, "", h, []byte(form.Encode()))
 }

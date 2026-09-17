@@ -754,6 +754,14 @@ type usageLimit struct {
 	ResetsAt string  `json:"resets_at"`
 }
 
+// usageWin is one rate-limit window as the status card shows it (Claude 5h/7d,
+// Grok's weekly SuperGrok pool, Codex primary/secondary ChatGPT windows).
+type usageWin struct {
+	Name    string // "5h", "7d", "week", "15m"…
+	Percent int
+	ResetAt time.Time
+}
+
 // profileUsage is the digested usage snapshot for one profile.
 type profileUsage struct {
 	FiveHour        int // 0-100, unknownUtilization when unavailable
@@ -761,6 +769,67 @@ type profileUsage struct {
 	FiveHourKnown   bool
 	SevenDayKnown   bool
 	FiveHourResetAt time.Time // zero when unknown
+	// Windows is the engine-native display set. Empty means fall back to
+	// FiveHour/SevenDay (Claude's 5h/7d card).
+	Windows []usageWin
+	// Unavailable is a structural "n/a" reason (no public endpoint, API-key
+	// auth). Empty when the numbers are missing because of a fetch blip.
+	Unavailable string
+}
+
+// profileUsageLine is the "usage: …" text on /account, /status and doctor.
+func profileUsageLine(engine string, u profileUsage) string {
+	if reason := strings.TrimSpace(u.Unavailable); reason != "" {
+		return "n/a (" + reason + ")"
+	}
+	if len(u.Windows) > 0 {
+		parts := make([]string, 0, len(u.Windows))
+		for _, w := range u.Windows {
+			name := w.Name
+			if name == "" {
+				name = "win"
+			}
+			parts = append(parts, name+" "+pct(w.Percent, true))
+		}
+		return strings.Join(parts, " · ")
+	}
+	if engine == engineClaude || u.FiveHourKnown || u.SevenDayKnown {
+		return fmt.Sprintf("5h %s · 7d %s", pct(u.FiveHour, u.FiveHourKnown), pct(u.SevenDay, u.SevenDayKnown))
+	}
+	return "?"
+}
+
+// usageWindowName labels a quota window from its length in seconds.
+// Codex reports 18000 (5h) and 604800 (7d); shorter buckets exist too.
+func usageWindowName(seconds int) string {
+	if seconds <= 0 {
+		return "win"
+	}
+	if seconds < 90*60 {
+		m := int(math.Round(float64(seconds) / 60))
+		if m < 1 {
+			m = 1
+		}
+		return fmt.Sprintf("%dm", m)
+	}
+	if seconds < 36*3600 {
+		h := int(math.Round(float64(seconds) / 3600))
+		if h < 1 {
+			h = 1
+		}
+		return fmt.Sprintf("%dh", h)
+	}
+	d := int(math.Round(float64(seconds) / 86400))
+	if d < 1 {
+		d = 1
+	}
+	return fmt.Sprintf("%dd", d)
+}
+
+func naProfileUsage(reason string) profileUsage {
+	u := unknownProfileUsage()
+	u.Unavailable = reason
+	return u
 }
 
 // readProfileUsage is the no-network view: a fresh in-memory snapshot if
@@ -775,6 +844,12 @@ func readProfileUsage(p Profile) profileUsage {
 }
 
 func readProfileUsageFromFile(p Profile) profileUsage {
+	if profileEngine(p) != engineClaude {
+		if profileEngine(p) == engineAntigravity {
+			return naProfileUsage("no public usage endpoint")
+		}
+		return unknownProfileUsage()
+	}
 	u := unknownProfileUsage()
 	data, err := os.ReadFile(profileClaudeJSON(p))
 	if err != nil {
@@ -862,6 +937,7 @@ type profileStat struct {
 	Engine        string
 	FiveHour      int
 	SevenDay      int
+	Usage         profileUsage
 	WorkingAgents int
 	CooledUntil   time.Time // zero = available
 }
@@ -963,6 +1039,7 @@ func collectProfileStats(config *Config, working map[string]int, now time.Time) 
 			Engine:        profileEngine(p),
 			FiveHour:      u.FiveHour,
 			SevenDay:      u.SevenDay,
+			Usage:         u,
 			WorkingAgents: working[p.Name],
 			CooledUntil:   profileCooledUntil(p.Name, now),
 		})

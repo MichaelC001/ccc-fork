@@ -12,9 +12,10 @@ import (
 // account.go is `/account` (DESIGN §8): the only UI for accounts, so the owner
 // never needs a terminal on the machine ccc runs on. Engine is set when the
 // account is added (`/account add <identity> <engine>`). It renders one card
-// per account (Claude, Grok, Antigravity), drives that CLI's login through the
-// pseudo-terminal in ptyflow.go, and — for Claude only — records the
-// bypass-permissions disclaimer straight into settings.json afterwards.
+// per account (Claude, Grok, Antigravity, Codex) including that engine's
+// usage/limits, drives that CLI's login through the pseudo-terminal in
+// ptyflow.go, and — for Claude only — records the bypass-permissions
+// disclaimer straight into settings.json afterwards.
 
 // accountState is the health of one profile as the card shows it.
 type accountState int
@@ -220,10 +221,7 @@ func renderAccounts(cards []accountCard) (string, [][]InlineKeyboardButton) {
 		if acct := strings.TrimSpace(c.Account); acct != "" && normalizeEmail(acct) != normalizeEmail(name) && acct != name {
 			fmt.Fprintf(&sb, "  %s\n", htmlEscape(acct))
 		}
-		if eng == engineClaude {
-			fmt.Fprintf(&sb, "  usage: 5h %s · 7d %s\n",
-				pct(c.Usage.FiveHour, c.Usage.FiveHourKnown), pct(c.Usage.SevenDay, c.Usage.SevenDayKnown))
-		}
+		fmt.Fprintf(&sb, "  usage: %s\n", htmlEscape(profileUsageLine(eng, c.Usage)))
 		if len(c.Bots) > 0 {
 			fmt.Fprintf(&sb, "  running: %s\n", htmlEscape(strings.Join(c.Bots, ", ")))
 		} else {
