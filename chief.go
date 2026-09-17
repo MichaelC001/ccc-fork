@@ -66,7 +66,7 @@ func isChiefTimeoutFollowUp(input string) bool {
 }
 
 func idleRemindText(name string) string {
-	return fmt.Sprintf("⏳ «%s» sigue esperando que hagas algo. Dime qué hacer, o archívala.", name)
+	return fmt.Sprintf("Idle session %q is still waiting on the owner. Decide: ask_owner, tell_session, archive it, or ignore.", name)
 }
 
 func generalBot(db *gorm.DB) (*Bot, error) {

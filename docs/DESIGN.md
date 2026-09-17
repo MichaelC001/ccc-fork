@@ -108,9 +108,10 @@ Backend workers do not post progress or final answers to Telegram. The owner
 does not see General↔session messages (prompts, reports, transcripts). At
 most a one-liner of status lands in the DM (`session <name> done|waiting|error`)
 when a worker turn ends. Full reports stay in General's inbox for the
-dispatcher to read and summarize. `notify_owner`, `ask_owner`, idle
-reminders and job pings still reach the owner. The phone hub still sees
-every turn.
+dispatcher to read and summarize. `notify_owner`, `ask_owner` and job
+pings still reach the owner. Idle-session reminders wake General via
+inbox + enqueue (same path as `report_to_general`); they are not posted
+to the DM. The phone hub still sees every turn.
 
 ### 3.3 Post-turn
 
@@ -177,7 +178,7 @@ is not injected again (avoids a loop); the topic is told to use `/session`.
 ```
 bots        id, name (unique), topic_id (0=General/DM, !=0 backend worker; new workers get -id), role (text), cwd, session_id, engine (claude|grok|antigravity, default claude),
             status (idle|running|waiting|disabled), created_at, archived_at, parent_bot_id (legacy; unused — bots cannot spawn children),
-            idle_reminded_at (when General last pinged the owner about this idle session)
+            idle_reminded_at (when General was last woken about this idle session)
 turns       id, bot_id, session_id, profile, source (user|bot|schedule|watch|routine|system|background), input (text),
             output (text), status (queued|running|done|failed), stop_reason, error_class,
             started_at, ended_at, usage_json
@@ -289,10 +290,13 @@ One goroutine in `ccc listen`:
 - **Idle-session reminder**: a live worker that is idle or `waiting`, has
   no watch / schedule / routine / background job keeping it alive, and has
   no queued work, is waiting on the owner. Every **10 minutes** of that
-  state, ccc posts a short Spanish ping in General (not a model turn, not
-  every turn). Stop when the session is working again, gains a keepalive,
-  gets a user message, or is archived. `idle_reminded_at` on the bot row
-  is the anti-spam clock.
+  state, ccc queues an inbox message from the worker to General (`wake=true`)
+  and immediately `Enqueue`s a `source=bot` turn on General so the
+  dispatcher actually runs — the same path as `report_to_general`. Nothing
+  is posted to Telegram. General then decides: `ask_owner`, `tell_session`,
+  archive, or ignore. Stop when the session is working again, gains a
+  keepalive, gets a user message, or is archived. `idle_reminded_at` on the
+  bot row is the anti-spam clock.
 - **Schedules**: enqueue a turn with `source=schedule` and the note when
   `fire_at` passes; recurring via cron expression.
 - **Background jobs**: every second, claim queued `background_jobs` (cap: 8
@@ -862,8 +866,9 @@ are ignored. `spawn_session` and `/session` create a backend worker
 the owner does not see General↔session prompts or reports. At most a
 one-liner of status (`session <name> done|waiting|error`) lands in the DM
 when a worker turn ends. Full reports stay in General's inbox.
-`notify_owner`, `ask_owner`, idle reminders and job pings still reach the
-owner. There is no `group_id`, `/setgroup`, or forum topic API. `isGeneralBot` stays
+`notify_owner`, `ask_owner` and job pings still reach the owner.
+Idle-session reminders stay in General's inbox (they are not a Telegram ping).
+There is no `group_id`, `/setgroup`, or forum topic API. `isGeneralBot` stays
 `TopicID == 0`. The `topic_id` column is the session key, not a Telegram
 forum id; leftover positive ids from old installs identify those rows and
 have no Telegram destination.

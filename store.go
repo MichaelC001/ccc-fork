@@ -46,8 +46,8 @@ type Bot struct {
 	UpdatedAt   time.Time
 	ArchivedAt  *time.Time
 	ParentBotID *int64
-	// IdleRemindedAt is when General last pinged the owner about this
-	// session sitting idle, waiting on them. Nil = never / not in that spell.
+	// IdleRemindedAt is when ccc last woke General about this session
+	// sitting idle, waiting on the owner. Nil = never / not in that spell.
 	IdleRemindedAt *time.Time
 }
 

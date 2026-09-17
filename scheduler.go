@@ -237,10 +237,21 @@ func (s *scheduler) compactIdleSessions(now time.Time) {
 	}
 }
 
-// remindIdleSessions pings General about live workers that are idle, have
+// remindIdleSessions wakes General about live workers that are idle, have
 // nothing keeping them alive, and have been waiting on the owner for
 // idleRemindInterval. Cadence is wall-clock 10 minutes, not every turn.
+// The nag is an inbox row plus an immediate Enqueue on General — the same
+// path as report_to_general — so the dispatcher actually runs. Nothing is
+// posted to Telegram.
 func (s *scheduler) remindIdleSessions(now time.Time) {
+	if s.in.runner == nil {
+		return
+	}
+	chief, err := s.in.ensureGeneralBot()
+	if err != nil {
+		hookLog("idle remind: General: %v", err)
+		return
+	}
 	var bots []Bot
 	if err := s.in.db.Where("archived_at IS NULL").Find(&bots).Error; err != nil {
 		return
@@ -257,9 +268,36 @@ func (s *scheduler) remindIdleSessions(now time.Time) {
 		if !shouldIdleRemind(s.in.db, &b, now) {
 			continue
 		}
-		s.in.notifyTopic(0, htmlEscape(idleRemindText(b.Name)))
+		if err := s.enqueueIdleRemind(chief, &b, now); err != nil {
+			hookLog("idle remind %s: %v", b.Name, err)
+			continue
+		}
 		s.in.db.Model(&Bot{}).Where("id = ?", b.ID).Update("idle_reminded_at", now)
 	}
+}
+
+// enqueueIdleRemind is the wake path: queueBotMessage (inbox, wake=true) then
+// Runner.Enqueue(chief, source=bot, inboxInput) so General runs now. Worker
+// reports wait for deliverInbox at end of the sender's turn; an idle worker
+// will not start a turn, so the scheduler must Enqueue itself. The inbox row
+// is marked delivered to the new turn so a listen restart does not fire twice.
+func (s *scheduler) enqueueIdleRemind(chief, worker *Bot, now time.Time) error {
+	body := idleRemindText(worker.Name)
+	_, msg, err := queueBotMessage(s.in.db, worker, chief.Name, body, true)
+	if err != nil {
+		return err
+	}
+	turn, err := s.in.runner.Enqueue(chief.ID, sourceBot, inboxInput(s.in.db, *msg), 0)
+	if err != nil {
+		s.in.db.Delete(msg)
+		return err
+	}
+	updates := map[string]any{"delivered_at": now}
+	if turn != nil {
+		updates["turn_id"] = turn.ID
+	}
+	s.in.db.Model(&InboxMessage{}).Where("id = ?", msg.ID).Updates(updates)
+	return nil
 }
 
 // sessionIdleWaitingOnUser is the idle-remind predicate: a live worker that

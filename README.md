@@ -16,7 +16,8 @@ The bot's **1:1 DM is General**, the dispatcher: you talk to it, it sees
 live sessions, and it can start a backend worker (`spawn_session`) or message
 one (`tell_session`). Sessions live in the backend — no Telegram topic. It
 has a 60s cap — longer work must go to a session. Idle sessions waiting on
-you get a short reminder in General every 10 minutes. `/session <prompt>`
+you wake General every 10 minutes (inbox, not a chat ping); General decides
+what to do. `/session <prompt>`
 still starts a worker without going through General. Sessions report only
 to General (`report_to_general`); those reports are not posted to the DM
 (at most a one-liner of status). There is no role, no `/role`, no «what
@@ -224,7 +225,7 @@ back here. There is no worker topic to talk in.
 
 | Where | What happens |
 |---|---|
-| Text in the **DM** (General) | A turn of the dispatcher (60s cap). It sees live sessions and can spawn or tell them. Idle workers waiting on you get a reminder here every 10 minutes. |
+| Text in the **DM** (General) | A turn of the dispatcher (60s cap). It sees live sessions and can spawn or tell them. Idle workers waiting on you wake General every 10 minutes in its inbox, not as a DM ping. |
 | `/session <prompt>` | Starts a backend worker named after the first line, first turn = that prompt. |
 | A photo or document | Saved into General's `inbox/`, with the path passed in the message. |
 | A voice note | Transcribed if the `voice` build is installed, else the file path is passed. |

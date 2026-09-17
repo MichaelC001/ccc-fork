@@ -767,9 +767,10 @@ func TestWatchExpiryLabel(t *testing.T) {
 	}
 }
 
-func TestIdleRemindPingsGeneralEveryTenMinutes(t *testing.T) {
-	s, in, _, api := testScheduler(t)
-	if _, err := in.ensureGeneralBot(); err != nil {
+func TestIdleRemindWakesGeneralEveryTenMinutes(t *testing.T) {
+	s, in, runner, api := testScheduler(t)
+	chief, err := in.ensureGeneralBot()
+	if err != nil {
 		t.Fatal(err)
 	}
 	b, err := in.createBot("deployer", "")
@@ -780,29 +781,52 @@ func TestIdleRemindPingsGeneralEveryTenMinutes(t *testing.T) {
 	seedEndedTurn(t, in.db, b.ID, now.Add(-15*time.Minute))
 
 	s.remindIdleSessions(now)
-	joined := strings.Join(api.texts(""), "\n")
-	if !strings.Contains(joined, "deployer") || !strings.Contains(joined, "esperando") {
-		t.Errorf("expected a Spanish reminder in General, got %q", api.texts(""))
+	if n := len(runner.enqueued); n != 1 {
+		t.Fatalf("want 1 General turn, got %d: %+v", n, runner.enqueued)
 	}
-	for _, c := range api.since("sendMessage") {
-		if strings.Contains(c.Params.Get("text"), "esperando") && c.Params.Get("disable_notification") == "true" {
-			t.Error("idle remind must ping the owner, not go silent")
-		}
+	got := runner.enqueued[0]
+	if got.BotID != chief.ID || got.Source != sourceBot {
+		t.Errorf("turn = %+v, want source=bot on General", got)
+	}
+	if !strings.Contains(got.Text, "deployer") || !strings.Contains(got.Text, "ask_owner") {
+		t.Errorf("General input missing the idle nag:\n%s", got.Text)
+	}
+	if !strings.Contains(got.Text, "Message from deployer") {
+		t.Errorf("idle nag must look like a worker report:\n%s", got.Text)
+	}
+	assertIdleRemindNotOnTelegram(t, api)
+
+	var inbox []InboxMessage
+	in.db.Where("to_bot_id = ? AND from_bot_id = ?", chief.ID, b.ID).Find(&inbox)
+	if len(inbox) != 1 || inbox[0].DeliveredAt == nil || inbox[0].TurnID == nil {
+		t.Fatalf("want one delivered inbox row, got %+v", inbox)
 	}
 
 	s.remindIdleSessions(now.Add(time.Minute))
-	if n := len(api.texts("")); n != 1 {
-		t.Errorf("reminded again after 1m (%d messages); cadence is 10m", n)
+	if n := len(runner.enqueued); n != 1 {
+		t.Errorf("reminded again after 1m (%d turns); cadence is 10m", n)
 	}
 
 	s.remindIdleSessions(now.Add(idleRemindInterval + time.Minute))
-	if n := len(api.texts("")); n != 2 {
-		t.Errorf("after 10m more, want a second reminder, got %d", n)
+	if n := len(runner.enqueued); n != 2 {
+		t.Errorf("after 10m more, want a second General turn, got %d", n)
+	}
+	assertIdleRemindNotOnTelegram(t, api)
+}
+
+func assertIdleRemindNotOnTelegram(t *testing.T, api *fakeBotAPI) {
+	t.Helper()
+	for _, c := range api.since("sendMessage") {
+		text := c.Params.Get("text")
+		if strings.Contains(text, "esperando") || strings.Contains(text, idleRemindText("deployer")) ||
+			(strings.Contains(text, "Idle session") && strings.Contains(text, "ask_owner")) {
+			t.Errorf("idle remind must not post to Telegram: %q", text)
+		}
 	}
 }
 
 func TestIdleRemindSkipsWorkingKeepaliveAndGeneral(t *testing.T) {
-	s, in, _, api := testScheduler(t)
+	s, in, runner, api := testScheduler(t)
 	chief, err := in.ensureGeneralBot()
 	if err != nil {
 		t.Fatal(err)
@@ -844,13 +868,19 @@ func TestIdleRemindSkipsWorkingKeepaliveAndGeneral(t *testing.T) {
 	seedEndedTurn(t, in.db, archived.ID, now.Add(-time.Hour))
 
 	s.remindIdleSessions(now)
+	if n := len(runner.enqueued); n != 0 {
+		t.Errorf("reminded sessions that are not waiting on the owner: %+v", runner.enqueued)
+	}
 	if n := len(api.texts("")); n != 0 {
-		t.Errorf("reminded sessions that are not waiting on the owner: %q", api.texts(""))
+		t.Errorf("idle remind leaked to Telegram: %q", api.texts(""))
 	}
 }
 
 func TestIdleRemindStopsAfterUserActivity(t *testing.T) {
-	s, in, _, api := testScheduler(t)
+	s, in, runner, api := testScheduler(t)
+	if _, err := in.ensureGeneralBot(); err != nil {
+		t.Fatal(err)
+	}
 	b, err := in.createBot("analyst", "")
 	if err != nil {
 		t.Fatal(err)
@@ -858,19 +888,23 @@ func TestIdleRemindStopsAfterUserActivity(t *testing.T) {
 	now := time.Now()
 	seedEndedTurn(t, in.db, b.ID, now.Add(-20*time.Minute))
 	s.remindIdleSessions(now)
-	if n := len(api.texts("")); n != 1 {
-		t.Fatalf("want the first reminder, got %d", n)
+	if n := len(runner.enqueued); n != 1 {
+		t.Fatalf("want the first General turn, got %d", n)
 	}
 
 	seedEndedTurn(t, in.db, b.ID, now.Add(time.Minute))
 	s.remindIdleSessions(now.Add(2 * time.Minute))
-	if n := len(api.texts("")); n != 1 {
+	if n := len(runner.enqueued); n != 1 {
 		t.Errorf("a fresh user turn must stop the reminders, got %d", n)
 	}
+	assertIdleRemindNotOnTelegram(t, api)
 }
 
 func TestIdleRemindIncludesWaitingAskOwner(t *testing.T) {
-	s, in, _, api := testScheduler(t)
+	s, in, runner, api := testScheduler(t)
+	if _, err := in.ensureGeneralBot(); err != nil {
+		t.Fatal(err)
+	}
 	b, err := in.createBot("asker", "")
 	if err != nil {
 		t.Fatal(err)
@@ -882,13 +916,14 @@ func TestIdleRemindIncludesWaitingAskOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.remindIdleSessions(now)
-	if n := len(api.texts("")); n != 1 {
-		t.Errorf("a parked ask_owner should be reminded, got %d: %q", n, api.texts(""))
+	if n := len(runner.enqueued); n != 1 {
+		t.Errorf("a parked ask_owner should wake General, got %d: %+v", n, runner.enqueued)
 	}
+	assertIdleRemindNotOnTelegram(t, api)
 }
 
 func TestIdleRemindSkipsBackgroundAndSchedule(t *testing.T) {
-	s, in, _, api := testScheduler(t)
+	s, in, runner, api := testScheduler(t)
 	now := time.Now()
 
 	bg, err := in.createBot("builder", "")
@@ -910,8 +945,11 @@ func TestIdleRemindSkipsBackgroundAndSchedule(t *testing.T) {
 	seedEndedTurn(t, in.db, sched.ID, now.Add(-time.Hour))
 
 	s.remindIdleSessions(now)
+	if n := len(runner.enqueued); n != 0 {
+		t.Errorf("keepalive sessions were reminded: %+v", runner.enqueued)
+	}
 	if n := len(api.texts("")); n != 0 {
-		t.Errorf("keepalive sessions were reminded: %q", api.texts(""))
+		t.Errorf("idle remind leaked to Telegram: %q", api.texts(""))
 	}
 }
 

@@ -159,6 +159,18 @@ func TestNotifyOwnerStillPostsToTelegram(t *testing.T) {
 	}
 }
 
+func TestIdleRemindTextIsForGeneral(t *testing.T) {
+	got := idleRemindText("chrome-profile-sync")
+	if strings.Contains(got, "esperando") || strings.Contains(got, "⏳") {
+		t.Errorf("idle nag is for General, not a Telegram ping: %q", got)
+	}
+	for _, want := range []string{"chrome-profile-sync", "ask_owner", "tell_session", "ignore"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("idle nag missing %q: %q", want, got)
+		}
+	}
+}
+
 func TestOwnerSessionStatusOneLiner(t *testing.T) {
 	if got, ok := ownerSessionStatus("", false); !ok || got != "done" {
 		t.Errorf("idle success = %q ok=%v, want done", got, ok)
@@ -285,6 +297,9 @@ func TestChiefPromptIsByteStable(t *testing.T) {
 	}
 	if !strings.Contains(first, "does not see those reports") {
 		t.Errorf("chief prompt must not dump session reports to the owner:\n%s", first)
+	}
+	if !strings.Contains(first, "every 10 minutes") || !strings.Contains(first, "Do not notify_owner just to repeat the nag") {
+		t.Errorf("chief prompt must teach idle nags are dispatcher-only:\n%s", first)
 	}
 }
 
