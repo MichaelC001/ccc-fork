@@ -234,6 +234,11 @@ type BackgroundJob struct {
 	Status          string `gorm:"index;not null"` // queued|running|done|failed
 	Kind            string // "shell"
 	Command         string
+	// EnvJSON is env-var-name → secret-name (names only). Values are read
+	// from the vault at start time and never stored here.
+	EnvJSON string
+	// StdinSecret is a vault secret name piped to the child's stdin, or empty.
+	StdinSecret     string
 	PID             int        `gorm:"column:pid"`
 	Deadline        *time.Time // started_at + 4h; supervisor-enforced, survives listen restart
 	ExitCode        *int

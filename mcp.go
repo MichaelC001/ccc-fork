@@ -192,6 +192,7 @@ func (s *mcpServer) register(server *mcp.Server) {
 		Description: "Send a file from this machine to the owner: Telegram DM and paired phones (max 50 MB).",
 	}, s.sendFile)
 	s.registerAutomation(server)
+	s.registerSecrets(server)
 	s.registerCrew(server)
 }
 
@@ -704,8 +705,20 @@ type cancelRoutineIn struct {
 }
 
 type runBackgroundIn struct {
-	Name    string `json:"name,omitempty" jsonschema:"short summary shown in list_background, e.g. go test or npm install"`
-	Command string `json:"command" jsonschema:"shell command run in your working directory with env_passthrough; returns a job id immediately and does not block this turn"`
+	Name        string            `json:"name,omitempty" jsonschema:"short summary shown in list_background, e.g. go test or npm install"`
+	Command     string            `json:"command" jsonschema:"shell command run in your working directory with env_passthrough; returns a job id immediately and does not block this turn"`
+	Env         map[string]string `json:"env,omitempty" jsonschema:"optional vault inject: each key is an env var name, each value is a secret name (not the secret itself). Never put a secret in argv."`
+	StdinSecret string            `json:"stdin_secret,omitempty" jsonschema:"optional vault secret name whose value is written to the child's stdin"`
+}
+
+type runIn struct {
+	Command     string            `json:"command" jsonschema:"shell command. Secret values are set on the child env/stdin, never argv."`
+	Env         map[string]string `json:"env,omitempty" jsonschema:"env var name → vault secret name (not the secret itself)"`
+	StdinSecret string            `json:"stdin_secret,omitempty" jsonschema:"vault secret name whose value is written to the child's stdin"`
+}
+
+type secretNameIn struct {
+	Name string `json:"name" jsonschema:"the vault secret name"`
 }
 
 type backgroundIDIn struct {
@@ -791,6 +804,21 @@ func (s *mcpServer) registerAutomation(server *mcp.Server) {
 		Name:        "set_project",
 		Description: "Record or update the team's notes about a code base. Only the fields you pass are changed.",
 	}, s.setProject)
+}
+
+func (s *mcpServer) registerSecrets(server *mcp.Server) {
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "secrets_list",
+		Description: "List owner vault secret names. Values are never returned. There is no secrets_get.",
+	}, s.secretsList)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "secrets_delete",
+		Description: "Delete one owner vault secret by name. Values are never returned.",
+	}, s.secretsDelete)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "run",
+		Description: "Run a shell command with vault secrets injected into env and/or stdin. Pass env as env-var-name → secret-name. The value never appears in argv or in the tool result (output is redacted). Use this instead of Bash when a secret is needed.",
+	}, s.runSecret)
 }
 
 func (s *mcpServer) watch(_ context.Context, _ *mcp.CallToolRequest, in watchIn) (*mcp.CallToolResult, any, error) {
@@ -924,11 +952,46 @@ func (s *mcpServer) cancelRoutineTool(_ context.Context, _ *mcp.CallToolRequest,
 }
 
 func (s *mcpServer) runBackground(_ context.Context, _ *mcp.CallToolRequest, in runBackgroundIn) (*mcp.CallToolResult, any, error) {
-	job, err := queueBackgroundJob(s.db, s.botID, s.turnID, in.Name, in.Command)
+	job, err := queueBackgroundJob(s.db, s.botID, s.turnID, in.Name, in.Command, bgSecrets{Env: in.Env, StdinSecret: in.StdinSecret})
 	if err != nil {
 		return toolErr("%v", err), nil, nil
 	}
 	return text("started background job #%d %q; you will be woken with source=background when it finishes", job.ID, job.Name), nil, nil
+}
+
+func (s *mcpServer) secretsList(_ context.Context, _ *mcp.CallToolRequest, _ emptyIn) (*mcp.CallToolResult, any, error) {
+	names, err := listSecretNames()
+	if err != nil {
+		return toolErr("could not list secrets: %v", err), nil, nil
+	}
+	if len(names) == 0 {
+		return text("no secrets"), nil, nil
+	}
+	return text("%s", strings.Join(names, "\n")), nil, nil
+}
+
+func (s *mcpServer) secretsDelete(_ context.Context, _ *mcp.CallToolRequest, in secretNameIn) (*mcp.CallToolResult, any, error) {
+	name := strings.TrimSpace(in.Name)
+	ok, err := deleteSecret(name)
+	if err != nil {
+		return toolErr("%v", err), nil, nil
+	}
+	if !ok {
+		return text("no secret named %s", name), nil, nil
+	}
+	return text("deleted %s", name), nil, nil
+}
+
+func (s *mcpServer) runSecret(ctx context.Context, _ *mcp.CallToolRequest, in runIn) (*mcp.CallToolResult, any, error) {
+	b, err := s.bot()
+	if err != nil {
+		return toolErr("unknown bot"), nil, nil
+	}
+	exit, output, err := runWithSecrets(ctx, s.config, botCwd(s.config, b), in.Command, in.Env, in.StdinSecret)
+	if err != nil {
+		return toolErr("%v", err), nil, nil
+	}
+	return text("%s", formatRunResult(exit, output)), nil, nil
 }
 
 func (s *mcpServer) listBackground(_ context.Context, _ *mcp.CallToolRequest, _ emptyIn) (*mcp.CallToolResult, any, error) {

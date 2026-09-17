@@ -1041,6 +1041,12 @@ func summarizeTool(name string, input json.RawMessage) string {
 		return "notifying you"
 	case "mcp__ccc__send_file":
 		return "sending a file"
+	case "mcp__ccc__run", "ccc__run":
+		return "running a command with secrets"
+	case "mcp__ccc__secrets_list", "ccc__secrets_list":
+		return "listing secrets"
+	case "mcp__ccc__secrets_delete", "ccc__secrets_delete":
+		return "deleting a secret"
 	}
 	if strings.HasPrefix(name, "mcp__ccc__") {
 		return strings.TrimPrefix(name, "mcp__ccc__")

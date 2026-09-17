@@ -330,6 +330,7 @@ TELEGRAM (the bot's 1:1 DM is General):
     /sessions /status /usage                                    anywhere
     /memory stats|restore <id>                                  memory upkeep
     /account add <id> <engine> /access /model [engine] <slug>  owner only
+    /secret add <name> | list | delete <name>                   owner vault (value is never shown)
 
 FLAGS:
     -h, --help              Show this help

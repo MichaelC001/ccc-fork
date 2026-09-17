@@ -117,6 +117,7 @@ func TestSummarizeToolNeverLeaksPayloads(t *testing.T) {
 		{"Grep", `{"pattern":"TODO"}`, "searching for TODO"},
 		{"mcp__ccc__ask_owner", `{"question":"deploy?"}`, "asking you a question"},
 		{"mcp__ccc__remember", `{"key":"deploy-target","text":"secret stuff"}`, "remembering deploy-target"},
+		{"mcp__ccc__run", `{"command":"true","env":{"GH_TOKEN":"github-token"}}`, "running a command with secrets"},
 		{"WeirdTool", `{}`, "running WeirdTool"},
 	}
 	for _, c := range cases {

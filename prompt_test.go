@@ -31,6 +31,12 @@ func TestRenderSystemPromptCarriesIdentity(t *testing.T) {
 	if !strings.Contains(got, "run_background") {
 		t.Error("system prompt does not describe background jobs")
 	}
+	if !strings.Contains(got, "secrets_list") || !strings.Contains(got, "there is no secrets_get") {
+		t.Error("system prompt must describe the vault and that there is no secrets_get")
+	}
+	if strings.Contains(got, "secrets_get") && !strings.Contains(got, "no secrets_get") {
+		t.Error("system prompt must not offer secrets_get")
+	}
 	if strings.Contains(got, "spawn_bot") {
 		t.Error("system prompt must not offer spawn_bot")
 	}

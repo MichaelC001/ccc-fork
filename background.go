@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -71,8 +72,9 @@ mv "$jobdir/exit.code.tmp" "$jobdir/exit.code"
 // when we started the wrapper ourselves (so we can Wait and reap); a
 // reattached orphan has only the PID.
 type bgHandle struct {
-	pid int
-	cmd *exec.Cmd
+	pid    int
+	cmd    *exec.Cmd
+	redact []string
 }
 
 // bgRuntime holds the live jobs the supervisor is watching. PIDs are also
@@ -83,7 +85,7 @@ type bgRuntime struct {
 	handles map[int64]*bgHandle
 }
 
-func (r *bgRuntime) adopt(id int64, pid int, cmd *exec.Cmd) bool {
+func (r *bgRuntime) adopt(id int64, pid int, cmd *exec.Cmd, redact ...[]string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.handles == nil {
@@ -92,8 +94,21 @@ func (r *bgRuntime) adopt(id int64, pid int, cmd *exec.Cmd) bool {
 	if _, ok := r.handles[id]; ok {
 		return false
 	}
-	r.handles[id] = &bgHandle{pid: pid, cmd: cmd}
+	h := &bgHandle{pid: pid, cmd: cmd}
+	if len(redact) > 0 {
+		h.redact = redact[0]
+	}
+	r.handles[id] = h
 	return true
+}
+
+func (r *bgRuntime) redactOf(id int64) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.handles == nil || r.handles[id] == nil {
+		return nil
+	}
+	return r.handles[id].redact
 }
 
 func (r *bgRuntime) pidOf(id int64) int {
@@ -207,9 +222,16 @@ func jobDeadline(j *BackgroundJob) time.Time {
 // Store helpers (MCP tools and the supervisor)
 // ---------------------------------------------------------------------------
 
+// bgSecrets is optional vault inject for a background job. Names only; values
+// are read at start time.
+type bgSecrets struct {
+	Env         map[string]string
+	StdinSecret string
+}
+
 // queueBackgroundJob inserts a queued shell job. The listen supervisor starts
 // it; this never blocks the calling turn.
-func queueBackgroundJob(db *gorm.DB, botID, turnID int64, name, command string) (*BackgroundJob, error) {
+func queueBackgroundJob(db *gorm.DB, botID, turnID int64, name, command string, opts ...bgSecrets) (*BackgroundJob, error) {
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return nil, fmt.Errorf("run_background needs a command")
@@ -220,12 +242,30 @@ func queueBackgroundJob(db *gorm.DB, botID, turnID int64, name, command string) 
 	} else {
 		name = truncate(name, 120)
 	}
+	var opt bgSecrets
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
+	if _, _, err := resolveSecretEnv(opt.Env); err != nil {
+		return nil, err
+	}
+	if _, err := resolveStdinSecret(opt.StdinSecret); err != nil {
+		return nil, err
+	}
 	row := BackgroundJob{
-		BotID:   botID,
-		Name:    name,
-		Status:  jobQueued,
-		Kind:    jobKindShell,
-		Command: command,
+		BotID:       botID,
+		Name:        name,
+		Status:      jobQueued,
+		Kind:        jobKindShell,
+		Command:     command,
+		StdinSecret: strings.TrimSpace(opt.StdinSecret),
+	}
+	if len(opt.Env) > 0 {
+		body, err := json.Marshal(opt.Env)
+		if err != nil {
+			return nil, err
+		}
+		row.EnvJSON = string(body)
 	}
 	if turnID != 0 {
 		row.CreatedByTurnID = &turnID
@@ -234,6 +274,17 @@ func queueBackgroundJob(db *gorm.DB, botID, turnID int64, name, command string) 
 		return nil, err
 	}
 	return &row, nil
+}
+
+func parseJobSecretEnv(j *BackgroundJob) map[string]string {
+	if j == nil || strings.TrimSpace(j.EnvJSON) == "" {
+		return nil
+	}
+	var m map[string]string
+	if err := json.Unmarshal([]byte(j.EnvJSON), &m); err != nil {
+		return nil
+	}
+	return m
 }
 
 func listBackgroundJobs(db *gorm.DB, botID int64) ([]BackgroundJob, error) {
@@ -423,9 +474,26 @@ func (s *scheduler) runBackgroundJob(b *Bot, j *BackgroundJob) {
 
 	// No CommandContext: a cancelled listen context must not kill the job.
 	// The 4h cap is the deadline column, checked by watchBackgroundJob.
+	extra, redact, err := resolveSecretEnv(parseJobSecretEnv(j))
+	if err != nil {
+		s.finishBackgroundJob(j, jobFailed, -1, "", err.Error())
+		return
+	}
+	stdin, err := resolveStdinSecret(j.StdinSecret)
+	if err != nil {
+		s.finishBackgroundJob(j, jobFailed, -1, "", err.Error())
+		return
+	}
+	if stdin != "" {
+		redact = append(redact, stdin)
+	}
+
 	cmd := exec.Command("/bin/sh", "-c", backgroundWrapper, "bgwrap", dir, j.Command)
 	cmd.Dir = botCwd(cfg, b)
-	cmd.Env = instanceEnv(cfg)
+	cmd.Env = overlayEnv(instanceEnv(cfg), extra)
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	if err := cmd.Start(); err != nil {
@@ -434,7 +502,7 @@ func (s *scheduler) runBackgroundJob(b *Bot, j *BackgroundJob) {
 	}
 	j.PID = cmd.Process.Pid
 	s.in.db.Model(&BackgroundJob{}).Where("id = ?", j.ID).Update("pid", j.PID)
-	if !s.bg.adopt(j.ID, j.PID, cmd) {
+	if !s.bg.adopt(j.ID, j.PID, cmd, redact) {
 		// Another supervisor already claimed this id (reattach raced us).
 		// Reap so we do not leave a zombie, then leave watching to them.
 		go func() { _ = cmd.Wait() }() // safe-ignore: Wait is only to reap; finish comes from exit.code
@@ -461,7 +529,7 @@ func (s *scheduler) reattachBackgroundJobs() {
 			j.PID = pid
 			s.in.db.Model(&BackgroundJob{}).Where("id = ?", j.ID).Update("pid", pid)
 		}
-		if !s.bg.adopt(j.ID, j.PID, nil) {
+		if !s.bg.adopt(j.ID, j.PID, nil) { // reattach: redact from the live vault at finish
 			continue
 		}
 		if _, done := readExitCode(dir); !done && processAlive(jobPID(&j, dir)) {
@@ -562,8 +630,9 @@ func (s *scheduler) finishIfComplete(j *BackgroundJob, dir string) bool {
 }
 
 func (s *scheduler) finishFromArtifacts(j *BackgroundJob, dir string, code int, haveCode bool) {
-	out := readJobLog(dir)
+	out := redactVaultOutput(readJobLog(dir), s.bg.redactOf(j.ID))
 	status, errText, exit := classifyBackgroundFinish(j, code, haveCode)
+	errText = redactVaultOutput(errText, s.bg.redactOf(j.ID))
 	s.finishBackgroundJob(j, status, exit, out, errText)
 }
 

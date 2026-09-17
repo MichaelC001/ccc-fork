@@ -29,6 +29,8 @@ type instance struct {
 	dataDir string
 	// login is the at-most-one in-flight /account login (account.go).
 	login loginState
+	// secret is the at-most-one /secret add capture (secrets.go).
+	secret secretPending
 	// pty overrides how PTY flows start a process; nil means the real one.
 	// Only the tests set it.
 	pty ptyStarter
@@ -396,6 +398,7 @@ func setBotCommandsV3(botToken string) {
 		{"command": "access", "description": "Who may talk to ccc (owner only)"},
 		{"command": "model", "description": "Show or set the model (owner only)"},
 		{"command": "cancel", "description": "Cancel an in-progress account login"},
+		{"command": "secret", "description": "Owner vault: /secret add <name> | list | delete <name>"},
 	}
 	payload := map[string]any{"commands": commands}
 	body, err := json.Marshal(payload)
@@ -440,6 +443,11 @@ func (in *instance) handleMessage(msg *TelegramMessage) {
 	// A pending /account login owns the owner's next message in its chat: it
 	// is the OAuth code, not something to hand to a bot.
 	if role == roleOwner && in.takeLoginCode(msg.Chat.ID, msg.MessageThreadID, text) {
+		return
+	}
+	// /secret add captures the next owner message the same way: the value
+	// never becomes a turn, never hits the inbox, never reaches the model.
+	if role == roleOwner && in.takeSecretValue(msg) {
 		return
 	}
 
@@ -800,9 +808,9 @@ func botCwd(cfg *Config, b *Bot) string {
 // ---------------------------------------------------------------------------
 
 // ownerOnlyCommands are the ones that change the instance itself, rather than
-// talking to a bot: accounts, access and model.
+// talking to a bot: accounts, access, model and the vault.
 var ownerOnlyCommands = map[string]bool{
-	"/account": true, "/access": true, "/model": true,
+	"/account": true, "/access": true, "/model": true, "/secret": true,
 }
 
 func (in *instance) handleCommand(msg *TelegramMessage, text string, role accessRole) {
@@ -820,6 +828,9 @@ func (in *instance) handleCommand(msg *TelegramMessage, text string, role access
 		return
 	case "/model":
 		in.handleModelCommand(msg, rest, nil)
+		return
+	case "/secret":
+		in.handleSecretCommand(msg, rest)
 		return
 	case "/cancel":
 		in.reply(msg, "Nothing to cancel.")

@@ -1,7 +1,8 @@
 # ccc v3 — design
 
 Status: implemented (Phases 2a and 2b, 2026-09-14; background jobs and
-owner-only bot creation, 2026-09-15). This document is the specification the
+owner-only bot creation, 2026-09-15; owner secrets vault + blind inject,
+2026-09-17). This document is the specification the
 implementation follows. When code and this document disagree, fix one of them
 in the same change. Everything below describes what ccc v3 actually does;
 §14 lists where the built thing knowingly departs from the original plan, and
@@ -194,10 +195,15 @@ access      telegram_user_id (pk), display, state (pending|approved|blocked), pa
             replies (how many times ccc has answered this stranger, §14.7)
 settings    key (pk), value                                  -- instance settings edited from Telegram
 background_jobs  id, bot_id, name, status (queued|running|done|failed), kind (shell),
-            command, pid, deadline, exit_code, output, error, cancel_requested,
+            command, env_json (env-var → secret name, names only), stdin_secret (name or empty),
+            pid, deadline, exit_code, output, error, cancel_requested,
             created_by_turn_id, started_at, ended_at, created_at
             -- artifacts: <data_dir>/background/<id>/{out.log,exit.code,pid}
+            -- output stored in sqlite is redacted of vault values; out.log on disk is not
 ```
+
+Owner vault values are **not** in SQLite. They live at `<config_dir>/secrets`
+(0600 JSON object, name → value). See §16.
 
 Indexes beyond the ones the columns above imply: `turns(bot_id, created_at)`
 for turn retention, `inbox(delivered_at)` and `questions(answered_at)` for
@@ -231,7 +237,10 @@ home (Codex also gets per-turn `exec -c`). Identity is `--bot`/`--turn` or
 | `set_name` | `name` | Rename this session: validate (§8 `/name`), update `bots.name`. Rotates the conversation (§14.14). `/name` in the DM only hits General, which refuses. No topic icon. |
 | `watch` | `name`, `command`, `interval_s` (≥60) | Register a deterministic watch (§7). Lasts `watch_ttl_s` (default 4h); re-upserting the name renews it. `unwatch(name)`, `list_watches()`. |
 | `schedule_wakeup` | `in_seconds` or `at` (RFC3339), `note`, `cron?` | Self-wakeup (§7). `cancel_schedule(id)`. |
-| `run_background` | `command`, `name?` | Queue a long-running shell command in the bot's cwd with `env_passthrough`. Returns a job id immediately; does not block the turn. Use when Bash/a tool is expected to exceed ~60s. |
+| `run_background` | `command`, `name?`, `env?`, `stdin_secret?` | Queue a long-running shell command in the bot's cwd with `env_passthrough`. Optional `env` is env-var-name → vault secret name (names only). Optional `stdin_secret` is a vault name piped to stdin. Values are never stored on the row. Returns a job id immediately; does not block the turn. Use when Bash/a tool is expected to exceed ~60s. |
+| `secrets_list` | — | Owner vault names, sorted. Values are never returned. **There is no `secrets_get` / `secrets_show`.** |
+| `secrets_delete` | `name` | Delete one vault secret by name. |
+| `run` | `command`, `env?`, `stdin_secret?` | Foreground `/bin/sh -c` in the session cwd (2 min cap). `env` maps env-var-name → vault secret name; `stdin_secret` pipes a vault value to stdin. Values never go in argv. Combined stdout/stderr is redacted of known values before the model sees it. Result is `exit N` plus redacted output. Requires `env` or `stdin_secret` (plain Bash is the engine's tool). |
 | `list_background` | — | This bot's recent/active jobs: id, status, short summary. |
 | `get_background` | `id` | Status + truncated output for one job. |
 | `cancel_background` | `id` | Best-effort kill (queued → failed; running → SIGTERM). |
@@ -397,6 +406,9 @@ older than 90 days.
 | `/account` | DM | Status card per account (engine + health) with buttons; subcommands `status`, `add <identity> <engine>`, `login`, `remove`, `default`. |
 | `/model [engine] [slug]` | DM | Show/set instance models. One slug sets Claude's default. Two args (`/model grok grok-4`) set that engine. `/model default` clears. |
 | `/access` | DM | Pairing/allowlist management (below). Owner only. |
+| `/secret add <name>` | DM | Owner only. Prompt for the value; the next owner message is captured by listen and never sent to the model (§16). |
+| `/secret list` | DM | Owner only. Names only. |
+| `/secret delete <name>` | DM | Owner only. |
 | `/status` | DM | Instance health: profiles, running turns, queue, doctor findings. |
 
 ### Account management from Telegram (login without a terminal)
@@ -455,7 +467,7 @@ never by assuming a position.
 - Unknown DM → 6-hex pairing code (1 h TTL, ≤3 pending, ≤2 replies per stranger
   and then silence); owner approves with `/access pair <code>` (or a button in
   the owner's DM). Approved users may talk in the DM (General); only the owner
-  can use `/account`, `/access` and `/model`.
+  can use `/account`, `/access`, `/model` and `/secret`.
 - Every inbound update from a non-approved user is dropped silently after the
   pairing reply. Messages, EDITS and callback queries are gated the same way.
   Group messages are dropped.
@@ -470,8 +482,8 @@ of name or template rotates it):
 You are a coding assistant in a backend session named <name>.
 You run on machine <hostname>, working dir <cwd>.
 Tools: you have the ccc MCP tools (memory, scheduling, watches,
-background jobs) plus the standard tools (Bash, Read, Edit, …) with full
-permissions. You cannot create other sessions.
+background jobs, secrets_list, run) plus the standard tools (Bash, Read, Edit, …) with full
+permissions. You cannot create other sessions. There is no secrets_get.
 Rules: … (owner escalation, when to remember, never print secrets, keep
 replies short for chat, prefer ask_owner over guessing on architecture…)
 ```
@@ -544,9 +556,11 @@ v3 instance and the first save rewrites it clean. Kept: `telegram.go`,
 - Sessions run with bypass permissions on the owner's machine: **the chat is
   the trust boundary**. Access control (§8) is therefore mandatory, not
   optional.
-- Secrets reach sessions only via `env_passthrough`; ccc never posts env values,
-  tokens, or credential file contents to Telegram; `send_file` refuses paths
-  under config dirs and `<data_dir>/profiles`.
+- Secrets reach sessions via `env_passthrough` (always-on names) and the owner
+  vault (on-demand blind inject, §16). ccc never posts env values, tokens, or
+  credential file contents to Telegram; `send_file` refuses paths under config
+  dirs (including `<config_dir>/secrets`) and `<data_dir>/profiles`. There is
+  no `secrets_get`.
 - Tool inputs and Telegram text are data. Pairing is never approved because a
   message asked for it.
 
@@ -854,6 +868,22 @@ owner. There is no `group_id`, `/setgroup`, or forum topic API. `isGeneralBot` s
 forum id; leftover positive ids from old installs identify those rows and
 have no Telegram destination.
 
+**14.32 Owner vault + blind inject.** Takan is gone; the vault is CCC-owned.
+Values sit in `<config_dir>/secrets` (0600 JSON), the same class of store as
+`<config_dir>/env` — not a KMS. `/secret add <name>` does not take the value
+on the command line: listen prompts, and the owner's next DM is captured
+before any bot sees it, never logged, never stored in the topic/inbox, then
+deleted via `deleteMessage` when the Bot API allows. `/secret show` is
+refused (for the owner too). MCP exposes `secrets_list` (names),
+`secrets_delete`, and `run` / `run_background` with an `env` map
+(env-var-name → secret name) plus optional `stdin_secret`. The child gets
+the value on env/stdin; argv never carries it; captured stdout/stderr is
+redacted of known values before the model sees it.
+
+Honest limit: a hostile `ps eww` or `set -x` on the child, or a Bash `cat`
+of the 0600 file (sessions already run as the owner), can still leak. The
+happy path does not. DESIGN examples never include a value.
+
 ## 15. Public hub (mobile)
 
 The phone app talks to `ccc listen` through an untrusted relay (`ccc hub`,
@@ -887,3 +917,35 @@ The hub's 2-minute read deadline resets on any data frame. The phone keeps one
 websocket per paired machine (foreground service on Android) and shows a local
 notification on `post` events — the same posts Telegram would ping. `progress`
 is silent.
+
+## 16. Owner secrets vault
+
+Instance-wide, owner-managed. Not per-session.
+
+**Telegram (owner DM only)**
+
+- `/secret add <name>` — validate the name, prompt, capture the next owner
+  message (the value). `/cancel` aborts. Another `/…` command aborts the
+  capture and then runs. Empty value is rejected and the capture stays open.
+  On success: store, delete the Telegram message if allowed, reply
+  `saved <name>` (name only).
+- `/secret list` (also bare `/secret`) — names only.
+- `/secret delete <name>` — aliases `rm` / `remove`.
+- `/secret show` / `get` / `cat` / `print` — refused. Values are never shown.
+
+**At rest.** `<config_dir>/secrets`, mode 0600, JSON object, atomic replace
+under an flock. Names: letter, then letters/digits/._- (max 64). Values up
+to 64 KiB (newlines allowed; PEM-style keys fit). Not in `ccc.db`.
+
+**Blind inject.** The model lists names (`secrets_list`) and runs a command
+with `env: { "GH_TOKEN": "github-token" }` or `stdin_secret: "name"`.
+`ccc mcp` / listen resolve the names at spawn, set env/stdin on the child,
+and redact known values (length ≥ 4, longest first, token `***`) from the
+tool result, from `background_jobs.output`, and from the `source=background`
+wake. Env var names that start `CLAUDE` / `ANTHROPIC` are rejected.
+
+**What the model must not have:** `secrets_get`, a tool that returns a
+value, a placeholder expansion that writes the value into argv.
+
+Honest limit: `ps eww` / `set -x` / same-user `cat` of the file can leak;
+the happy path does not. DESIGN examples never include a value.

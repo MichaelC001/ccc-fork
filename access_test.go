@@ -107,7 +107,7 @@ func TestStrangerDMGetsOnePairingReply(t *testing.T) {
 }
 
 // An approved user may talk in the DM (General), but the instance itself stays
-// the owner's: /account, /access and /model are refused. Group messages drop.
+// the owner's: /account, /access, /model and /secret are refused. Group messages drop.
 func TestApprovedUserCanTalkButNotAdminister(t *testing.T) {
 	in, runner, api := testInstance(t)
 	if err := setAccessState(in.db, 999, "@friend", accessApproved); err != nil {
@@ -129,11 +129,11 @@ func TestApprovedUserCanTalkButNotAdminister(t *testing.T) {
 		t.Errorf("an approved user's group message must be ignored, last=%+v", got)
 	}
 
-	for _, cmd := range []string{"/account", "/access list", "/model haiku"} {
+	for _, cmd := range []string{"/account", "/access list", "/model haiku", "/secret list"} {
 		in.handleMessage(dmMessage(999, cmd))
 	}
 	joined := strings.Join(api.texts(""), "\n")
-	if strings.Count(joined, "owner-only") != 3 {
+	if strings.Count(joined, "owner-only") != 4 {
 		t.Errorf("owner commands were not all refused for an approved user:\n%s", joined)
 	}
 	if in.config().Model != "" {

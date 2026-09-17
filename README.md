@@ -39,8 +39,8 @@ the Telegram UX.
                                   │        ccc mcp (stdio)             │
                                   └────────────────────────────────────┘
               remember · recall · ask_owner · watch · schedule_wakeup ·
-              run_background · spawn_session · tell_session · report_to_general ·
-              set_name · get_project · send_file
+              run_background · run · secrets_list · spawn_session · tell_session ·
+              report_to_general · set_name · get_project · send_file
 ```
 
 ### Concepts
@@ -271,6 +271,9 @@ not the report.
 | `/account login\|remove\|default <identity> [engine]` | Relogin, remove, or make default (new sessions inherit that account's engine). If the same email exists on several engines, pass `email/codex` or `email codex`. |
 | `/access` | Who may talk to ccc (see below). |
 | `/model [name]` | Show or set the model every session runs on. `/model default` clears it. |
+| `/secret add <name>` | Prompt for a vault value. The next message is captured by ccc and never sent to a session. Names only in replies. |
+| `/secret list` | Vault names. |
+| `/secret delete <name>` | Remove one vault secret. |
 
 ### What a session can do for itself
 
@@ -291,7 +294,13 @@ use `ccc routine` there). Grok calls them through `search_tool` / `use_tool`.
   Agy: `ccc routine add <name> --cron "0 9 * * 1-5" <prompt>`.
 - `run_background` / `list_background` / `get_background` / `cancel_background`
   — start a long shell command without blocking the turn (builds, installs,
-  waits). The session is woken with the result when it finishes.
+  waits). The session is woken with the result when it finishes. Optional
+  `env` map (env-var-name → vault secret name) and `stdin_secret` inject
+  vault values into the child; they never appear in argv or in the wake text.
+- `secrets_list` / `secrets_delete` — owner vault names only. There is no
+  `secrets_get`.
+- `run` — foreground shell with the same vault inject as `run_background`.
+  Use this instead of Bash when a secret is needed. Output is redacted.
 - **General only:** `list_sessions`, `spawn_session`, `tell_session`.
 - **Workers only:** `report_to_general` — the only way a session talks back
   (inbox for General; not posted to the DM).
@@ -378,12 +387,16 @@ allowed; nobody else can do anything until you approve them.
 - `/access list`, `/access add <id>`, `/access remove <id>`, `/access block <id>`.
 
 An approved user can talk in the DM (General). They cannot use `/account`, `/access`,
-`/model` — those stay yours.
+`/model`, `/secret` — those stay yours.
 
 > Sessions run with bypassed permissions on your machine. **The chat is the trust
-> boundary**, which is why this is not optional. Secrets reach sessions only through
-> `env_passthrough`; ccc never posts environment values or credential files, and
-> `send_file` refuses anything inside a config or credentials directory.
+> boundary**, which is why this is not optional. Always-on secrets reach sessions
+> through `env_passthrough`. On-demand secrets live in the owner vault
+> (`/secret add`); sessions inject them with `run` / `run_background` (env map
+> or stdin) and never see the value. ccc never posts environment values or
+> credential files, and `send_file` refuses anything inside a config or
+> credentials directory. A hostile `ps eww` / `set -x` can still leak; the
+> happy path does not.
 
 ---
 
@@ -467,6 +480,7 @@ CLI's own default. An unknown agy model fails the turn.
 |---|---|
 | Bootstrap config (token, owner, group, accounts) | `~/.config/ccc/config.json` (mode 0600) |
 | Passthrough secrets for the service | `~/.config/ccc/env` (mode 0600, written by `ccc env sync`) |
+| Owner vault | `~/.config/ccc/secrets` (mode 0600 JSON, `/secret add`) |
 | Everything runtime (bots, turns, memories, watches, schedules, access) | `<data_dir>/ccc.db` (SQLite, WAL) |
 | A bot's default working directory | `<data_dir>/bots/<name>/workspace` |
 | Files you send a bot | `<its cwd>/inbox/` |
