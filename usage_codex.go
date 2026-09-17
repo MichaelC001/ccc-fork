@@ -148,6 +148,9 @@ func applyCodexWindow(u *profileUsage, w *codexWindow) {
 	reset := time.Time{}
 	if w.ResetAt > 0 {
 		reset = time.Unix(w.ResetAt, 0)
+	} else if w.ResetAfterSeconds > 0 {
+		// API countdown, frozen as an absolute time so the 5 min cache stays honest.
+		reset = time.Now().Add(time.Duration(w.ResetAfterSeconds) * time.Second)
 	}
 	u.Windows = append(u.Windows, usageWin{Name: name, Percent: n, ResetAt: reset})
 	if !u.FiveHourKnown {
@@ -158,6 +161,7 @@ func applyCodexWindow(u *profileUsage, w *codexWindow) {
 	if name == "7d" || w.LimitWindowSeconds >= 2*86400 {
 		u.SevenDay = n
 		u.SevenDayKnown = true
+		u.SevenDayResetAt = reset
 	}
 }
 

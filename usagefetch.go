@@ -21,12 +21,13 @@ import (
 )
 
 // usagefetch.go is how /account, /status and the doctor learn an account's
-// rate/usage limits. Claude: GET /api/oauth/usage (5h/7d). Grok Build:
-// GET cli-chat-proxy.grok.com/v1/billing?format=credits (weekly SuperGrok
-// pool). Codex: GET chatgpt.com/backend-api/wham/usage (ChatGPT windows).
-// Antigravity has no public usage endpoint and is shown as n/a. Snapshots
-// live 5 minutes so chooseProfile can see numbers without hitting the
-// (rate-limited) APIs on every turn.
+// rate/usage limits. Claude: GET /api/oauth/usage (5h/7d, resets_at). Grok
+// Build: GET cli-chat-proxy.grok.com/v1/billing?format=credits (weekly
+// SuperGrok pool, currentPeriod.end). Codex: GET chatgpt.com/backend-api/
+// wham/usage (ChatGPT windows, reset_at / reset_after_seconds). Antigravity
+// has no public usage endpoint and is shown as n/a. Snapshots live 5 minutes
+// so chooseProfile can see numbers without hitting the (rate-limited) APIs
+// on every turn.
 
 const (
 	usageFetchTTL   = 5 * time.Minute

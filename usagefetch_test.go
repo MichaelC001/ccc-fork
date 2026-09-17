@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -38,6 +39,9 @@ func TestProfileUsageFromPayload(t *testing.T) {
 		if u.FiveHourResetAt.IsZero() {
 			t.Error("5h resets_at not parsed")
 		}
+		if u.SevenDayResetAt.IsZero() {
+			t.Error("7d resets_at not parsed")
+		}
 	})
 
 	t.Run("limits array fills in when five_hour is null", func(t *testing.T) {
@@ -59,6 +63,33 @@ func TestProfileUsageFromPayload(t *testing.T) {
 		}
 		if u.SevenDay != 9 || !u.SevenDayKnown {
 			t.Errorf("7d = %d known=%v, want 9 known", u.SevenDay, u.SevenDayKnown)
+		}
+		if u.FiveHourResetAt.IsZero() || u.SevenDayResetAt.IsZero() {
+			t.Error("limits[].resets_at not parsed")
+		}
+	})
+
+	t.Run("null five_hour resets_at is omitted, seven_day kept", func(t *testing.T) {
+		// Live 2026-09-17: five_hour.resets_at JSON null, seven_day.resets_at set.
+		raw := `{
+		  "five_hour": {"utilization": 0.0, "resets_at": null},
+		  "seven_day": {"utilization": 0.0, "resets_at": "2026-09-24T18:00:00+00:00"}
+		}`
+		var p oauthUsagePayload
+		if err := json.Unmarshal([]byte(raw), &p); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		u := profileUsageFromPayload(p)
+		if !u.FiveHourResetAt.IsZero() {
+			t.Errorf("5h reset = %v, want zero (API sent null)", u.FiveHourResetAt)
+		}
+		if u.SevenDayResetAt.IsZero() {
+			t.Error("7d resets_at not parsed")
+		}
+		now := time.Date(2026, 9, 17, 18, 0, 0, 0, time.UTC)
+		got := profileUsageLineAt(engineClaude, u, now)
+		if got != "5h 0% · 7d 0% · reset 7d" {
+			t.Errorf("line = %q", got)
 		}
 	})
 }
@@ -158,15 +189,16 @@ func TestUsageWindowName(t *testing.T) {
 }
 
 func TestUsageLine(t *testing.T) {
+	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	claude := profileUsage{FiveHour: 12, SevenDay: 40, FiveHourKnown: true, SevenDayKnown: true}
-	if got := profileUsageLine(engineClaude, claude); got != "5h 12% · 7d 40%" {
+	if got := profileUsageLineAt(engineClaude, claude, now); got != "5h 12% · 7d 40%" {
 		t.Errorf("claude = %q", got)
 	}
 	if got := profileUsageLine(engineClaude, unknownProfileUsage()); got != "5h ? · 7d ?" {
 		t.Errorf("claude unknown = %q", got)
 	}
 	grok := profileUsage{Windows: []usageWin{{Name: "week", Percent: 3}}, FiveHour: 3, FiveHourKnown: true}
-	if got := profileUsageLine(engineGrok, grok); got != "week 3%" {
+	if got := profileUsageLineAt(engineGrok, grok, now); got != "week 3%" {
 		t.Errorf("grok = %q", got)
 	}
 	if got := profileUsageLine(engineAntigravity, naProfileUsage("no public usage endpoint")); got != "n/a (no public usage endpoint)" {
@@ -175,13 +207,47 @@ func TestUsageLine(t *testing.T) {
 	if got := profileUsageLine(engineGrok, unknownProfileUsage()); got != "?" {
 		t.Errorf("grok unknown = %q", got)
 	}
+
+	withReset := profileUsage{
+		FiveHour: 62, FiveHourKnown: true, FiveHourResetAt: now.Add(80 * time.Minute),
+		SevenDay: 40, SevenDayKnown: true, SevenDayResetAt: now.Add(3 * 24 * time.Hour),
+	}
+	if got := profileUsageLineAt(engineClaude, withReset, now); got != "5h 62% · reset 1h20m · 7d 40% · reset 3d" {
+		t.Errorf("claude reset = %q", got)
+	}
+	grokReset := profileUsage{Windows: []usageWin{{Name: "week", Percent: 8, ResetAt: now.Add(5*24*time.Hour + 23*time.Hour)}}}
+	if got := profileUsageLineAt(engineGrok, grokReset, now); got != "week 8% · reset 5d23h" {
+		t.Errorf("grok reset = %q", got)
+	}
+	past := profileUsage{Windows: []usageWin{{Name: "5h", Percent: 18, ResetAt: now.Add(-time.Minute)}}}
+	if got := profileUsageLineAt(engineCodex, past, now); got != "5h 18% · reset now" {
+		t.Errorf("past reset = %q", got)
+	}
+}
+
+func TestCompactResetDuration(t *testing.T) {
+	cases := map[time.Duration]string{
+		0:                            "now",
+		-time.Second:                 "now",
+		45 * time.Second:             "45s",
+		20 * time.Minute:             "20m",
+		80 * time.Minute:             "1h20m",
+		2 * time.Hour:                "2h",
+		3 * 24 * time.Hour:           "3d",
+		3*24*time.Hour + 2*time.Hour: "3d2h",
+	}
+	for d, want := range cases {
+		if got := compactResetDuration(d); got != want {
+			t.Errorf("compactResetDuration(%v) = %q, want %q", d, got, want)
+		}
+	}
 }
 
 func TestProfileUsageFromGrokWeekly(t *testing.T) {
 	pct := 3.0
 	u := profileUsageFromGrok(grokBillingConfig{
 		CreditUsagePercent: &pct,
-		CurrentPeriod:      grokPeriod{Type: "USAGE_PERIOD_TYPE_WEEKLY", End: "2026-09-23T20:26:20Z"},
+		CurrentPeriod:      grokPeriod{Type: "USAGE_PERIOD_TYPE_WEEKLY", End: "2026-09-23T20:26:20.348972+00:00"},
 	})
 	if !u.FiveHourKnown || u.FiveHour != 3 {
 		t.Fatalf("5h = %d known=%v", u.FiveHour, u.FiveHourKnown)
@@ -189,8 +255,12 @@ func TestProfileUsageFromGrokWeekly(t *testing.T) {
 	if len(u.Windows) != 1 || u.Windows[0].Name != "week" || u.Windows[0].Percent != 3 {
 		t.Fatalf("windows = %+v", u.Windows)
 	}
-	if profileUsageLine(engineGrok, u) != "week 3%" {
-		t.Errorf("line = %q", profileUsageLine(engineGrok, u))
+	if u.Windows[0].ResetAt.IsZero() {
+		t.Fatal("currentPeriod.end not parsed")
+	}
+	now := time.Date(2026, 9, 17, 20, 26, 20, 0, time.UTC)
+	if got := profileUsageLineAt(engineGrok, u, now); got != "week 3% · reset 6d" {
+		t.Errorf("line = %q", got)
 	}
 }
 
@@ -199,18 +269,33 @@ func TestProfileUsageFromCodexWindows(t *testing.T) {
 		PrimaryWindow:   &codexWindow{UsedPercent: 18, LimitWindowSeconds: 18000, ResetAt: 1730947200},
 		SecondaryWindow: &codexWindow{UsedPercent: 86, LimitWindowSeconds: 604800, ResetAt: 1730980800},
 	}})
-	if profileUsageLine(engineCodex, u) != "5h 18% · 7d 86%" {
-		t.Errorf("line = %q", profileUsageLine(engineCodex, u))
+	now := time.Unix(1730940000, 0).UTC()
+	if got := profileUsageLineAt(engineCodex, u, now); got != "5h 18% · reset 2h · 7d 86% · reset 11h20m" {
+		t.Errorf("line = %q", got)
 	}
 	if u.FiveHour != 18 || u.SevenDay != 86 {
 		t.Errorf("selection 5h=%d 7d=%d", u.FiveHour, u.SevenDay)
+	}
+	if u.SevenDayResetAt.IsZero() {
+		t.Error("7d reset_at not copied")
 	}
 
 	weekly := profileUsageFromCodex(codexUsagePayload{RateLimit: &codexRateLimit{
 		PrimaryWindow: &codexWindow{UsedPercent: 0, LimitWindowSeconds: 604800, ResetAt: 1790246266},
 	}})
-	if profileUsageLine(engineCodex, weekly) != "7d 0%" {
-		t.Errorf("weekly-only = %q", profileUsageLine(engineCodex, weekly))
+	if got := profileUsageLineAt(engineCodex, weekly, time.Unix(1790246266-3600, 0)); got != "7d 0% · reset 1h" {
+		t.Errorf("weekly-only = %q", got)
+	}
+
+	relative := profileUsageFromCodex(codexUsagePayload{RateLimit: &codexRateLimit{
+		PrimaryWindow: &codexWindow{UsedPercent: 4, LimitWindowSeconds: 18000, ResetAfterSeconds: 90 * 60},
+	}})
+	if len(relative.Windows) != 1 || relative.Windows[0].ResetAt.IsZero() {
+		t.Fatalf("reset_after_seconds should freeze an absolute reset: %+v", relative.Windows)
+	}
+	left := time.Until(relative.Windows[0].ResetAt)
+	if left < 85*time.Minute || left > 95*time.Minute {
+		t.Errorf("reset_after_seconds 90m froze as %v left", left)
 	}
 }
 
@@ -246,12 +331,16 @@ func TestRefreshProfileUsageGrokFetchesBilling(t *testing.T) {
 	}
 	p := Profile{Name: "work", Engine: engineGrok, ConfigDir: dir}
 	u := refreshProfileUsage(p)
-	if profileUsageLine(engineGrok, u) != "week 3%" {
-		t.Fatalf("got %q (5h=%d known=%v)", profileUsageLine(engineGrok, u), u.FiveHour, u.FiveHourKnown)
+	if u.FiveHour != 3 || !u.FiveHourKnown {
+		t.Fatalf("got 5h=%d known=%v", u.FiveHour, u.FiveHourKnown)
+	}
+	got := profileUsageLine(engineGrok, u)
+	if !strings.Contains(got, "week 3%") || !strings.Contains(got, "reset ") {
+		t.Fatalf("got %q", got)
 	}
 	srv.Close()
 	u2 := refreshProfileUsage(p)
-	if profileUsageLine(engineGrok, u2) != "week 3%" {
+	if !strings.Contains(profileUsageLine(engineGrok, u2), "week 3%") {
 		t.Fatalf("cached %q", profileUsageLine(engineGrok, u2))
 	}
 }
@@ -290,8 +379,9 @@ func TestRefreshProfileUsageCodexFetchesWham(t *testing.T) {
 	}
 	p := Profile{Name: "openai", Engine: engineCodex, ConfigDir: dir}
 	u := refreshProfileUsage(p)
-	if profileUsageLine(engineCodex, u) != "5h 18% · 7d 40%" {
-		t.Fatalf("got %q", profileUsageLine(engineCodex, u))
+	got := profileUsageLine(engineCodex, u)
+	if !strings.Contains(got, "5h 18%") || !strings.Contains(got, "7d 40%") || !strings.Contains(got, "reset ") {
+		t.Fatalf("got %q", got)
 	}
 }
 

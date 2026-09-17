@@ -769,6 +769,7 @@ type profileUsage struct {
 	FiveHourKnown   bool
 	SevenDayKnown   bool
 	FiveHourResetAt time.Time // zero when unknown
+	SevenDayResetAt time.Time // zero when unknown
 	// Windows is the engine-native display set. Empty means fall back to
 	// FiveHour/SevenDay (Claude's 5h/7d card).
 	Windows []usageWin
@@ -778,7 +779,13 @@ type profileUsage struct {
 }
 
 // profileUsageLine is the "usage: …" text on /account, /status and doctor.
+// Reset times come from the usage API (resets_at / reset_at / period end);
+// a missing timestamp is omitted rather than guessed.
 func profileUsageLine(engine string, u profileUsage) string {
+	return profileUsageLineAt(engine, u, time.Now())
+}
+
+func profileUsageLineAt(engine string, u profileUsage, now time.Time) string {
 	if reason := strings.TrimSpace(u.Unavailable); reason != "" {
 		return "n/a (" + reason + ")"
 	}
@@ -789,14 +796,60 @@ func profileUsageLine(engine string, u profileUsage) string {
 			if name == "" {
 				name = "win"
 			}
-			parts = append(parts, name+" "+pct(w.Percent, true))
+			parts = append(parts, usageWindowPart(name, pct(w.Percent, true), w.ResetAt, now))
 		}
 		return strings.Join(parts, " · ")
 	}
 	if engine == engineClaude || u.FiveHourKnown || u.SevenDayKnown {
-		return fmt.Sprintf("5h %s · 7d %s", pct(u.FiveHour, u.FiveHourKnown), pct(u.SevenDay, u.SevenDayKnown))
+		return usageWindowPart("5h", pct(u.FiveHour, u.FiveHourKnown), u.FiveHourResetAt, now) +
+			" · " + usageWindowPart("7d", pct(u.SevenDay, u.SevenDayKnown), u.SevenDayResetAt, now)
 	}
 	return "?"
+}
+
+// usageWindowPart is one quota window: `5h 62%` or `5h 62% · reset 1h20m`.
+func usageWindowPart(name, percent string, resetAt, now time.Time) string {
+	s := name + " " + percent
+	if c := resetCountdown(resetAt, now); c != "" {
+		s += " · reset " + c
+	}
+	return s
+}
+
+// resetCountdown is how long until resetAt. Empty when the API did not
+// give a time; "now" when it is already due. Compact: 1h20m, 3d, 6d14h.
+func resetCountdown(resetAt, now time.Time) string {
+	if resetAt.IsZero() {
+		return ""
+	}
+	return compactResetDuration(resetAt.Sub(now))
+}
+
+func compactResetDuration(d time.Duration) string {
+	if d <= 0 {
+		return "now"
+	}
+	days := d / (24 * time.Hour)
+	rem := d % (24 * time.Hour)
+	hours := rem / time.Hour
+	rem %= time.Hour
+	mins := rem / time.Minute
+	switch {
+	case days > 0:
+		if hours > 0 {
+			return fmt.Sprintf("%dd%dh", days, hours)
+		}
+		return fmt.Sprintf("%dd", days)
+	case hours > 0:
+		if mins > 0 {
+			return fmt.Sprintf("%dh%dm", hours, mins)
+		}
+		return fmt.Sprintf("%dh", hours)
+	case mins > 0:
+		return fmt.Sprintf("%dm", mins)
+	default:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
 }
 
 // usageWindowName labels a quota window from its length in seconds.
@@ -876,12 +929,17 @@ func profileUsageFromPayload(p oauthUsagePayload) profileUsage {
 			if !u.FiveHourKnown {
 				u.FiveHour = percentFromFloat(lim.Percent)
 				u.FiveHourKnown = true
+			}
+			if u.FiveHourResetAt.IsZero() {
 				u.FiveHourResetAt = parseResetAt(lim.ResetsAt)
 			}
 		case "weekly_all":
 			if !u.SevenDayKnown {
 				u.SevenDay = percentFromFloat(lim.Percent)
 				u.SevenDayKnown = true
+			}
+			if u.SevenDayResetAt.IsZero() {
+				u.SevenDayResetAt = parseResetAt(lim.ResetsAt)
 			}
 		}
 	}
@@ -893,14 +951,16 @@ func applyWindow(u *profileUsage, w *usageWindow, fiveHour bool) {
 		return
 	}
 	pct := percentFromFloat(*w.Utilization)
+	reset := parseResetAt(w.ResetsAt)
 	if fiveHour {
 		u.FiveHour = pct
 		u.FiveHourKnown = true
-		u.FiveHourResetAt = parseResetAt(w.ResetsAt)
+		u.FiveHourResetAt = reset
 		return
 	}
 	u.SevenDay = pct
 	u.SevenDayKnown = true
+	u.SevenDayResetAt = reset
 }
 
 func parseResetAt(s string) time.Time {

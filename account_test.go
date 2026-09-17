@@ -694,6 +694,37 @@ func TestRenderAccountsShowsEngineAndMixedHealth(t *testing.T) {
 	}
 }
 
+func TestRenderAccountsShowsResetCountdown(t *testing.T) {
+	now := time.Now()
+	cards := []accountCard{
+		{
+			Profile: Profile{Name: "you@example.com", Engine: engineClaude, Label: "you@example.com"},
+			State:   accountOK,
+			Usage: profileUsage{
+				FiveHour: 62, FiveHourKnown: true, FiveHourResetAt: now.Add(80*time.Minute + 10*time.Second),
+				SevenDay: 40, SevenDayKnown: true, SevenDayResetAt: now.Add(3*24*time.Hour + 2*time.Minute),
+			},
+			Disclaimer: true,
+		},
+		{
+			Profile: Profile{Name: "work", Engine: engineGrok, Label: "work"},
+			State:   accountOK,
+			Usage: profileUsage{
+				Windows: []usageWin{{Name: "week", Percent: 8, ResetAt: now.Add(5*24*time.Hour + time.Hour)}},
+			},
+		},
+	}
+	body, _ := renderAccounts(cards)
+	for _, want := range []string{
+		"usage: 5h 62% · reset 1h20m · 7d 40% · reset 3d",
+		"usage: week 8% · reset 5d",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("card missing %q:\n%s", want, body)
+		}
+	}
+}
+
 // The same email on Claude and Codex is two accounts; the same email on the
 // same engine is still rejected. Status cards show the email, not the
 // composite key.

@@ -160,16 +160,22 @@ is not injected again (avoids a loop); the topic is told to use `/session`.
   account (read from `turns.status = running`, §14.6), then name; excludes
   profiles in cooldown or `needs_login`. Failover never crosses engines
   (Claude↔Claude, Grok↔Grok) unless a future design documents it.
-  Utilization is fetched on `/account`, `/status` and the doctor (5 min TTL):
+  Utilization is fetched on `/account`, `/status` and the doctor (5 min TTL).
+  Each window is `5h 62% · reset 1h20m` / `7d 40% · reset 3d` / `week 8% · reset 5d23h`
+  when the API gives a reset time; omit ` · reset …` when it does not (do not
+  invent a clock). Sources:
   - **Claude** — `GET https://api.anthropic.com/api/oauth/usage` with the
     profile's OAuth token (macOS keychain `Claude Code-credentials`, or
     `<config_dir>/.credentials.json`). `.claude.json`'s
     `cachedUsageUtilization` is a fallback: Claude Code 2.1.x often no
     longer writes it, which is why `/account` used to show `5h ? · 7d ?`.
+    Reset is `five_hour.resets_at` / `seven_day.resets_at` (RFC3339; may be
+    JSON null) or the matching `limits[].resets_at` (`session` / `weekly_all`).
   - **Grok** (Grok Build / SuperGrok OAuth, not an xAI API key) —
     `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` with the
     access token in `$GROK_HOME/auth.json`. Display is the weekly pool
-    (`creditUsagePercent`, typically `week N%`). Token refresh is
+    (`creditUsagePercent`, typically `week N% · reset …`). Reset is
+    `currentPeriod.end`, falling back to `billingPeriodEnd`. Token refresh is
     `POST https://auth.x.ai/oauth2/token`. The Management API prepaid
     balance (`GET /v1/billing/teams/{id}/prepaid/balance`) is API-key
     billing and is not this login.
@@ -177,7 +183,8 @@ is not injected again (avoids a loop); the topic is told to use `/session`.
     platform API key) — `GET https://chatgpt.com/backend-api/wham/usage`
     with `Authorization: Bearer` + `ChatGPT-Account-Id` from
     `$CODEX_HOME/auth.json`. Windows are labelled from
-    `limit_window_seconds` (5h / 7d). Token refresh is
+    `limit_window_seconds` (5h / 7d). Reset is `reset_at` (unix seconds),
+    else `now + reset_after_seconds`. Token refresh is
     `POST https://auth.openai.com/oauth/token`. An API-key Codex login
     shows `n/a (API key, not ChatGPT quota)`.
   - **Antigravity** — `n/a (no public usage endpoint)`.

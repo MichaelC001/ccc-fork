@@ -54,6 +54,9 @@ func TestReadProfileUsage(t *testing.T) {
 		if u.FiveHourResetAt.IsZero() {
 			t.Error("five_hour resets_at not parsed")
 		}
+		if u.SevenDayResetAt.IsZero() {
+			t.Error("seven_day resets_at not parsed")
+		}
 	})
 
 	t.Run("null utilization is unknown", func(t *testing.T) {
