@@ -156,6 +156,7 @@ func (h *hubClient) flushOutgoingFiles() {
 		h.pushEvent("file", map[string]any{
 			"bot_id":  f.BotID,
 			"bot":     name,
+			"general": err == nil && isGeneralBot(b),
 			"file_id": f.ID,
 			"name":    f.Name,
 			"mime":    f.MIME,

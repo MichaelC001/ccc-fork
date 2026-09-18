@@ -428,7 +428,10 @@ func (h *hubClient) rpcBots(archived bool, out *hubRPC) {
 }
 
 func fillBotInfo(db *gorm.DB, b *Bot, progress string, pending *Question) hubBotInfo {
-	info := hubBotInfo{ID: b.ID, Name: b.Name, Role: b.Role, Status: b.Status, Engine: botEngine(b), Archived: b.ArchivedAt != nil}
+	info := hubBotInfo{
+		ID: b.ID, Name: b.Name, Role: b.Role, Status: b.Status, Engine: botEngine(b),
+		TopicID: b.TopicID, General: isGeneralBot(b), Archived: b.ArchivedAt != nil,
+	}
 	var last Turn
 	if err := db.Where("bot_id = ?", b.ID).Order("id DESC").First(&last).Error; err == nil {
 		info.Last = last.CreatedAt.UTC().Format(time.RFC3339)
@@ -601,6 +604,10 @@ func (h *hubClient) rpcArchive(params json.RawMessage, out *hubRPC) {
 		out.OK, out.Error = false, "unknown bot"
 		return
 	}
+	if isGeneralBot(b) {
+		out.OK, out.Error = false, "General cannot be archived"
+		return
+	}
 	if err := archiveBotRow(h.in.db, b.ID); err != nil {
 		out.OK, out.Error = false, err.Error()
 		return
@@ -636,6 +643,10 @@ func (h *hubClient) rpcRename(params json.RawMessage, out *hubRPC) {
 	b, err := botByID(h.in.db, p.BotID)
 	if err != nil || b.ArchivedAt != nil {
 		out.OK, out.Error = false, "unknown bot"
+		return
+	}
+	if isGeneralBot(b) {
+		out.OK, out.Error = false, "General stays General"
 		return
 	}
 	name, err := validateBotName(h.in.db, b.ID, p.Name)

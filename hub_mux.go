@@ -57,8 +57,9 @@ func (m muxUI) emit(kind string, topicID int64, htmlBody string) {
 		return
 	}
 	m.hub.pushEvent(kind, map[string]any{
-		"bot_id": b.ID,
-		"bot":    b.Name,
-		"text":   html.UnescapeString(stripTags(htmlBody)),
+		"bot_id":  b.ID,
+		"bot":     b.Name,
+		"general": isGeneralBot(b),
+		"text":    html.UnescapeString(stripTags(htmlBody)),
 	})
 }

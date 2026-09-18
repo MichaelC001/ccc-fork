@@ -990,12 +990,12 @@ Phone RPC (plaintext inside the box, instance `hubClient.dispatch`):
 | Method | Params | Behavior |
 |---|---|---|
 | `hello` | — | Instance name + live session count. |
-| `bots` | — | Live sessions, most recently active first (`last`, `last_text`, `status`, pending `question`). |
+| `bots` | — | Live sessions, most recently active first (`last`, `last_text`, `status`, pending `question`). General is marked `general: true` / `topic_id: 0`. |
 | `archived` | — | Sessions with `archived_at` set. |
 | `history` | `bot_id`, `limit?` | Turns, oldest first. |
-| `send` | `bot_id`, `text?`, `image?` (`mime`, `name`, `data` base64) | Enqueue a user turn. An image is written to the session `inbox/` (≤512 KiB) the same way a Telegram photo is. A send while that session has an unanswered `ask_owner` is the answer (same as a Telegram reply). |
-| `rename` | `bot_id`, `name` | `validateBotName` + `renameBot`. |
-| `archive` | `bot_id` | `archiveBotRow`. Drops off `bots`. |
+| `send` | `bot_id`, `text?`, `image?` (`mime`, `name`, `data` base64) | Enqueue a user turn. Sending to General is the DM. Sending to a worker is `tell_session`. An image is written to the session `inbox/` (≤512 KiB) the same way a Telegram photo is. A send while that session has an unanswered `ask_owner` is the answer (same as a Telegram reply). |
+| `rename` | `bot_id`, `name` | `validateBotName` + `renameBot`. Refused for General. |
+| `archive` | `bot_id` | `archiveBotRow`. Drops off `bots`. Refused for General. |
 | `unarchive` | `bot_id` | `unarchiveBotRow`. |
 | `questions` | — | Unanswered `ask_owner` rows on live sessions (options are the same buttons Telegram shows). |
 | `answer` | `question_id`, `option?` (0-based index), `text?` | Resolve that question and enqueue `Answer to "…": …`. |
@@ -1012,8 +1012,10 @@ Listen also pushes events (same box as `post`/`progress`/`file`):
 Keepalive: clients send `{v:1,t:ping}` every ~30s; the hub replies `{t:pong}`.
 The hub's 2-minute read deadline resets on any data frame. The phone keeps one
 websocket per paired machine (foreground service on Android) and shows a local
-notification on `post` and `question` events — the same posts Telegram would ping. `progress`
-is silent.
+notification on General `post`, `file`, and `question` events — the same pings
+Telegram would send. Worker transcripts still emit `post`/`progress` so the
+phone can show a log, but they do not notify. `post`/`file` events include
+`general: true` when the session is General.
 
 ## 16. Owner secrets vault
 

@@ -92,6 +92,8 @@ type hubBotInfo struct {
 	Role     string           `json:"role"`
 	Status   string           `json:"status"`
 	Engine   string           `json:"engine"`
+	TopicID  int64            `json:"topic_id"`
+	General  bool             `json:"general,omitempty"`
 	Last     string           `json:"last,omitempty"`
 	LastText string           `json:"last_text,omitempty"`
 	Progress string           `json:"progress,omitempty"`

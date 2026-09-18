@@ -476,6 +476,9 @@ func validateBotName(db *gorm.DB, selfID int64, raw string) (string, error) {
 // conversation, so the new name only reaches the model in a new one — the same
 // reason /role rotates (DESIGN §14.14). Memories are untouched.
 func renameBot(db *gorm.DB, config *Config, b *Bot, name string) error {
+	if isGeneralBot(b) {
+		return fmt.Errorf("General stays General")
+	}
 	updates := map[string]any{"name": name, "session_id": ""}
 	if strings.TrimSpace(b.Cwd) == "" {
 		// An empty cwd resolves to <data_dir>/bots/<name>/workspace, so pin the

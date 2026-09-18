@@ -345,6 +345,67 @@ func TestHubRename(t *testing.T) {
 	}
 }
 
+func TestHubBotsMarksGeneral(t *testing.T) {
+	h, in, _, _ := testHub(t)
+	chief, err := in.ensureGeneralBot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := in.createBot("deploy-watch", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := h.dispatch(hubRPC{Kind: "req", ID: "1", Method: "bots"})
+	if !listed.OK {
+		t.Fatalf("bots: %s", listed.Error)
+	}
+	var bots []hubBotInfo
+	if err := json.Unmarshal(listed.Body, &bots); err != nil {
+		t.Fatal(err)
+	}
+	var g, w *hubBotInfo
+	for i := range bots {
+		if bots[i].ID == chief.ID {
+			g = &bots[i]
+		}
+		if bots[i].ID == worker.ID {
+			w = &bots[i]
+		}
+	}
+	if g == nil || !g.General || g.TopicID != 0 {
+		t.Fatalf("General = %+v", g)
+	}
+	if w == nil || w.General || w.TopicID == 0 {
+		t.Fatalf("worker = %+v", w)
+	}
+}
+
+func TestHubRenameAndArchiveRefuseGeneral(t *testing.T) {
+	h, in, _, _ := testHub(t)
+	chief, err := in.ensureGeneralBot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	params, _ := json.Marshal(map[string]any{"bot_id": chief.ID, "name": "Chief"})
+	res := h.dispatch(hubRPC{Kind: "req", ID: "1", Method: "rename", Params: params})
+	if res.OK || !strings.Contains(res.Error, "General stays General") {
+		t.Fatalf("rename General: ok=%v err=%q", res.OK, res.Error)
+	}
+	got, err := botByID(in.db, chief.ID)
+	if err != nil || got.Name != generalBotName {
+		t.Fatalf("stored name = %q err=%v", got.Name, err)
+	}
+	arch, _ := json.Marshal(map[string]any{"bot_id": chief.ID})
+	res = h.dispatch(hubRPC{Kind: "req", ID: "2", Method: "archive", Params: arch})
+	if res.OK || !strings.Contains(res.Error, "General cannot be archived") {
+		t.Fatalf("archive General: ok=%v err=%q", res.OK, res.Error)
+	}
+	got, err = botByID(in.db, chief.ID)
+	if err != nil || got.ArchivedAt != nil {
+		t.Fatal("General must stay live")
+	}
+}
+
 func TestHubQuestionsAndAnswer(t *testing.T) {
 	h, in, runner, _ := testHub(t)
 	live, err := in.createBot("worker", "")
