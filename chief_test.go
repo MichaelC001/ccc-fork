@@ -126,7 +126,7 @@ func TestReportToGeneralIsWorkerOnly(t *testing.T) {
 	}
 	var queued []InboxMessage
 	in.db.Where("to_bot_id = ?", chief.ID).Find(&queued)
-	if len(queued) != 1 || queued[0].Text != "build green" {
+	if len(queued) != 1 || queued[0].Text != "build green" || !queued[0].Wake || !queued[0].Relay {
 		t.Fatalf("report inbox: %+v", queued)
 	}
 	for _, c := range api.since("sendMessage") {
@@ -302,6 +302,9 @@ func TestChiefPromptIsByteStable(t *testing.T) {
 	}
 	if !strings.Contains(first, "does not see those reports") {
 		t.Errorf("chief prompt must not dump session reports to the owner:\n%s", first)
+	}
+	if !strings.Contains(first, "MUST reply in this DM") {
+		t.Errorf("chief prompt must require a user-visible summary after a worker reports:\n%s", first)
 	}
 	if !strings.Contains(first, "every 10 minutes") || !strings.Contains(first, "Do not notify_owner just to repeat the nag") {
 		t.Errorf("chief prompt must teach idle nags are dispatcher-only:\n%s", first)
@@ -633,4 +636,208 @@ func assertNoOwnerSessionNudge(t *testing.T, ui *fakeUI) {
 			t.Errorf("owner-facing text must not ask for /session: %q", p)
 		}
 	}
+}
+
+func TestWorkerDoneRelaysSummaryNotOnlyOneLiner(t *testing.T) {
+	in, _, _ := testInstance(t)
+	chief, err := in.ensureGeneralBot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := in.createBot("Fragua", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ui := &fakeUI{}
+	r := newRunner(in.db, in.cfg, ui)
+	s := &mcpServer{db: in.db, config: in.cfg, botID: w.ID}
+	if res, _, err := s.reportToGeneral(t.Context(), nil, reportToGeneralIn{Text: "Valheim is up on vps2, 3x resources."}); err != nil || res.IsError {
+		t.Fatalf("report: %+v %v", res, err)
+	}
+
+	r.postOwnerSessionStatus(w, "", false)
+	r.ensureWorkerRelayToGeneral(w, "", false, "a long transcript the owner must not see")
+	r.deliverInbox(w.ID)
+
+	var genTurns []Turn
+	in.db.Where("bot_id = ? AND source = ?", chief.ID, sourceBot).Find(&genTurns)
+	if len(genTurns) != 1 {
+		t.Fatalf("General turns = %d, want the relay wake", len(genTurns))
+	}
+	var inbox InboxMessage
+	if err := in.db.Where("turn_id = ?", genTurns[0].ID).First(&inbox).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !inbox.Relay || inbox.Text != "Valheim is up on vps2, 3x resources." {
+		t.Fatalf("relay inbox = %+v", inbox)
+	}
+
+	summary := "Valheim is up on vps2."
+	if _, err := ui.Post(0, summary); err != nil {
+		t.Fatal(err)
+	}
+	r.fulfillOwnerRelay(&genTurns[0], "", summary)
+
+	if !ownerPostsInclude(ui, summary) {
+		t.Errorf("DM missing General's summary, posts=%v", ui.posts)
+	}
+	if ownerPostsOnlySessionOneLiner(ui, w.Name) {
+		t.Errorf("owner was left with only the one-liner: %v", ui.posts)
+	}
+	for _, p := range ui.posts {
+		if strings.Contains(p, "a long transcript") {
+			t.Errorf("synthetic last-message must not dump when report_to_general already queued: %q", p)
+		}
+	}
+}
+
+func TestGeneralTimeoutOnWorkerReportPostsFallback(t *testing.T) {
+	in, _, _ := testInstance(t)
+	chief, err := in.ensureGeneralBot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := in.createBot("Fragua", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ui := &fakeUI{}
+	r := newRunner(in.db, in.cfg, ui)
+	s := &mcpServer{db: in.db, config: in.cfg, botID: w.ID}
+	if res, _, err := s.reportToGeneral(t.Context(), nil, reportToGeneralIn{Text: "Valheim is up on vps2, 3x resources."}); err != nil || res.IsError {
+		t.Fatalf("report: %+v %v", res, err)
+	}
+
+	r.postOwnerSessionStatus(w, "", false)
+	r.ensureWorkerRelayToGeneral(w, "", false, "")
+	r.deliverInbox(w.ID)
+
+	var genTurn Turn
+	if err := in.db.Where("bot_id = ? AND source = ?", chief.ID, sourceBot).First(&genTurn).Error; err != nil {
+		t.Fatal(err)
+	}
+	r.persistChiefTimeout(chief, &genTurn, genTurn.Input, time.Now(), nil)
+	r.fulfillOwnerRelay(&genTurn, chiefTimeoutClass, "")
+
+	if ownerPostsOnlySessionOneLiner(ui, w.Name) {
+		t.Fatalf("timeout left only the one-liner: %v", ui.posts)
+	}
+	if !ownerPostsInclude(ui, "Valheim is up on vps2") {
+		t.Errorf("fallback missing worker last message, posts=%v", ui.posts)
+	}
+	var extra int64
+	in.db.Model(&Bot{}).Where("id != ? AND id != ? AND archived_at IS NULL", chief.ID, w.ID).Count(&extra)
+	if extra != 0 {
+		t.Fatalf("report timeout spawned %d extra workers", extra)
+	}
+	var queued int64
+	in.db.Model(&Turn{}).Where("bot_id = ? AND status = ?", chief.ID, turnQueued).Count(&queued)
+	if queued != 0 {
+		t.Errorf("report timeout must not inject a follow-up, got %d queued", queued)
+	}
+}
+
+func TestWorkerLastMessageWakesGeneralWhenNoReport(t *testing.T) {
+	in, _, _ := testInstance(t)
+	chief, err := in.ensureGeneralBot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := in.createBot("deployer", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ui := &fakeUI{}
+	r := newRunner(in.db, in.cfg, ui)
+	r.postOwnerSessionStatus(w, "", false)
+	r.ensureWorkerRelayToGeneral(w, "", false, "shipped fecha to vps3")
+	r.deliverInbox(w.ID)
+
+	var genTurn Turn
+	if err := in.db.Where("bot_id = ? AND source = ?", chief.ID, sourceBot).First(&genTurn).Error; err != nil {
+		t.Fatal(err)
+	}
+	r.fulfillOwnerRelay(&genTurn, chiefTimeoutClass, "")
+	if ownerPostsOnlySessionOneLiner(ui, w.Name) {
+		t.Fatalf("timeout left only the one-liner: %v", ui.posts)
+	}
+	if !ownerPostsInclude(ui, "shipped fecha to vps3") {
+		t.Errorf("fallback missing last message, posts=%v", ui.posts)
+	}
+}
+
+func TestIdleRemindDoesNotFallbackToOwner(t *testing.T) {
+	in, _, _ := testInstance(t)
+	chief, err := in.ensureGeneralBot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := in.createBot("parked", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ui := &fakeUI{}
+	r := newRunner(in.db, in.cfg, ui)
+	if _, _, err := queueBotMessage(in.db, w, chief.Name, idleRemindText(w.Name), true); err != nil {
+		t.Fatal(err)
+	}
+	r.deliverInbox(w.ID)
+	var genTurn Turn
+	if err := in.db.Where("bot_id = ? AND source = ?", chief.ID, sourceBot).First(&genTurn).Error; err != nil {
+		t.Fatal(err)
+	}
+	r.persistChiefTimeout(chief, &genTurn, genTurn.Input, time.Now(), nil)
+	r.fulfillOwnerRelay(&genTurn, chiefTimeoutClass, "")
+	if ownerPostsInclude(ui, "still waiting") || ownerPostsInclude(ui, "Idle session") {
+		t.Errorf("idle nag must not land in the DM: %v", ui.posts)
+	}
+}
+
+func TestOwnerRelayFallbackIsShortNotTranscript(t *testing.T) {
+	got := ownerRelayFallback("Fragua", "Valheim is up.")
+	if got != "Fragua: Valheim is up." {
+		t.Errorf("fallback = %q", got)
+	}
+	long := strings.Repeat("x", ownerRelayFallbackMax+50)
+	got = ownerRelayFallback("Fragua", long)
+	if !strings.HasPrefix(got, "Fragua: ") {
+		t.Errorf("missing name prefix: %q", got[:20])
+	}
+	if strings.Contains(got, strings.Repeat("x", ownerRelayFallbackMax+1)) {
+		t.Error("fallback dumped the full transcript")
+	}
+	if len(got) > ownerRelayFallbackMax+len("Fragua: ")+10 {
+		t.Errorf("fallback too long: %d", len(got))
+	}
+}
+
+func ownerPostsInclude(ui *fakeUI, needle string) bool {
+	for _, p := range ui.posts {
+		if strings.Contains(p, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func ownerPostsOnlySessionOneLiner(ui *fakeUI, name string) bool {
+	status := map[string]bool{
+		ownerSessionStatusLine(name, "done"):    true,
+		ownerSessionStatusLine(name, "waiting"): true,
+		ownerSessionStatusLine(name, "error"):   true,
+		ownerSessionStatusLine(name, "started"): true,
+	}
+	n := 0
+	for _, p := range ui.posts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if status[p] {
+			n++
+			continue
+		}
+		return false
+	}
+	return n > 0
 }

@@ -21,9 +21,10 @@ asked to `/session`). Idle sessions waiting on
 you wake General every 10 minutes (inbox, not a chat ping); General decides
 what to do. `/session <prompt>`
 still starts a worker without going through General. Sessions report only
-to General (`report_to_general`); those reports are not posted to the DM
-(at most a one-liner of status). There is no role, no `/role`, no «what
-should I be?» interview.
+to General (`report_to_general`); the owner does not see the transcript.
+General posts a short DM summary; if it cannot, listen posts a short
+fallback from the worker's last message (never only `session <name> done`).
+There is no role, no `/role`, no «what should I be?» interview.
 
 Under the hood ccc drives a coding CLI as a **stateless runner**. The default
 engine is Claude Code: every message is one `claude -p` process with a
@@ -237,8 +238,9 @@ back here. There is no worker topic to talk in.
 While a General turn runs, one progress message in the DM is edited in place
 (no Telegram notification). The answer is posted when the turn finishes — that
 is the ping you get — and your message gets a ✅. Workers report back through
-General (`report_to_general`); the DM gets at most a one-liner of status,
-not the report.
+General (`report_to_general`). The DM may get a quiet status one-liner;
+General (or listen, if General times out) still posts a short summary so
+you are never left with only `session <name> done`.
 
 ### Commands
 

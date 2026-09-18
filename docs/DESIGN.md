@@ -105,13 +105,17 @@ added to the user's triggering message. Tool call payloads are never dumped
 into the chat; `thinking` is never shown.
 
 Backend workers do not post progress or final answers to Telegram. The owner
-does not see General↔session messages (prompts, reports, transcripts). At
-most a one-liner of status lands in the DM (`session <name> done|waiting|error`)
-when a worker turn ends. Full reports stay in General's inbox for the
-dispatcher to read and summarize. `notify_owner`, `ask_owner` and job
-pings still reach the owner. Idle-session reminders wake General via
-inbox + enqueue (same path as `report_to_general`); they are not posted
-to the DM. The phone hub still sees every turn.
+does not see General↔session messages (prompts, reports, transcripts). A
+quiet one-liner of status (`session <name> done|waiting|error`) may land
+when a worker turn ends; it is not a substitute for an answer. After a
+worker turn that reported (`report_to_general`) or finished with last-message
+output, listen wakes General with that inbox (relay). General MUST post a
+short owner-facing summary in the DM. If General cannot (60s cap, crash,
+empty reply), listen posts a short fallback from the worker's last message —
+not the full transcript, not only the one-liner. `notify_owner`, `ask_owner`
+and job pings still reach the owner. Idle-session reminders wake General
+via inbox + enqueue (same path as `report_to_general`); they are not posted
+to the DM and do not use the fallback. The phone hub still sees every turn.
 
 ### 3.3 Post-turn
 
@@ -153,7 +157,9 @@ with the **owner's** request (`source=user`) plus a short note that General
 timed out, and posts at most a quiet `session <name> started` one-liner in
 the DM. Session reports (`source=bot`), watches, schedules and routines are
 not owner work: timing out on those does not auto-spawn and does not inject
-a follow-up (that duplicated turns). The owner is never told to `/session`.
+a follow-up (that duplicated turns). A timed-out **relay** report still
+posts listen's short owner-facing fallback from the worker's last message.
+The owner is never told to `/session`.
 A first timeout of owner work also enqueues a `source=system` turn whose
 input is an error: this work is too long for General — spawn if you still
 can, and do not spawn a duplicate if ccc already started one. The owner is
@@ -291,7 +297,7 @@ home (Codex also gets per-turn `exec -c`). Identity is `--bot`/`--turn` or
 | `list_sessions` | — | **General only.** Live workers: name, status, last output. |
 | `spawn_session` | `prompt`, `name?` | **General only.** Create a backend worker (no Telegram topic) on the account/engine with the most usage headroom and queue the prompt (wakes after this turn). |
 | `tell_session` | `session`, `text` | **General only.** Inbox + wake a live worker. |
-| `report_to_general` | `text` | **Workers only.** Inbox + wake General. Not posted to the owner. |
+| `report_to_general` | `text` | **Workers only.** Inbox + wake General (relay). Not dumped into the DM; General (or listen's fallback) summarizes to the owner. |
 
 All tools validate the calling bot from the `--bot` flag; tool inputs coming
 from the model are data, never instructions to ccc.

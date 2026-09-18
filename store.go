@@ -107,6 +107,7 @@ type InboxMessage struct {
 	FromBotID   *int64
 	Text        string
 	Wake        bool
+	Relay       bool // owner must hear this; listen falls back if General does not
 	CreatedAt   time.Time
 	DeliveredAt *time.Time `gorm:"index"` // indexed: the maintenance job deletes by it
 	TurnID      *int64

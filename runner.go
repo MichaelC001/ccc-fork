@@ -454,6 +454,7 @@ func foldQueue(db *gorm.DB, botID int64) (*Turn, string, []int64, bool) {
 		}
 		db.Model(&Turn{}).Where("id = ?", extra.ID).
 			Updates(map[string]any{"status": turnDone, "stop_reason": "merged into turn " + fmt.Sprint(head.ID)})
+		db.Model(&InboxMessage{}).Where("turn_id = ?", extra.ID).Update("turn_id", head.ID)
 	}
 	return &head, strings.Join(inputs, "\n\n"), triggers, true
 }
@@ -541,6 +542,11 @@ func (r *Runner) execute(b *Bot, t *Turn, input string, triggers []int64) {
 		break
 	}
 
+	output := ""
+	if res != nil {
+		output = res.Text
+	}
+
 	end := time.Now()
 	if class == "" && res != nil {
 		r.db.Model(&Turn{}).Where("id = ?", t.ID).Updates(map[string]any{
@@ -580,6 +586,11 @@ func (r *Runner) execute(b *Bot, t *Turn, input string, triggers []int64) {
 		setBotStatus(r.db, b.ID, botIdle)
 	}
 	r.postOwnerSessionStatus(b, class, waiting)
+	if isGeneralBot(b) {
+		r.fulfillOwnerRelay(t, class, output)
+	} else {
+		r.ensureWorkerRelayToGeneral(b, class, waiting, output)
+	}
 	r.deliverInbox(b.ID)
 }
 
@@ -613,6 +624,124 @@ func (r *Runner) postOwnerSessionStatus(b *Bot, class string, waiting bool) {
 		return
 	}
 	_, _ = r.ui.Post(0, ownerSessionStatusLine(b.Name, status)) // safe-ignore: a missed one-liner must not fail the turn
+}
+
+// ownerRelayFallbackMax is the owner-facing cap for listen's fallback when
+// General does not summarize a worker report. Short on purpose: not a transcript.
+const ownerRelayFallbackMax = 1200
+
+// workerLastMessageRelayMax caps a synthetic inbox built from a worker's last
+// assistant text when it did not call report_to_general.
+const workerLastMessageRelayMax = 4000
+
+// ensureWorkerRelayToGeneral wakes General with a relay inbox after a worker
+// turn that produced an answer. report_to_general already queued one; otherwise
+// the last assistant message is used. Quiet stays: nothing is dumped here.
+func (r *Runner) ensureWorkerRelayToGeneral(b *Bot, class string, waiting bool, output string) {
+	if r == nil || b == nil || isGeneralBot(b) {
+		return
+	}
+	if waiting || class == "stopped" || class == chiefTimeoutClass {
+		return
+	}
+	chief, err := generalBot(r.db)
+	if err != nil {
+		return
+	}
+	if hasPendingOwnerRelay(r.db, b.ID, chief.ID) {
+		return
+	}
+	body := strings.TrimSpace(output)
+	if body == "" {
+		return
+	}
+	if _, _, err := queueOwnerRelay(r.db, b, truncate(body, workerLastMessageRelayMax)); err != nil {
+		hookLog("worker relay: %v", err)
+	}
+}
+
+func hasPendingOwnerRelay(db *gorm.DB, fromID, toID int64) bool {
+	if db == nil {
+		return false
+	}
+	var n int64
+	db.Model(&InboxMessage{}).
+		Where("from_bot_id = ? AND to_bot_id = ? AND relay = ? AND delivered_at IS NULL", fromID, toID, true).
+		Count(&n)
+	return n > 0
+}
+
+// fulfillOwnerRelay posts a short owner-facing summary when General was woken
+// to relay a worker report and did not (timeout, crash, empty reply). A real
+// General reply is the product path; this is the listen fallback.
+func (r *Runner) fulfillOwnerRelay(t *Turn, class, generalOutput string) {
+	if r == nil || t == nil {
+		return
+	}
+	var msgs []InboxMessage
+	if err := r.db.Where("turn_id = ? AND relay = ?", t.ID, true).Order("id").Find(&msgs).Error; err != nil {
+		return
+	}
+	if len(msgs) == 0 {
+		return
+	}
+	if class == "" && strings.TrimSpace(generalOutput) != "" {
+		return
+	}
+	seen := map[string]bool{}
+	for _, m := range msgs {
+		name := "session"
+		if m.FromBotID != nil {
+			if from, err := botByID(r.db, *m.FromBotID); err == nil {
+				name = from.Name
+			}
+		}
+		text := ownerRelayFallback(name, m.Text)
+		if text == "" || seen[text] {
+			continue
+		}
+		seen[text] = true
+		r.postOwnerText(text)
+	}
+}
+
+func ownerRelayFallback(name, report string) string {
+	report = strings.TrimSpace(report)
+	report = truncate(report, ownerRelayFallbackMax)
+	name = strings.TrimSpace(name)
+	if report == "" {
+		if name == "" {
+			return ""
+		}
+		return name + " finished"
+	}
+	if name == "" {
+		return report
+	}
+	prefix := name + ": "
+	if strings.HasPrefix(strings.ToLower(report), strings.ToLower(prefix)) {
+		return report
+	}
+	return prefix + report
+}
+
+// postOwnerText sends a model-ish plain-text reply to the owner's DM.
+func (r *Runner) postOwnerText(text string) {
+	if r == nil || r.ui == nil {
+		return
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	chunks := splitTelegramHTML(renderTelegramHTML(text), telegramChunkLimit)
+	if len(chunks) == 0 {
+		return
+	}
+	_, _ = r.ui.Post(0, chunks[0]) // safe-ignore: a missed fallback must not fail the turn
+	for _, c := range chunks[1:] {
+		_, _ = postOverflow(r.ui, 0, c)
+	}
 }
 
 // persistChiefTimeout records the killed General turn. First timeout: inject

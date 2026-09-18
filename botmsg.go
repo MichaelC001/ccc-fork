@@ -14,6 +14,21 @@ import (
 // the target reads on its next turn. The body is not posted to Telegram —
 // the owner must not see General↔session prompts or reports (DESIGN §3.2).
 func queueBotMessage(db *gorm.DB, from *Bot, toName, body string, wake bool) (*Bot, *InboxMessage, error) {
+	return enqueueBotMessage(db, from, toName, body, wake, false)
+}
+
+// queueOwnerRelay is a worker → General report the owner must hear. Quiet
+// stays: the body is not dumped into Telegram. listen wakes General; if
+// General does not post a summary, listen posts a short fallback.
+func queueOwnerRelay(db *gorm.DB, from *Bot, body string) (*Bot, *InboxMessage, error) {
+	chief, err := generalBot(db)
+	if err != nil {
+		return nil, nil, err
+	}
+	return enqueueBotMessage(db, from, chief.Name, body, true, true)
+}
+
+func enqueueBotMessage(db *gorm.DB, from *Bot, toName, body string, wake, relay bool) (*Bot, *InboxMessage, error) {
 	body = strings.TrimSpace(body)
 	if body == "" {
 		return nil, nil, fmt.Errorf("message text is empty")
@@ -28,7 +43,7 @@ func queueBotMessage(db *gorm.DB, from *Bot, toName, body string, wake bool) (*B
 	if target.ID == from.ID {
 		return nil, nil, fmt.Errorf("you cannot send a message to yourself")
 	}
-	msg := InboxMessage{ToBotID: target.ID, FromBotID: &from.ID, Text: body, Wake: wake}
+	msg := InboxMessage{ToBotID: target.ID, FromBotID: &from.ID, Text: body, Wake: wake, Relay: relay}
 	if err := db.Create(&msg).Error; err != nil {
 		return nil, nil, fmt.Errorf("could not queue the message: %w", err)
 	}

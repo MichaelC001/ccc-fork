@@ -399,15 +399,14 @@ func (s *mcpServer) reportToGeneral(_ context.Context, _ *mcp.CallToolRequest, i
 	if body == "" {
 		return toolErr("report_to_general needs text"), nil, nil
 	}
-	chief, err := generalBot(s.db)
-	if err != nil {
+	if _, err := generalBot(s.db); err != nil {
 		return toolErr("General dispatcher is not running"), nil, nil
 	}
 	self, err := s.bot()
 	if err != nil {
 		return toolErr("unknown bot"), nil, nil
 	}
-	if _, _, err := queueBotMessage(s.db, self, chief.Name, body, true); err != nil {
+	if _, _, err := queueOwnerRelay(s.db, self, body); err != nil {
 		return toolErr("%s", err.Error()), nil, nil
 	}
 	return text("reported to General; it will run when this turn ends"), nil, nil
