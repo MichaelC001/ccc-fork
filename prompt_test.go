@@ -58,11 +58,17 @@ func TestSystemPromptRequiresAskOwnerForDecisions(t *testing.T) {
 	worker := renderSystemPrompt(promptBot{Name: "a", Cwd: "/tmp"}, "host", nil)
 	chief := renderSystemPrompt(promptBot{Name: "General", Cwd: "/tmp", Chief: true}, "host", nil)
 	for name, got := range map[string]string{"worker": worker, "chief": chief} {
+		if !strings.Contains(got, askOwnerRule) {
+			t.Errorf("%s prompt missing shared ask_owner rule:\n%s", name, got)
+		}
 		for _, want := range []string{
 			"ask_owner",
 			"Telegram buttons",
-			"never ask",
+			"A or B?",
+			"Yes/no",
+			"recommended option first",
 			"architectural",
+			"end the turn",
 		} {
 			if !strings.Contains(got, want) {
 				t.Errorf("%s prompt missing %q:\n%s", name, want, got)
@@ -74,6 +80,9 @@ func TestSystemPromptRequiresAskOwnerForDecisions(t *testing.T) {
 	}
 	if strings.Contains(worker, "Prefer ask_owner over guessing on anything architectural") {
 		t.Error("old ask_owner wording leaked into the worker prompt")
+	}
+	if strings.Contains(worker, "When you need the owner to decide anything") {
+		t.Error("soft ask_owner wording leaked into the worker prompt")
 	}
 }
 

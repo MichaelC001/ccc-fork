@@ -128,7 +128,7 @@ type notifyOwnerIn struct {
 
 type askOwnerIn struct {
 	Question string   `json:"question" jsonschema:"the question, one sentence"`
-	Options  []string `json:"options,omitempty" jsonschema:"up to 4 answers as Telegram buttons; omit only for free text. Prefer buttons whenever the choice is discrete"`
+	Options  []string `json:"options,omitempty" jsonschema:"up to 4 Telegram button labels; put the recommended answer first. Omit only when the answer cannot be a button"`
 }
 
 type updateInstructionsIn struct {
@@ -181,7 +181,7 @@ func (s *mcpServer) register(server *mcp.Server) {
 	}, s.notifyOwner)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "ask_owner",
-		Description: "Ask the owner a question via Telegram native buttons and END YOUR TURN. Use this whenever you need the owner to decide something; never ask in chat or transcript prose. Pass up to 4 options as buttons when the choice is discrete; omit options only for free text. The answer arrives as your next message.",
+		Description: "Ask the owner a question via Telegram native buttons and END YOUR TURN. Mandatory for every decision (yes/no, pick one, architectural fork). Never ask in chat or transcript prose. Pass up to 4 options as buttons, recommended first; omit options only when the answer cannot be a button. The answer arrives as your next message.",
 	}, s.askOwner)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "set_name",

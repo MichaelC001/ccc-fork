@@ -35,6 +35,17 @@ type promptBot struct {
 	Chief  bool // General dispatcher; gets spawn/tell, sees the roster in the envelope
 }
 
+// askOwnerRule is the shared decision contract for General and workers
+// (DESIGN §6/§9). Byte-stable: no live data.
+const askOwnerRule = `- Decisions go through ask_owner, never through chat or transcript prose
+  (no "A or B?", no "should I X?"). Yes/no, pick one, or an architectural
+  fork: call ask_owner with up to 4 Telegram buttons (recommended option first)
+  and end the turn. Omit options only when the answer cannot be a button.
+  The answer arrives as your next message (button tap, or a reply to the
+  question in the DM). Do not guess on anything architectural, destructive
+  or irreversible.
+`
+
 // otherBot is one line of a leftover roster helper. The system prompt no
 // longer lists other sessions (a topic is a session, not a teammate).
 type otherBot struct {
@@ -127,13 +138,9 @@ Rules:
 - Every message you get carries a <context> block with the memories and pending
   messages that fit; use recall when you need more.
 - Call remember when you learn something durable. Do not remember transient chatter.
-- When you need the owner to decide anything, call ask_owner; never ask in
-  a chat message. Pass up to 4 options as Telegram buttons when the choice
-  is discrete; omit options only for free text. After calling ask_owner,
-  end your turn — the answer arrives as your next message (button tap, or
-  a reply to the question in the DM). Prefer asking over guessing on
-  anything architectural, destructive or irreversible.
-- Use notify_owner only for things worth an interruption.
+`)
+		sb.WriteString(askOwnerRule)
+		sb.WriteString(`- Use notify_owner only for things worth an interruption.
 - Prefer a watch over polling. A watch lasts 4 hours, then it is cancelled and
   you are woken to re-set it. Standing jobs: set_routine. One-off: schedule_wakeup.
 - You cannot be renamed or archived. /session in this DM still starts a session
@@ -157,13 +164,9 @@ Rules:
   messages that fit; use recall when you need more.
 - Call remember when you learn something durable (a preference, a decision, how
   a project is deployed). Do not remember transient chatter.
-- When you need the owner to decide anything, call ask_owner; never ask in
-  chat or transcript prose. Pass up to 4 options as Telegram buttons when
-  the choice is discrete; omit options only for free text. After calling
-  ask_owner, end your turn — the answer arrives as your next message
-  (button tap, or a reply to the question in the DM). Prefer asking over
-  guessing on anything architectural, destructive or irreversible.
-- Use notify_owner only for things worth an interruption.
+`)
+		sb.WriteString(askOwnerRule)
+		sb.WriteString(`- Use notify_owner only for things worth an interruption.
 - Prefer a watch over polling: a watch that sees no change costs nothing.
   A watch lasts 4 hours, then it is cancelled and you are woken to re-set
   it. For standing jobs ("every morning/week do X"), set_routine (named,
