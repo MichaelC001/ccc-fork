@@ -204,7 +204,7 @@ func TestPostOwnerSessionStatusSkipsGeneral(t *testing.T) {
 	}
 	r.postOwnerSessionStatus(chief, "", false)
 	if len(ui.posts) != 0 {
-		t.Errorf("General must not post a session status one-liner, got %v", ui.posts)
+		t.Errorf("General must not post a session status card, got %v", ui.posts)
 	}
 
 	w, err := in.createBot("deployer", "")
@@ -212,16 +212,28 @@ func TestPostOwnerSessionStatusSkipsGeneral(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.postOwnerSessionStatus(w, "", false)
-	if len(ui.posts) != 1 || ui.posts[0] != "session deployer done" {
-		t.Errorf("worker done = %v, want one-liner", ui.posts)
+	if len(ui.posts) != 1 || !ui.silentPosts[0] || !strings.Contains(ui.posts[0], "<b>deployer</b>") || !strings.Contains(ui.posts[0], "done") {
+		t.Errorf("worker done = %v, want a silent done card", ui.posts)
 	}
+	setBotStatus(in.db, w.ID, botWaiting)
 	r.postOwnerSessionStatus(w, "", true)
-	if ui.posts[len(ui.posts)-1] != "session deployer waiting" {
-		t.Errorf("worker waiting = %v", ui.posts)
+	got := ""
+	if len(ui.edits) > 0 {
+		got = ui.edits[len(ui.edits)-1]
+	} else if len(ui.posts) > 0 {
+		got = ui.posts[len(ui.posts)-1]
 	}
+	if !strings.Contains(got, "waiting") {
+		t.Errorf("worker waiting = posts %v edits %v", ui.posts, ui.edits)
+	}
+	if len(ui.pins) == 0 {
+		t.Errorf("waiting is work and must pin, pins=%v", ui.pins)
+	}
+	setBotStatus(in.db, w.ID, botIdle)
 	r.postOwnerSessionStatus(w, errFatal, false)
-	if ui.posts[len(ui.posts)-1] != "session deployer error" {
-		t.Errorf("worker error = %v", ui.posts)
+	last := ui.edits[len(ui.edits)-1]
+	if !strings.Contains(last, "error") {
+		t.Errorf("worker error = %q", last)
 	}
 }
 
@@ -421,8 +433,8 @@ func TestPersistChiefTimeoutEnqueuesTheInstruction(t *testing.T) {
 		t.Errorf("inject should name the auto-spawned session %q:\n%s", spawned.Name, queued[0].Input)
 	}
 	assertNoOwnerSessionNudge(t, ui)
-	if got := strings.Join(ui.posts, "\n"); !strings.Contains(got, "session "+spawned.Name+" started") {
-		t.Errorf("owner one-liner missing, posts=%v", ui.posts)
+	if !ownerPostsInclude(ui, spawned.Name) {
+		t.Errorf("owner live card missing spawned session, posts=%v", ui.posts)
 	}
 }
 
@@ -821,23 +833,37 @@ func ownerPostsInclude(ui *fakeUI, needle string) bool {
 }
 
 func ownerPostsOnlySessionOneLiner(ui *fakeUI, name string) bool {
-	status := map[string]bool{
-		ownerSessionStatusLine(name, "done"):    true,
-		ownerSessionStatusLine(name, "waiting"): true,
-		ownerSessionStatusLine(name, "error"):   true,
-		ownerSessionStatusLine(name, "started"): true,
-	}
 	n := 0
 	for _, p := range ui.posts {
 		p = strings.TrimSpace(p)
 		if p == "" {
 			continue
 		}
-		if status[p] {
+		if isOwnerSessionStatusPost(p, name) {
 			n++
 			continue
 		}
 		return false
 	}
 	return n > 0
+}
+
+func isOwnerSessionStatusPost(html, name string) bool {
+	switch html {
+	case ownerSessionStatusLine(name, "done"),
+		ownerSessionStatusLine(name, "waiting"),
+		ownerSessionStatusLine(name, "error"),
+		ownerSessionStatusLine(name, "started"):
+		return true
+	}
+	// Live session card: one HTML block per working session, silent, no summary.
+	if !strings.Contains(html, "<b>"+name+"</b>") {
+		return false
+	}
+	for _, label := range []string{"running", "waiting", "done", "error", "started", "job"} {
+		if strings.Contains(html, " · "+label) {
+			return true
+		}
+	}
+	return false
 }

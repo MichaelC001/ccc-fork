@@ -106,16 +106,22 @@ into the chat; `thinking` is never shown.
 
 Backend workers do not post progress or final answers to Telegram. The owner
 does not see General↔session messages (prompts, reports, transcripts). A
-quiet one-liner of status (`session <name> done|waiting|error`) may land
-when a worker turn ends; it is not a substitute for an answer. After a
-worker turn that reported (`report_to_general`) or finished with last-message
-output, listen wakes General with that inbox (relay). General MUST post a
-short owner-facing summary in the DM. If General cannot (60s cap, crash,
-empty reply), listen posts a short fallback from the worker's last message —
-not the full transcript, not only the one-liner. `notify_owner`, `ask_owner`
-and job pings still reach the owner. Idle-session reminders wake General
-via inbox + enqueue (same path as `report_to_general`); they are not posted
-to the DM and do not use the fallback. The phone hub still sees every turn.
+**live status card** in the owner's DM is posted silently and edited in
+place: one block per working session (name, running/waiting/job, current
+tool or pending `ask_owner` line). It is **pinned** (`pinChatMessage`,
+`disable_notification`) while any worker is running, waiting, or has a
+background job, and unpinned when that work ends. The same message is
+reused across turns (id in `settings.session_panel_msg_id`). `/sessions`
+stays the full list including idle sessions. The card is not a substitute
+for an answer. After a worker turn that reported (`report_to_general`) or
+finished with last-message output, listen wakes General with that inbox
+(relay). General MUST post a short owner-facing summary in the DM. If
+General cannot (60s cap, crash, empty reply), listen posts a short fallback
+from the worker's last message — not the full transcript, not only a status
+line. `notify_owner`, `ask_owner` and job pings still reach the owner.
+Idle-session reminders wake General via inbox + enqueue (same path as
+`report_to_general`); they are not posted to the DM and do not use the
+fallback. The phone hub still sees every turn.
 
 ### 3.3 Post-turn
 
@@ -154,8 +160,8 @@ sessions do not. When the cap fires, ccc SIGTERMs the engine process
 `spawn_session` / `tell_session`'d, that is the handoff. Otherwise ccc
 **starts a backend worker itself** (same path as `spawn_session` / `/session`)
 with the **owner's** request (`source=user`) plus a short note that General
-timed out, and posts at most a quiet `session <name> started` one-liner in
-the DM. Session reports (`source=bot`), watches, schedules and routines are
+timed out, and the live session card in the DM picks up the new worker.
+Session reports (`source=bot`), watches, schedules and routines are
 not owner work: timing out on those does not auto-spawn and does not inject
 a follow-up (that duplicated turns). A timed-out **relay** report still
 posts listen's short owner-facing fallback from the worker's last message.
@@ -255,8 +261,9 @@ Indexes beyond the ones the columns above imply: `turns(bot_id, created_at)`
 for turn retention, `inbox(delivered_at)` and `questions(answered_at)` for
 cleanup, `memories_archive(compaction_id)` for restore.
 
-Settings actually used: `last_maintenance` (ccc's own marker). The table is
-bookkeeping only — nothing in it is user-editable.
+Settings actually used: `last_maintenance` (ccc's own marker) and
+`session_panel_msg_id` (Telegram id of the live session card in the DM).
+The table is bookkeeping only — nothing in it is user-editable.
 
 Existing `config.json` (bot token, group id, profiles) stays as bootstrap
 config, and it is also where the three tuning knobs live: `debounce_ms`
@@ -455,7 +462,7 @@ older than 90 days.
 ### Commands
 | Command | Where | Effect |
 |---|---|---|
-| `/sessions` | DM | Table of open sessions. `/bots` is an alias. |
+| `/sessions` | DM | List of open sessions (name, status, last turn). `/bots` is an alias. The live card (pinned while there is work) is a separate silent message, not this command. |
 | `/name [text]` | DM | Show General's name. Rename is refused (General stays General). Workers rename via `set_name` or the phone. |
 | `/new` | DM | Rotate General's conversation (fresh transcript, memory kept). |
 | `/stop` | DM | Kill General's running turn, drop the queue. |
@@ -929,9 +936,10 @@ forum-group model (one topic per session) was the original v3 UX and is
 gone. The owner talks only to General in the bot's 1:1 DM. Group messages
 are ignored. `spawn_session` and `/session` create a backend worker
 (`TopicID = -id`). Worker progress and final answers stay off Telegram;
-the owner does not see General↔session prompts or reports. At most a
-one-liner of status (`session <name> done|waiting|error`) lands in the DM
-when a worker turn ends. Full reports stay in General's inbox.
+the owner does not see General↔session prompts or reports. A live status
+card in the DM (pinned while any worker is running, waiting, or on a
+background job) is edited in place; `/sessions` remains the full list.
+Full reports stay in General's inbox.
 `notify_owner`, `ask_owner` and job pings still reach the owner.
 Idle-session reminders stay in General's inbox (they are not a Telegram ping).
 There is no `group_id`, `/setgroup`, or forum topic API. `isGeneralBot` stays

@@ -65,6 +65,10 @@ type progress struct {
 	shown    string
 	created  bool
 	finished bool
+
+	// onActivity is an optional hook (the live session card) fired on every
+	// set, independent of the Telegram progress message.
+	onActivity func(string)
 }
 
 func newProgress(ui botUI, topicID int64, started time.Time) *progress {
@@ -78,7 +82,11 @@ func (p *progress) set(activity string) {
 	}
 	p.mu.Lock()
 	p.activity = activity
+	cb := p.onActivity
 	p.mu.Unlock()
+	if cb != nil {
+		cb(activity)
+	}
 	p.flush(false)
 }
 

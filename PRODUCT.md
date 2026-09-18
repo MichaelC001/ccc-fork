@@ -41,6 +41,7 @@ Not: a Claude Code plugin, a Slack bot, a web agent dashboard, or Claude backgro
 Confirmed (README / `docs/DESIGN.md`):
 
 - General 60s cap; longer work goes to a session. If the cap fires and General does not spawn, ccc starts the session itself. `/session <prompt>` starts a worker without General.
+- Live session card in the Telegram DM (one block per working session), pinned while a worker is running, waiting, or on a background job. `/sessions` is the full list.
 - Idle sessions waiting on the owner wake General every 10 minutes (inbox, not a chat ping).
 - Tools sessions actually have: `remember` / `recall` / `forget`; `notify_owner` / `ask_owner`; `watch` / `schedule_wakeup` / `set_routine`; `run_background` / `run` with vault inject; `secrets_list` / `secrets_delete` (no `secrets_get`); General-only `spawn_session` / `tell_session`; workers-only `report_to_general`; `send_file`; `get_project` / `set_project`; `set_name`; `archive_bot`.
 - Engines: Claude Code, Grok Build, Antigravity, Codex. Failover stays inside the same engine.

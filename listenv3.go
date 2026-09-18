@@ -36,6 +36,9 @@ type instance struct {
 	pty ptyStarter
 	// sched is the watch/schedule/doctor loop (nil in tests that do not need it).
 	sched *scheduler
+	// panel is the live session card in the owner's DM (nil in tests that
+	// do not drive Telegram).
+	panel *sessionPanel
 	// edits remembers the edited messages already dispatched as commands.
 	edits editLog
 
@@ -125,6 +128,28 @@ func (t telegramUI) React(messageID int64, emoji string) {
 	}
 }
 
+func (t telegramUI) Pin(msgID int64) error {
+	if t.in == nil || msgID == 0 {
+		return nil
+	}
+	cfg := t.in.config()
+	if cfg == nil || cfg.BotToken == "" || cfg.ChatID == 0 {
+		return nil
+	}
+	return pinChatMessage(cfg, cfg.ChatID, msgID, true)
+}
+
+func (t telegramUI) Unpin(msgID int64) error {
+	if t.in == nil || msgID == 0 {
+		return nil
+	}
+	cfg := t.in.config()
+	if cfg == nil || cfg.BotToken == "" || cfg.ChatID == 0 {
+		return nil
+	}
+	return unpinChatMessage(cfg, cfg.ChatID, msgID)
+}
+
 // ---------------------------------------------------------------------------
 // Bootstrap
 // ---------------------------------------------------------------------------
@@ -179,9 +204,11 @@ func listenV3() error {
 		return err
 	}
 	in := &instance{db: db, cfg: cfg, dataDir: dataDir(cfg)}
-	ui := &muxUI{tg: telegramUI{in}}
+	tg := telegramUI{in}
+	ui := &muxUI{tg: tg}
 	runner := newRunner(db, cfg, ui)
 	in.runner = runner
+	in.panel = runner.panel
 	ui.hub = startHubClient(in)
 	defer runner.Close()
 
@@ -304,6 +331,7 @@ func (in *instance) recoverAfterRestart() {
 	if in.sched != nil {
 		in.sched.reattachBackgroundJobs()
 	}
+	in.syncPanel(true)
 }
 
 func (in *instance) failInterruptedTurn(id int64, now time.Time) {
@@ -631,6 +659,7 @@ func (in *instance) createBotFromText(msg *TelegramMessage, text string) {
 	if _, err := in.runner.Enqueue(b.ID, sourceUser, text, 0); err != nil {
 		hookLog("enqueue first message: %v", err)
 	}
+	in.syncPanel(true)
 }
 
 // createBot creates the workspace and the database row. No Telegram topic.

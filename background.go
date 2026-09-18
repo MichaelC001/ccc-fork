@@ -460,6 +460,7 @@ func (s *scheduler) startQueuedBackground() {
 		j.Status = jobRunning
 		j.StartedAt = &now
 		j.Deadline = &deadline
+		s.in.syncPanel(true)
 		go s.runBackgroundJob(b, &j)
 	}
 }
@@ -678,6 +679,7 @@ func (s *scheduler) finishBackgroundJob(j *BackgroundJob, status string, exit in
 	j.Output = output
 	j.Error = errText
 	j.ExitCode = &code
+	s.in.syncPanel(true)
 	s.enqueueBackgroundWake(j)
 }
 

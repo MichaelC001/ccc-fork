@@ -619,7 +619,8 @@ func ftsQuery(s string) string {
 
 // The settings table (DESIGN §5) holds ccc's own bookkeeping only. What the
 // owner tunes lives in config.json (`ccc config set debounce_ms 0`); there is
-// deliberately no Telegram command for it.
+// deliberately no Telegram command for it. Keys: last_maintenance,
+// session_panel_msg_id (live session card in the DM).
 const (
 	// settingLastMaintenance is the date (YYYY-MM-DD) maintenance last ran, so
 	// a restart does not re-run it and a missed day is caught up on.

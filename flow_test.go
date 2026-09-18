@@ -582,11 +582,14 @@ func TestBotsCommandWorksAnywhere(t *testing.T) {
 	}
 	in.handleMessage(ownerMessage("/sessions"))
 	joined := strings.Join(api.texts(""), "\n")
-	if !strings.Contains(joined, "alpha") {
-		t.Errorf("/sessions output missing the session: %q", joined)
+	if !strings.Contains(joined, "• <b>alpha</b>") {
+		t.Errorf("/sessions must stay a list, got %q", joined)
 	}
 	if strings.Contains(joined, "does alpha things") {
 		t.Errorf("/sessions must not list leftover roles: %q", joined)
+	}
+	if len(api.since("pinChatMessage")) != 0 {
+		t.Error("/sessions is a list reply, not the pinned live card")
 	}
 }
 

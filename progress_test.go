@@ -13,6 +13,8 @@ type fakeUI struct {
 	silentPosts []bool
 	edits       []string
 	deleted     []int64
+	pins        []int64
+	unpins      []int64
 	editErr     error
 	postErr     error
 	deleteErr   error
@@ -48,6 +50,16 @@ func (f *fakeUI) Edit(_, _ int64, html string) error {
 }
 
 func (f *fakeUI) React(int64, string) {}
+
+func (f *fakeUI) Pin(msgID int64) error {
+	f.pins = append(f.pins, msgID)
+	return nil
+}
+
+func (f *fakeUI) Unpin(msgID int64) error {
+	f.unpins = append(f.unpins, msgID)
+	return nil
+}
 
 func (f *fakeUI) Delete(_, msgID int64) error {
 	if f.deleteErr != nil {

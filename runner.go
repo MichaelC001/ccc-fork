@@ -198,10 +198,13 @@ type Runner struct {
 	// needsLogin holds profiles a turn found logged out; they are skipped until
 	// the owner re-logs in (the doctor loop in Phase 2b clears them).
 	needsLogin map[string]bool
+	// panel is the live session card in the owner's DM. nil in tests that
+	// do not care; newRunner wires it from ui when ui can host one.
+	panel *sessionPanel
 }
 
 func newRunner(db *gorm.DB, cfg *Config, ui botUI) *Runner {
-	return &Runner{
+	r := &Runner{
 		db:         db,
 		ui:         ui,
 		cfg:        cfg,
@@ -210,6 +213,10 @@ func newRunner(db *gorm.DB, cfg *Config, ui botUI) *Runner {
 		done:       make(chan struct{}),
 		needsLogin: map[string]bool{},
 	}
+	if s := panelSurfaceOf(ui); s != nil {
+		r.panel = newSessionPanel(db, s)
+	}
+	return r
 }
 
 func (r *Runner) config() *Config {
@@ -468,6 +475,14 @@ func (r *Runner) execute(b *Bot, t *Turn, input string, triggers []int64) {
 	setBotStatus(r.db, b.ID, botRunning)
 
 	prog := newProgress(r.ui, b.TopicID, now)
+	if !isGeneralBot(b) && r.panel != nil {
+		botID := b.ID
+		prog.onActivity = func(activity string) {
+			r.panel.setActivity(botID, activity)
+		}
+		r.panel.setActivity(botID, "thinking")
+		r.syncPanel(true)
+	}
 	prog.set("thinking")
 
 	envelope := buildEnvelope(r.db, b, t.Source, input, now)
@@ -594,9 +609,9 @@ func (r *Runner) execute(b *Bot, t *Turn, input string, triggers []int64) {
 	r.deliverInbox(b.ID)
 }
 
-// ownerSessionStatus is the one-liner the owner may see for a worker turn.
-// General's own replies still go through progress.finish; workers never dump
-// transcripts into the DM (DESIGN §3.2).
+// ownerSessionStatus is the label painted on the live session card after a
+// worker turn. General's own replies still go through progress.finish;
+// workers never dump transcripts into the DM (DESIGN §3.2).
 func ownerSessionStatus(class string, waiting bool) (status string, ok bool) {
 	switch class {
 	case "stopped", chiefTimeoutClass:
@@ -616,14 +631,27 @@ func ownerSessionStatusLine(name, status string) string {
 }
 
 func (r *Runner) postOwnerSessionStatus(b *Bot, class string, waiting bool) {
-	if r == nil || r.ui == nil || isGeneralBot(b) {
+	if r == nil || isGeneralBot(b) {
 		return
 	}
 	status, ok := ownerSessionStatus(class, waiting)
 	if !ok {
+		r.syncPanel(true)
 		return
 	}
-	_, _ = r.ui.Post(0, ownerSessionStatusLine(b.Name, status)) // safe-ignore: a missed one-liner must not fail the turn
+	if r.panel != nil {
+		if status == "waiting" {
+			r.panel.clearActivity(b.ID)
+			r.syncPanel(true)
+			return
+		}
+		r.panel.showTerminal(b, status)
+		return
+	}
+	if r.ui == nil {
+		return
+	}
+	_, _ = r.ui.Post(0, ownerSessionStatusLine(b.Name, status)) // safe-ignore: a missed card must not fail the turn
 }
 
 // ownerRelayFallbackMax is the owner-facing cap for listen's fallback when
@@ -782,8 +810,8 @@ func (r *Runner) persistChiefTimeout(b *Bot, t *Turn, input string, end time.Tim
 }
 
 // ensureChiefTimeoutHandoff starts a backend worker with the owner's request
-// when this timeout episode has no spawn_session / tell_session yet. Quiet
-// one-liner in the DM; never tells the owner to /session.
+// when this timeout episode has no spawn_session / tell_session yet. The live
+// session card in the DM updates; never tells the owner to /session.
 func (r *Runner) ensureChiefTimeoutHandoff(b *Bot, t *Turn, input string) *Bot {
 	if r == nil || b == nil {
 		return nil
@@ -821,17 +849,26 @@ func (r *Runner) autoSpawnChiefTimeout(chief *Bot, timedOut *Turn, timedOutInput
 }
 
 func (r *Runner) postChiefTimeoutHandoff(b *Bot, err error) {
-	if r == nil || r.ui == nil {
+	if r == nil {
 		return
 	}
 	if err != nil {
-		_, _ = r.ui.Post(0, "session could not be started") // safe-ignore: owner must not be asked to /session
+		if r.ui != nil {
+			_, _ = r.ui.Post(0, "session could not be started") // safe-ignore: owner must not be asked to /session
+		}
 		return
 	}
 	if b == nil {
 		return
 	}
-	_, _ = r.ui.Post(0, ownerSessionStatusLine(b.Name, "started")) // safe-ignore: a missed one-liner must not fail the handoff
+	if r.panel != nil {
+		r.panel.setActivity(b.ID, "starting")
+		return
+	}
+	if r.ui == nil {
+		return
+	}
+	_, _ = r.ui.Post(0, ownerSessionStatusLine(b.Name, "started")) // safe-ignore: a missed card must not fail the handoff
 }
 
 func (r *Runner) hasPendingQuestion(botID int64) bool {

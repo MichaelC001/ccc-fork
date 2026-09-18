@@ -549,6 +549,57 @@ func destForTopic(cfg *Config, topicID int64) (chatID, threadID int64, ok bool) 
 	return cfg.ChatID, 0, true
 }
 
+// pinChatMessage pins a message in the owner's DM. silent skips the pin
+// notification. A private-chat pin of the bot's own message does not need
+// extra rights.
+func pinChatMessage(config *Config, chatID, messageID int64, silent bool) error {
+	if config == nil || config.BotToken == "" || chatID == 0 || messageID == 0 {
+		return nil
+	}
+	params := url.Values{
+		"chat_id":    {fmt.Sprintf("%d", chatID)},
+		"message_id": {fmt.Sprintf("%d", messageID)},
+	}
+	if silent {
+		params.Set("disable_notification", "true")
+	}
+	result, err := telegramAPI(config, "pinChatMessage", params)
+	if err != nil {
+		return err
+	}
+	if result.OK {
+		return nil
+	}
+	desc := result.Description
+	if strings.Contains(desc, "already pinned") || strings.Contains(desc, "CHAT_NOT_MODIFIED") {
+		return nil
+	}
+	return fmt.Errorf("telegram error: %s", desc)
+}
+
+func unpinChatMessage(config *Config, chatID, messageID int64) error {
+	if config == nil || config.BotToken == "" || chatID == 0 || messageID == 0 {
+		return nil
+	}
+	params := url.Values{
+		"chat_id":    {fmt.Sprintf("%d", chatID)},
+		"message_id": {fmt.Sprintf("%d", messageID)},
+	}
+	result, err := telegramAPI(config, "unpinChatMessage", params)
+	if err != nil {
+		return err
+	}
+	if result.OK {
+		return nil
+	}
+	desc := result.Description
+	if strings.Contains(desc, "not pinned") || strings.Contains(desc, "CHAT_NOT_MODIFIED") ||
+		strings.Contains(desc, "message to unpin not found") {
+		return nil
+	}
+	return fmt.Errorf("telegram error: %s", desc)
+}
+
 // setBotCommands sets the bot commands in Telegram
 func setBotCommands(botToken string) {
 	commands := []map[string]string{
