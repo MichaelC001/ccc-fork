@@ -287,6 +287,36 @@ func TestRoutineFiresInTimezoneAndPosts(t *testing.T) {
 	if !after.FireAt.Equal(wantNext) {
 		t.Errorf("rolled to %s, want %s", after.FireAt, wantNext)
 	}
+
+	// Second fire reuses the same worker (even if it archived itself) with a
+	// fresh conversation, rather than routine-morning-ventas-2.
+	if err := archiveBotRow(in.db, worker.ID); err != nil {
+		t.Fatal(err)
+	}
+	in.db.Model(&Bot{}).Where("id = ?", worker.ID).Update("session_id", "old-transcript")
+	in.db.Model(&Schedule{}).Where("id = ?", row.ID).Update("fire_at", now.Add(-time.Minute))
+	s.fireDueSchedules(now.Add(time.Second))
+	if len(runner.enqueued) != 2 {
+		t.Fatalf("second fire enqueued %d, want 2: %+v", len(runner.enqueued), runner.enqueued)
+	}
+	if runner.enqueued[1].BotID != worker.ID {
+		t.Errorf("second fire bot = %d, want reused %d", runner.enqueued[1].BotID, worker.ID)
+	}
+	var reused Bot
+	if err := in.db.First(&reused, worker.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if reused.ArchivedAt != nil {
+		t.Error("reused routine worker should be live again")
+	}
+	if reused.SessionID != "" {
+		t.Errorf("session_id = %q, want cleared so yesterday is not reread", reused.SessionID)
+	}
+	var extras int64
+	in.db.Model(&Bot{}).Where("name LIKE ? AND id != ?", "routine-morning-ventas%", worker.ID).Count(&extras)
+	if extras != 0 {
+		t.Errorf("routine fire piled %d extra workers", extras)
+	}
 }
 
 func TestRoutineReusesNamedWorker(t *testing.T) {

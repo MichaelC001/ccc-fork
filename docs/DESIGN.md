@@ -959,8 +959,9 @@ dispatcher's whole transcript; (3) `pickAccount` ignoring 7-day utilization
 and running-turn load (the second Claude account sat almost idle); (4) the
 60s auto-spawn treating `source=bot` inbox reports as the owner's request
 and starting duplicate workers. Fixes live in this repo: prompt + MCP copy,
-routine fires spawn `routine-<name>` workers, chooseProfile is 5h then 7d
-then load, auto-spawn is `source=user` only, watch TTL on General is silent.
+routine fires run on a reused `routine-<name>` worker (fresh conversation),
+chooseProfile is 5h then 7d then load, spawn picks the engine with most
+headroom, auto-spawn is `source=user` only, watch TTL on General is silent.
 Not per-machine hygiene.
 
 ## 15. Public hub (mobile)

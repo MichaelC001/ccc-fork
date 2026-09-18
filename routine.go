@@ -140,9 +140,11 @@ func routineWorkerPrompt(name, note string) string {
 	)
 }
 
-// startRoutineWorker creates a fresh backend session and enqueues the routine
-// prompt on it. Named routines must not run as a turn of the owning bot
+// startRoutineWorker enqueues the routine on an isolated worker named
+// routine-<name>. Named routines must not run as a turn of the owning bot
 // (usually General): that re-reads the dispatcher's whole transcript.
+// A live or archived worker with that name is reused with session_id
+// cleared so a daily fire does not reread yesterday or pile -2/-3 sessions.
 func (s *scheduler) startRoutineWorker(owner *Bot, name, note string) error {
 	if s == nil || s.in == nil || s.in.runner == nil {
 		return fmt.Errorf("no runner")
@@ -150,28 +152,48 @@ func (s *scheduler) startRoutineWorker(owner *Bot, name, note string) error {
 	if owner == nil {
 		return fmt.Errorf("unknown owner")
 	}
-	cfg := s.in.config()
 	sessionName := "routine-" + sanitizeRoutineName(name)
-	// Fresh conversation on a reused worker so a daily fire does not reread
-	// yesterday, and does not pile idle sessions that nag General.
-	if existing, err := botByName(s.in.db, sessionName); err == nil && !isGeneralBot(existing) {
-		s.in.db.Model(&Bot{}).Where("id = ?", existing.ID).Update("session_id", "")
-		prompt := routineWorkerPrompt(name, note)
-		if _, err := s.in.runner.Enqueue(existing.ID, routineSource(name), prompt, 0); err != nil {
-			return err
-		}
-		return nil
-	}
-	b, err := createBotRow(s.in.db, cfg, sessionName, "", "")
+	b, err := s.routineWorkerBot(owner, sessionName)
 	if err != nil {
 		return err
 	}
 	prompt := routineWorkerPrompt(name, note)
 	if _, err := s.in.runner.Enqueue(b.ID, routineSource(name), prompt, 0); err != nil {
-		_ = archiveBotRow(s.in.db, b.ID) // safe-ignore: empty worker must not linger
 		return err
 	}
 	return nil
+}
+
+func (s *scheduler) routineWorkerBot(owner *Bot, sessionName string) (*Bot, error) {
+	var existing Bot
+	err := s.in.db.Where("name = ?", sessionName).First(&existing).Error
+	if err == nil && !isGeneralBot(&existing) {
+		if existing.ArchivedAt != nil {
+			if err := unarchiveBotRow(s.in.db, existing.ID); err != nil {
+				return nil, err
+			}
+		}
+		if err := s.in.db.Model(&Bot{}).Where("id = ?", existing.ID).
+			Updates(map[string]any{"session_id": "", "status": botIdle}).Error; err != nil {
+			return nil, err
+		}
+		existing.SessionID = ""
+		existing.Status = botIdle
+		existing.ArchivedAt = nil
+		return &existing, nil
+	}
+	b, err := createBotRow(s.in.db, s.in.config(), sessionName, "", "")
+	if err != nil {
+		return nil, err
+	}
+	if eng := botEngine(owner); eng != "" && botEngine(b) != eng {
+		if err := s.in.db.Model(&Bot{}).Where("id = ?", b.ID).Update("engine", eng).Error; err != nil {
+			_ = archiveBotRow(s.in.db, b.ID) // safe-ignore: empty worker must not linger
+			return nil, err
+		}
+		b.Engine = eng
+	}
+	return b, nil
 }
 
 // ---------------------------------------------------------------------------
