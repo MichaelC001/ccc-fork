@@ -30,7 +30,7 @@ Not: a Claude Code plugin, a Slack bot, a web agent dashboard, or Claude backgro
 
 ## Operating Context
 
-- One `ccc listen` process on one machine, bound to one Telegram bot token. Owner `chat_id` is the access-control root.
+- One `ccc listen` process on one machine you own (laptop or desktop). A VPS is optional, not required. Bound to one Telegram bot token. Owner `chat_id` is the access-control root.
 - Default-deny by Telegram user id. Approved users can talk in the DM; `/account`, `/access`, `/model`, `/secret` stay owner-only.
 - Bootstrap is headless: BotFather token, `ccc config` / `ccc install` (launchd / systemd --user). Login URLs go to Telegram; ccc never opens a browser on the machine.
 - Implementation spec (not visual): [`docs/DESIGN.md`](docs/DESIGN.md). **Do not overwrite that file with a visual design system.** Visual DESIGN.md, if written, lives at the repo root.

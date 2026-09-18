@@ -75,25 +75,26 @@ the Telegram UX.
 
 ---
 
-## Bootstrap on a VM, step by step
+## Bootstrap, step by step
+
+ccc runs on **your machine**. `ccc listen` is a local process (launchd on
+macOS, systemd --user on Linux). You do not need a VM.
 
 This is the headless path: no terminal is ever attached to Telegram, and no
-browser is ever needed on the server.
+browser is ever needed on the machine.
 
-### 1. Build and copy the binary
+### 1. Build and install the binary
 
-On your machine:
+On the machine that will run ccc:
 
 ```bash
 git clone https://github.com/kidandcat/ccc && cd ccc
-make build-linux                       # pure Go, CGO_ENABLED=0, no libc dependency
-scp ccc-linux-amd64 vps:~/bin/ccc
+make install                       # this machine → ~/bin/ccc
 ```
 
-### 2. Install Claude Code on the VM
+### 2. Install Claude Code
 
 ```bash
-ssh vps
 curl -fsSL https://claude.com/install.sh | bash    # or your usual install method
 claude --version
 ```
@@ -121,12 +122,12 @@ ccc config                                  # check it
 instance, and until it is set **nobody** can talk to ccc at all.
 
 **`env_passthrough` and secrets.** Those names are the only channel by which a
-secret reaches a bot. The service is started by `systemctl --user`, which never
-sources `~/.profile` or `~/.zshrc`, so ccc snapshots the VALUES into
-`~/.config/ccc/env` (mode 0600) and the unit reads that file — the unit itself
-holds no secrets. `ccc config set env_passthrough …` writes it, and so does
-`ccc install`. **Run them from a login shell**, or the values will not be
-visible:
+secret reaches a bot. The service is started by launchd (macOS) or
+`systemctl --user` (Linux), which never sources `~/.profile` or `~/.zshrc`, so
+ccc snapshots the VALUES into `~/.config/ccc/env` (mode 0600) and the service
+reads that file — the unit/plist itself holds no secrets. `ccc config set
+env_passthrough …` writes it, and so does `ccc install`. **Run them from a
+login shell**, or the values will not be visible:
 
 ```bash
 bash -lc 'ccc env sync'      # re-snapshot after exporting a new secret
@@ -139,14 +140,21 @@ token? Export it and run `ccc env sync` again, then restart the service.
 ### 5. Install the service
 
 ```bash
-bash -lc 'ccc install'            # login shell: it snapshots env_passthrough into ~/.config/ccc/env
-                                  # writes ~/.config/systemd/user/ccc.service and starts it
-loginctl enable-linger $USER      # so it keeps running after you log out
+ccc install                   # launchd on macOS; systemd --user on Linux
+                              # snapshots env_passthrough into ~/.config/ccc/env
+```
+
+On macOS that starts the job immediately. Logs: `~/Library/Caches/ccc/ccc.log`.
+
+On Linux, keep it running after you log out:
+
+```bash
+loginctl enable-linger $USER
 systemctl --user status ccc
 journalctl --user -u ccc -f
 ```
 
-> **`systemctl --user` over ssh:** a plain non-login ssh session often has no
+> **Linux, `systemctl --user` over ssh:** a plain non-login ssh session often has no
 > `XDG_RUNTIME_DIR`, and every `systemctl --user` call then fails with
 > *"Failed to connect to bus"*. Fix it per command or in your shell profile:
 >
@@ -211,6 +219,18 @@ keep an eye on the fecha deploy and tell me if anything breaks
 That chat is the orchestrator: it will `spawn_session` (or you can
 `/session` the prompt yourself). Sessions run in the backend and report
 back here. There is no worker topic to talk in.
+
+### Optional: a remote Linux host
+
+A VPS is **optional**, not the default. If you want ccc on a remote Linux
+box instead of your laptop:
+
+```bash
+make build-linux                       # pure Go, CGO_ENABLED=0, no libc dependency
+scp ccc-linux-amd64 host:~/bin/ccc
+ssh host
+# then steps 2–7 on that host (`ccc install` writes the systemd user unit)
+```
 
 ---
 
@@ -446,7 +466,7 @@ ccc config get default_engine
 failover, MCP, `--output-format stream-json`.
 
 **Grok Build.** `/account add work grok` creates an isolated `GROK_HOME` and
-drives `grok login --device-auth` on a PTY (the VM has no browser). Turns set
+drives `grok login --device-auth` on a PTY (ccc never opens a browser). Turns set
 `GROK_HOME` so `auth.json` is this account, not `~/.grok`. Failover is
 Grok↔Grok. Turns run `grok --always-approve --output-format
 streaming-messages-json --single <envelope>`. Guess labeled: the `grok`
@@ -537,9 +557,9 @@ undoes it. Raise the thresholds by keeping fewer memories, or set
 `ccc config set compaction_model` to a stronger model if the cheap one
 consolidates badly.
 
-**`systemctl --user` fails with "Failed to connect to bus".** Export
+**On Linux, `systemctl --user` fails with "Failed to connect to bus".** Export
 `XDG_RUNTIME_DIR=/run/user/$(id -u)` and make sure `loginctl enable-linger
-$USER` is on. See step 5.
+$USER` is on. See the Linux notes in the bootstrap.
 
 **Nothing responds in the DM.** Check `/status`. The usual causes are a
 `chat_id` that is not your user id, or the bot token.
@@ -584,7 +604,7 @@ ccc mcp --bot <id>            MCP server for one turn (spawned by Claude Code)
 
 ```bash
 make build          # this machine
-make build-linux    # ccc-linux-amd64 for the VPS
+make build-linux    # ccc-linux-amd64 for a remote Linux host (optional)
 make test           # go build ./... && go vet ./... && go test ./...
 make build-voice    # with whisper.cpp for voice transcription (needs cmake)
 make install        # build + install to ~/bin/ccc
