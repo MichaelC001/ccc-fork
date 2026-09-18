@@ -32,10 +32,10 @@ type promptBot struct {
 	Role   string // unused: kept so existing call sites compile; not rendered
 	Cwd    string
 	Engine string
-	Chief  bool // General dispatcher; gets spawn/tell, sees the roster in the envelope
+	Chief  bool // Chief dispatcher; gets spawn/tell, sees the roster in the envelope
 }
 
-// askOwnerRule is the shared decision contract for General and workers
+// askOwnerRule is the shared decision contract for Chief and workers
 // (DESIGN §6/§9). Byte-stable: no live data.
 const askOwnerRule = `- Decisions go through ask_owner, never through chat or transcript prose
   (no "A or B?", no "should I X?"). Yes/no, pick one, or an architectural
@@ -89,7 +89,7 @@ func renderSystemPrompt(b promptBot, hostname string, _ []otherBot) string {
 		sb.WriteString("  send_file                 send a file to the owner (Telegram DM and paired phones)\n")
 		sb.WriteString("  watch/unwatch/list_watches  re-run a command and wake this session only when its output changes\n")
 		sb.WriteString("  schedule_wakeup/cancel_schedule  one-off (or unnamed cron) wakeup\n")
-		sb.WriteString("  set_routine/list_routines/cancel_routine  named recurring work; each fire is a fresh worker, ⏰ in General\n")
+		sb.WriteString("  set_routine/list_routines/cancel_routine  named recurring work; each fire is a fresh worker, ⏰ in Chief\n")
 		sb.WriteString("  run_background/list_background/get_background/cancel_background  long shell jobs without blocking this turn\n")
 		sb.WriteString("  secrets_list/secrets_delete  owner vault names only; there is no secrets_get\n")
 		sb.WriteString("  run                         shell with env map (env var → secret name) or stdin_secret; values never returned\n")
@@ -98,7 +98,7 @@ func renderSystemPrompt(b promptBot, hostname string, _ []otherBot) string {
 			sb.WriteString("  spawn_session             start a backend worker and give it a first prompt\n")
 			sb.WriteString("  tell_session              message an existing session (wakes it)\n")
 		} else {
-			sb.WriteString("  report_to_general         status update to General (not posted to the owner). You cannot message other sessions.\n")
+			sb.WriteString("  report_to_chief           status update to Chief (not posted to the owner). You cannot message other sessions.\n")
 			sb.WriteString("  archive_bot               end this session\n")
 		}
 		sb.WriteString("  get_project/set_project   notes about a code base\n")
@@ -109,11 +109,11 @@ func renderSystemPrompt(b promptBot, hostname string, _ []otherBot) string {
 		sb.WriteString("\nTools: you have this engine's built-in tools (shell, files, search, …), which run with full\n")
 		sb.WriteString("permissions on the owner's machine. You do NOT have the ccc MCP tools (remember, ask_owner,\n")
 		sb.WriteString("watches, schedules, run_background). Those need an engine with local MCP (claude, grok, codex).\n")
-		sb.WriteString("Named recurring routines (each fire starts a fresh worker, ⏰ in General; default tz Europe/Madrid):\n")
+		sb.WriteString("Named recurring routines (each fire starts a fresh worker, ⏰ in Chief; default tz Europe/Madrid):\n")
 		sb.WriteString("  ccc routine add <name> --cron \"0 9 * * 1-5\" [--tz Europe/Madrid] <prompt>\n")
 		sb.WriteString("  ccc routine list\n")
 		sb.WriteString("  ccc routine cancel <name>\n")
-		sb.WriteString("Do not write the schedules table yourself. Report to General; the owner talks only there.\n")
+		sb.WriteString("Do not write the schedules table yourself. Report to Chief; the owner talks only there.\n")
 	}
 	if b.Chief && hasMCP {
 		sb.WriteString(`
@@ -159,10 +159,10 @@ Rules:
 	} else if hasMCP {
 		sb.WriteString(`
 Rules:
-- You have no Telegram chat. The owner talks ONLY to General. Keep replies
+- You have no Telegram chat. The owner talks ONLY to Chief. Keep replies
   short and concrete; no preamble, no restating the question, no markdown
   headings for one-line answers. Your output is for the transcript and for
-  General. The owner sees at most a one-liner of status (session done /
+  Chief. The owner sees at most a one-liner of status (session done /
   waiting / error); full reports are not posted to the chat.
 - Every message you get carries a <context> block with the memories and pending
   messages that fit; use recall when you need more.
@@ -175,9 +175,9 @@ Rules:
   is a time ("in an hour"), never a poll; each fire is a full turn. set_routine
   is standing work: each fire starts a fresh worker, not a turn of yours.
   A watch lasts 4 hours, then it is cancelled and you are woken to re-set it.
-- You cannot create other sessions or see the roster. Report to General with
-  report_to_general when you finish, block, or need the dispatcher. Those
-  reports stay with General; they are not posted to the owner. For work expected to take more than about 60 seconds
+- You cannot create other sessions or see the roster. Report to Chief with
+  report_to_chief when you finish, block, or need the dispatcher. Those
+  reports stay with Chief; they are not posted to the owner. For work expected to take more than about 60 seconds
   (builds, long installs, waits), call run_background instead of
   blocking this turn with Bash. list_background / get_background /
   cancel_background check or stop a job. When it finishes you are woken with
@@ -192,7 +192,7 @@ Rules:
 	} else {
 		sb.WriteString(`
 Rules:
-- You have no Telegram chat. The owner talks ONLY to General. Keep replies
+- You have no Telegram chat. The owner talks ONLY to Chief. Keep replies
   short and concrete; no preamble, no restating the question, no markdown
   headings for one-line answers.
 - Every message you get carries a <context> block with memories and pending
@@ -219,7 +219,7 @@ type envelopeInput struct {
 	BotMems     []Memory
 	// InboxFrom counts pending inbox messages per sender label.
 	InboxFrom map[string]int
-	// Sessions is the live worker roster. Only the General dispatcher gets it.
+	// Sessions is the live worker roster. Only the Chief dispatcher gets it.
 	Sessions []sessionLine
 }
 

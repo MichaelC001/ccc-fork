@@ -1231,8 +1231,8 @@ func summarizeTool(name string, input json.RawMessage) string {
 		return "messaging " + truncate(who, 30)
 	case "mcp__ccc__spawn_session", "ccc__spawn_session":
 		return "starting a session"
-	case "mcp__ccc__report_to_general", "ccc__report_to_general":
-		return "reporting to General"
+	case "mcp__ccc__report_to_chief", "ccc__report_to_chief", "mcp__ccc__report_to_general", "ccc__report_to_general":
+		return "reporting to Chief"
 	case "mcp__ccc__list_sessions", "ccc__list_sessions":
 		return "listing sessions"
 	case "mcp__ccc__ask_owner":

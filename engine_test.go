@@ -535,7 +535,7 @@ func TestRenderSystemPromptGrokGetsMCP(t *testing.T) {
 	if !strings.Contains(got, "Grok Build") {
 		t.Errorf("grok prompt should name the engine:\n%s", got)
 	}
-	if !strings.Contains(got, "ccc MCP tools") || !strings.Contains(got, "report_to_general") {
+	if !strings.Contains(got, "ccc MCP tools") || !strings.Contains(got, "report_to_chief") {
 		t.Errorf("grok worker prompt should describe ccc MCP:\n%s", got)
 	}
 	if !strings.Contains(got, "search_tool") {
@@ -545,14 +545,14 @@ func TestRenderSystemPromptGrokGetsMCP(t *testing.T) {
 		t.Errorf("grok worker must not spawn or page teammates:\n%s", got)
 	}
 	chief := renderSystemPrompt(
-		promptBot{Name: "General", Cwd: "/tmp", Engine: engineGrok, Chief: true},
+		promptBot{Name: "Chief", Cwd: "/tmp", Engine: engineGrok, Chief: true},
 		"host", nil,
 	)
 	if !strings.Contains(chief, "spawn_session") || !strings.Contains(chief, "tell_session") {
 		t.Errorf("grok chief prompt should describe dispatcher tools:\n%s", chief)
 	}
-	if strings.Contains(chief, "report_to_general") {
-		t.Error("chief must not get report_to_general")
+	if strings.Contains(chief, "report_to_chief") || strings.Contains(chief, "report_to_general") {
+		t.Error("chief must not get report_to_chief")
 	}
 	agy := renderSystemPrompt(promptBot{Name: "coder", Cwd: "/tmp", Engine: engineAntigravity}, "host", nil)
 	if !strings.Contains(agy, "do NOT have the ccc MCP") || !strings.Contains(agy, "ccc routine") {

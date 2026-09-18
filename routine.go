@@ -132,17 +132,17 @@ func (s *scheduler) postRoutineFired(b *Bot, sc Schedule) {
 }
 
 // routineWorkerPrompt is the first turn of the isolated session a routine
-// fire starts. Short on purpose: the whole point is not inheriting General.
+// fire starts. Short on purpose: the whole point is not inheriting Chief.
 func routineWorkerPrompt(name, note string) string {
 	return fmt.Sprintf(
-		"Scheduled routine %q. Do this work yourself (you are not General). When finished, report_to_general with a short result and archive_bot. Do not spawn_session and do not wait for more input.\n\n%s",
+		"Scheduled routine %q. Do this work yourself (you are not Chief). When finished, report_to_chief with a short result and archive_bot. Do not spawn_session and do not wait for more input.\n\n%s",
 		name, note,
 	)
 }
 
 // startRoutineWorker enqueues the routine on an isolated worker named
 // routine-<name>. Named routines must not run as a turn of the owning bot
-// (usually General): that re-reads the dispatcher's whole transcript.
+// (usually Chief): that re-reads the dispatcher's whole transcript.
 // A live or archived worker with that name is reused with session_id
 // cleared so a daily fire does not reread yesterday or pile -2/-3 sessions.
 func (s *scheduler) startRoutineWorker(owner *Bot, name, note string) error {

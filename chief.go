@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -10,18 +11,27 @@ import (
 	"gorm.io/gorm"
 )
 
-// General is the persistent dispatcher session. The owner's 1:1 DM with the
-// bot IS General. Sessions live in the backend (TopicID != 0); they have no
+// Chief is the persistent dispatcher session. The owner's 1:1 DM with the
+// bot IS Chief. Sessions live in the backend (TopicID != 0); they have no
 // Telegram chat. New workers get TopicID = -id so they cannot collide with
-// General (0).
-const generalBotName = "General"
+// Chief (0). The product is still ccc.
+const (
+	chiefBotName       = "Chief"
+	legacyChiefBotName = "General"
+	generalBotName     = chiefBotName // tests and older call sites
+)
 
 func isGeneralBot(b *Bot) bool {
 	return b != nil && b.TopicID == 0
 }
 
+func isDispatcherName(name string) bool {
+	n := sanitizeBotName(name)
+	return strings.EqualFold(n, chiefBotName) || strings.EqualFold(n, legacyChiefBotName)
+}
+
 // markBackendTopic assigns a negative TopicID so a worker cannot collide
-// with General (0). Call after the row has an id.
+// with Chief (0). Call after the row has an id.
 func markBackendTopic(db *gorm.DB, b *Bot) error {
 	if b == nil || b.ID == 0 {
 		return fmt.Errorf("bot has no id")
@@ -37,7 +47,7 @@ func markBackendTopic(db *gorm.DB, b *Bot) error {
 	return nil
 }
 
-// chiefTurnTimeout caps one General turn. Workers have no such cap. Tests may
+// chiefTurnTimeout caps one Chief turn. Workers have no such cap. Tests may
 // shorten it so they do not wait 60s.
 var chiefTurnTimeout = 60 * time.Second
 
@@ -53,32 +63,33 @@ func chiefTimeoutFor(b *Bot) time.Duration {
 	return chiefTurnTimeout
 }
 
-// chiefTimeoutInput is injected as the next General turn when the 60s cap
+// chiefTimeoutInput is injected as the next Chief turn when the 60s cap
 // fires. It is an error the dispatcher must act on, not a silent kill.
 func chiefTimeoutInput() string {
-	return "Error: this work is too long for General (60s cap). " +
+	return "Error: this work is too long for Chief (60s cap). " +
 		"You MUST pass it to a session with spawn_session (new) or tell_session (existing). " +
 		"Do not continue the work yourself."
 }
 
 // chiefTimeoutInputAfterSpawn is the inject when ccc already started the
-// worker: General still gets a turn so it knows, but must not spawn another.
+// worker: Chief still gets a turn so it knows, but must not spawn another.
 func chiefTimeoutInputAfterSpawn(name string) string {
-	return "Error: this work is too long for General (60s cap). " +
+	return "Error: this work is too long for Chief (60s cap). " +
 		fmt.Sprintf("CCC started session %q with the owner's request. ", name) +
 		"Do not do the work yourself and do not spawn a duplicate. " +
 		"tell_session if you need to add context."
 }
 
 func isChiefTimeoutFollowUp(input string) bool {
-	return strings.Contains(input, "too long for General")
+	return strings.Contains(input, "too long for Chief") ||
+		strings.Contains(input, "too long for General")
 }
 
 // chiefTimeoutWorkerPrompt is the first turn of a worker ccc started because
-// General timed out without spawn_session / tell_session.
+// Chief timed out without spawn_session / tell_session.
 func chiefTimeoutWorkerPrompt(owner string) string {
 	owner = strings.TrimSpace(owner)
-	msg := "General hit its 60s cap and did not hand this off. Do the work."
+	msg := "Chief hit its 60s cap and did not hand this off. Do the work."
 	if owner == "" {
 		return msg
 	}
@@ -105,7 +116,7 @@ func chiefTimeoutShouldSpawn(t *Turn, input string) bool {
 	return isChiefTimeoutFollowUp(input)
 }
 
-// lastOwnerRequest is the owner's text General was dispatching. Session
+// lastOwnerRequest is the owner's text Chief was dispatching. Session
 // reports, watches, schedules, routines and the timeout inject itself are
 // not that. Empty means there is nothing to hand off.
 func lastOwnerRequest(db *gorm.DB, botID int64, timedOut *Turn) string {
@@ -176,22 +187,28 @@ func generalBot(db *gorm.DB) (*Bot, error) {
 }
 
 // ensureGeneralBot returns the dispatcher row, creating it if needed.
-// General is the owner's 1:1 DM; it has no Telegram topic.
+// Chief is the owner's 1:1 DM; it has no Telegram topic. A row still named
+// General (the previous dispatcher title) is renamed in place.
 func (in *instance) ensureGeneralBot() (*Bot, error) {
 	return ensureGeneralBotRow(in.db, in.config())
 }
 
 func ensureGeneralBotRow(db *gorm.DB, cfg *Config) (*Bot, error) {
 	if b, err := generalBot(db); err == nil {
+		if err := migrateDispatcherName(db, cfg, b); err != nil {
+			return nil, err
+		}
 		return b, nil
 	}
-	cwd := botWorkspace(cfg, generalBotName)
+	if err := yieldDispatcherName(db); err != nil {
+		return nil, err
+	}
+	cwd := botWorkspace(cfg, chiefBotName)
 	if err := os.MkdirAll(cwd, 0o755); err != nil {
 		return nil, err
 	}
-	name := uniqueBotName(db, generalBotName)
 	b := &Bot{
-		Name:    name,
+		Name:    chiefBotName,
 		TopicID: 0,
 		Cwd:     cwd,
 		Engine:  defaultEngine(cfg),
@@ -199,11 +216,93 @@ func ensureGeneralBotRow(db *gorm.DB, cfg *Config) (*Bot, error) {
 	}
 	if err := db.Create(b).Error; err != nil {
 		if existing, err2 := generalBot(db); err2 == nil {
+			if err := migrateDispatcherName(db, cfg, existing); err != nil {
+				return nil, err
+			}
 			return existing, nil
 		}
 		return nil, err
 	}
 	return b, nil
+}
+
+// migrateDispatcherName moves a live dispatcher row off the old title
+// "General" onto Chief. Session_id is cleared so the new name reaches the
+// engine prompt (same reason /name rotates). A worker that already holds
+// "Chief" is pushed aside. The workspace directory follows when it is still
+// the default bots/General/workspace.
+func migrateDispatcherName(db *gorm.DB, cfg *Config, b *Bot) error {
+	if b == nil || !isGeneralBot(b) {
+		return nil
+	}
+	if b.Name == chiefBotName {
+		return nil
+	}
+	if err := yieldDispatcherName(db); err != nil {
+		return err
+	}
+	updates := map[string]any{"name": chiefBotName, "session_id": ""}
+	legacyCwd := botWorkspace(cfg, legacyChiefBotName)
+	wantCwd := botWorkspace(cfg, chiefBotName)
+	if strings.TrimSpace(b.Cwd) == "" || b.Cwd == legacyCwd {
+		if err := relocateDispatcherWorkspace(legacyCwd, wantCwd); err != nil {
+			return err
+		}
+		updates["cwd"] = wantCwd
+	}
+	if err := db.Model(b).Updates(updates).Error; err != nil {
+		return err
+	}
+	b.Name = chiefBotName
+	b.SessionID = ""
+	if cwd, ok := updates["cwd"].(string); ok {
+		b.Cwd = cwd
+	}
+	return nil
+}
+
+// yieldDispatcherName pushes a live worker off the title "Chief" so the
+// dispatcher can take it. uniqueBotName sees the current holder, so the
+// worker becomes Chief-2, Chief-3, …
+func yieldDispatcherName(db *gorm.DB) error {
+	var clash Bot
+	err := db.Where("LOWER(name) = LOWER(?) AND archived_at IS NULL", chiefBotName).First(&clash).Error
+	if err != nil {
+		return nil
+	}
+	if isGeneralBot(&clash) {
+		return nil
+	}
+	aside := uniqueBotName(db, chiefBotName)
+	if err := db.Model(&clash).Update("name", aside).Error; err != nil {
+		return err
+	}
+	return nil
+}
+
+func relocateDispatcherWorkspace(from, to string) error {
+	if from == "" || from == to {
+		return nil
+	}
+	fromDir := filepath.Dir(from)
+	toDir := filepath.Dir(to)
+	if err := os.MkdirAll(filepath.Dir(toDir), 0o755); err != nil {
+		return err
+	}
+	if _, err := os.Stat(to); err == nil {
+		return nil
+	}
+	if _, err := os.Stat(fromDir); os.IsNotExist(err) {
+		return os.MkdirAll(to, 0o755)
+	} else if err != nil {
+		return err
+	}
+	if err := os.Rename(fromDir, toDir); err != nil {
+		if mkErr := os.MkdirAll(to, 0o755); mkErr != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // sessionLine is one live worker for the chief's envelope / list_sessions.

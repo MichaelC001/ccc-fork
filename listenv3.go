@@ -18,7 +18,7 @@ import (
 )
 
 // listenv3.go is the Telegram side of ccc v3 (DESIGN §8): the owner's 1:1 DM
-// is General, the dispatcher. Sessions live in the backend; spawn_session
+// is Chief, the dispatcher. Sessions live in the backend; spawn_session
 // (and /session) start a worker without a Telegram chat. Group messages are
 // ignored.
 
@@ -200,7 +200,7 @@ func listenV3() error {
 	// is not silent.
 	in.recoverAfterRestart()
 	if _, err := in.ensureGeneralBot(); err != nil {
-		listenLog("ensure General: %v", err)
+		listenLog("ensure Chief: %v", err)
 	}
 	go sched.Run()
 	// Re-arm queues that survived the restart, including bot-to-bot messages
@@ -465,7 +465,7 @@ func (in *instance) handleMessage(msg *TelegramMessage) {
 
 	b, err := in.ensureGeneralBot()
 	if err != nil {
-		in.reply(msg, "Could not start General: "+err.Error())
+		in.reply(msg, "Could not start Chief: "+err.Error())
 		return
 	}
 	in.deliver(b, msg, text)
@@ -860,7 +860,7 @@ func (in *instance) handleCommand(msg *TelegramMessage, text string, role access
 		return
 	case "/session", "/bot":
 		if strings.TrimSpace(rest) == "" {
-			in.reply(msg, "Usage: /session &lt;prompt&gt; — starts a backend session without going through General.")
+			in.reply(msg, "Usage: /session &lt;prompt&gt; — starts a backend session without going through Chief.")
 			return
 		}
 		in.createBotFromText(msg, rest)
@@ -869,14 +869,14 @@ func (in *instance) handleCommand(msg *TelegramMessage, text string, role access
 
 	b, err := in.ensureGeneralBot()
 	if err != nil {
-		in.reply(msg, "Could not start General: "+err.Error())
+		in.reply(msg, "Could not start Chief: "+err.Error())
 		return
 	}
 
 	switch cmd {
 	case "/name":
 		if isGeneralBot(b) {
-			in.reply(msg, "General stays General.")
+			in.reply(msg, "Chief stays Chief.")
 			return
 		}
 		in.handleNameCommand(msg, b, rest)

@@ -1,6 +1,6 @@
 # ccc
 
-**ccc** — coding sessions in Telegram. You talk to **General** in the bot's
+**ccc** — coding sessions in Telegram. You talk to **Chief** in the bot's
 1:1 DM; it spawns backend workers. Sessions have no Telegram topic.
 
 [![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go)](https://go.dev)
@@ -12,17 +12,17 @@ Phone client (MIT, public): [ccc-app](https://github.com/kidandcat/ccc-app) — 
 
 ## What ccc is
 
-The bot's **1:1 DM is General**, the dispatcher: you talk to it, it sees
+The bot's **1:1 DM is Chief**, the dispatcher: you talk to it, it sees
 live sessions, and it can start a backend worker (`spawn_session`) or message
 one (`tell_session`). Sessions live in the backend — no Telegram topic. It
 has a 60s cap — longer work must go to a session. If the cap fires and
-General does not spawn, ccc starts the session itself (the owner is never
+Chief does not spawn, ccc starts the session itself (the owner is never
 asked to `/session`). Idle sessions waiting on
-you wake General every 10 minutes (inbox, not a chat ping); General decides
+you wake Chief every 10 minutes (inbox, not a chat ping); Chief decides
 what to do. `/session <prompt>`
-still starts a worker without going through General. Sessions report only
-to General (`report_to_general`); the owner does not see the transcript.
-General posts a short DM summary; if it cannot, listen posts a short
+still starts a worker without going through Chief. Sessions report only
+to Chief (`report_to_chief`); the owner does not see the transcript.
+Chief posts a short DM summary; if it cannot, listen posts a short
 fallback from the worker's last message (never only `session <name> done`).
 There is no role, no `/role`, no «what should I be?» interview.
 
@@ -37,29 +37,29 @@ the Telegram UX.
 ```
 ┌────────────┐   message    ┌──────────┐   claude -p --resume  ┌──────────────┐
 │  Telegram  │─────────────▶│   ccc    │──────────────────────▶│   one turn   │
-│  DM = Gen. │◀─────────────│  listen  │◀──  stream-json   ────│              │
+│ DM = Chief │◀─────────────│  listen  │◀──  stream-json   ────│              │
 └────────────┘   progress   └──────────┘                       └───────┬──────┘
                                   ▲                                    │
                                   │        ccc mcp (stdio)             │
                                   └────────────────────────────────────┘
               remember · recall · ask_owner · watch · schedule_wakeup ·
               run_background · run · secrets_list · spawn_session · tell_session ·
-              report_to_general · set_name · get_project · send_file
+              report_to_chief · set_name · get_project · send_file
 ```
 
 ### Concepts
 
 | | |
 |---|---|
-| **Instance** | One `ccc listen` process on one machine, bound to one Telegram bot token. The owner's DM is General. |
-| **Session** | A backend worker. A name, a working directory, an engine and a conversation. The owner never writes into a session chat; reports come to General (not dumped into the DM). |
+| **Instance** | One `ccc listen` process on one machine, bound to one Telegram bot token. The owner's DM is Chief. |
+| **Session** | A backend worker. A name, a working directory, an engine and a conversation. The owner never writes into a session chat; reports come to Chief (not dumped into the DM). |
 | **Turn** | One engine process (`claude -p`, `grok --single`, or `agy --print`): one input, one answer. One turn per session at a time; messages that arrive meanwhile are folded into the next turn. |
 | **Engine** | Which CLI an **account** runs: `claude`, `grok` / `grok-build`, or `antigravity` / `agy`. Set when you add the account (`/account add <identity> <engine>`). A session's turns pick a healthy account from that engine's pool. `/engine` is a secondary way to assign a session onto another pool. |
 | **Account** | One login for one engine. Claude = `CLAUDE_CONFIG_DIR`. Grok = isolated `GROK_HOME`. Antigravity = isolated `HOME` (`~/.gemini`). One ccc process can hold several Claude emails + several Grok logins + several agy logins at once. Failover stays inside the same engine. |
 | **Memory** | Durable facts in `user` (about you, shared across sessions) and `project` (about one code base). A leftover per-session scope still exists internally; it is not a persona. |
 | **Watch** | A command re-run on an interval. The session is woken **only when the output changes**, with a diff. Nothing changing costs nothing. This is the polling tool. Lives 4 hours, then it is cancelled and the session is woken to re-set it. Standing jobs are routines. |
 | **Schedule** | A wakeup at a time (not a poll). Each fire is a full turn. |
-| **Routine** | Named recurring work. Each fire starts a **fresh worker** with a short prompt, then posts ⏰ in General. |
+| **Routine** | Named recurring work. Each fire starts a **fresh worker** with a short prompt, then posts ⏰ in Chief. |
 | **Background job** | A long shell command on a session. The session stays responsive; it is woken when the job finishes. |
 
 ### Phone app
@@ -113,7 +113,7 @@ On your phone:
 
 1. Talk to [@BotFather](https://t.me/BotFather) → `/newbot` → copy the token.
 2. Get your own numeric Telegram user id from [@userinfobot](https://t.me/userinfobot).
-3. DM the bot — that chat **is General**.
+3. DM the bot — that chat **is Chief**.
 
 ### 4. Configure ccc (no interaction needed)
 
@@ -217,7 +217,7 @@ DM the bot:
 keep an eye on the fecha deploy and tell me if anything breaks
 ```
 
-That chat is General, the dispatcher: it will `spawn_session` (or you can
+That chat is Chief, the dispatcher: it will `spawn_session` (or you can
 `/session` the prompt yourself). Sessions run in the backend and report
 back here. There is no worker topic to talk in.
 
@@ -229,26 +229,26 @@ back here. There is no worker topic to talk in.
 
 | Where | What happens |
 |---|---|
-| Text in the **DM** (General) | A turn of the dispatcher (60s cap). It sees live sessions and can spawn or tell them. Idle workers waiting on you wake General every 10 minutes in its inbox, not as a DM ping. |
+| Text in the **DM** (Chief) | A turn of the dispatcher (60s cap). It sees live sessions and can spawn or tell them. Idle workers waiting on you wake Chief every 10 minutes in its inbox, not as a DM ping. |
 | `/session <prompt>` | Starts a backend worker named after the first line, first turn = that prompt. |
-| A photo or document | Saved into General's `inbox/`, with the path passed in the message. |
+| A photo or document | Saved into Chief's `inbox/`, with the path passed in the message. |
 | A voice note | Transcribed if the `voice` build is installed, else the file path is passed. |
-| A reply to a question / a button | Answers that session's `ask_owner`. Free text in the DM is always General. |
+| A reply to a question / a button | Answers that session's `ask_owner`. Free text in the DM is always Chief. |
 
-While a General turn runs, one progress message in the DM is edited in place
+While a Chief turn runs, one progress message in the DM is edited in place
 (no Telegram notification). The answer is posted when the turn finishes — that
 is the ping you get — and your message gets a ✅. Workers report back through
-General (`report_to_general`). The DM may get a quiet status one-liner;
-General (or listen, if General times out) still posts a short summary so
+Chief (`report_to_chief`). The DM may get a quiet status one-liner;
+Chief (or listen, if Chief times out) still posts a short summary so
 you are never left with only `session <name> done`.
 
 ### Commands
 
-**In the DM (General)**
+**In the DM (Chief)**
 
 | Command | Effect |
 |---|---|
-| `/name [name]` | Show or set the session's name (General stays General). Starts a fresh conversation (the name is in the system prompt). Names are unique. |
+| `/name [name]` | Show or set the session's name (Chief stays Chief). Starts a fresh conversation (the name is in the system prompt). Names are unique. |
 | `/new` | Fresh conversation. Memories are kept. |
 | `/stop` | Kill the running turn and drop the queue. |
 | `/cwd [path]` | Show or set the session's working directory. |
@@ -300,7 +300,7 @@ use `ccc routine` there). Grok calls them through `search_tool` / `use_tool`.
   turn, even if nothing changed.
 - `set_routine` / `list_routines` / `cancel_routine` — named recurring work,
   timezone-aware (default `Europe/Madrid`). Each fire starts a fresh worker
-  (it does not run inside General). ⏰ in General when it fires.
+  (it does not run inside Chief). ⏰ in Chief when it fires.
   Agy: `ccc routine add <name> --cron "0 9 * * 1-5" <prompt>`.
 - `run_background` / `list_background` / `get_background` / `cancel_background`
   — start a long shell command without blocking the turn (builds, installs,
@@ -311,9 +311,9 @@ use `ccc routine` there). Grok calls them through `search_tool` / `use_tool`.
   `secrets_get`.
 - `run` — foreground shell with the same vault inject as `run_background`.
   Use this instead of Bash when a secret is needed. Output is redacted.
-- **General only:** `list_sessions`, `spawn_session`, `tell_session`.
-- **Workers only:** `report_to_general` — the only way a session talks back
-  (inbox for General; not posted to the DM).
+- **Chief only:** `list_sessions`, `spawn_session`, `tell_session`.
+- **Workers only:** `report_to_chief` — the only way a session talks back
+  (inbox for Chief; not posted to the DM). `report_to_general` still works.
 - `archive_bot` — end this session.
 - `get_project` / `set_project` — shared notes about a code base.
 - `set_name` — rename this session.
@@ -351,7 +351,7 @@ Once a day at `maintenance_hour` (default 04:00 local) — or on demand with
   passes 120 entries or 48 KB, ONE turn on a cheap model (`compaction_model`,
   default `haiku`) merges the duplicates and drops what a newer entry
   contradicts. It runs outside every session, with no tools and no access to
-  anything. You get a message in **General**:
+  anything. You get a message in **Chief**:
 
   ```
   🧹 Compacted user memories: 143 → 61 (/memory restore 4 to undo)
@@ -396,7 +396,7 @@ allowed; nobody else can do anything until you approve them.
 - You approve with the button or `/access pair <code>`.
 - `/access list`, `/access add <id>`, `/access remove <id>`, `/access block <id>`.
 
-An approved user can talk in the DM (General). They cannot use `/account`, `/access`,
+An approved user can talk in the DM (Chief). They cannot use `/account`, `/access`,
 `/model`, `/secret` — those stay yours.
 
 > Sessions run with bypassed permissions on your machine. **The chat is the trust
@@ -422,7 +422,7 @@ a session onto another already-registered pool — it is not the way you introdu
 an engine.
 
 The **model** is not a property of the account. `/model <slug>` in a session
-topic overrides that session; `/model <engine> <slug>` in General (or a DM) sets
+topic overrides that session; `/model <engine> <slug>` in Chief (or a DM) sets
 the instance default for that engine. Empty means the CLI's own default.
 
 | Engine | Add account | Isolated home | Binary | Session | MCP |

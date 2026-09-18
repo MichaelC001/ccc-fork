@@ -62,7 +62,7 @@ func TestRenderSystemPromptCarriesIdentity(t *testing.T) {
 
 func TestSystemPromptRequiresAskOwnerForDecisions(t *testing.T) {
 	worker := renderSystemPrompt(promptBot{Name: "a", Cwd: "/tmp"}, "host", nil)
-	chief := renderSystemPrompt(promptBot{Name: "General", Cwd: "/tmp", Chief: true}, "host", nil)
+	chief := renderSystemPrompt(promptBot{Name: "Chief", Cwd: "/tmp", Chief: true}, "host", nil)
 	for name, got := range map[string]string{"worker": worker, "chief": chief} {
 		if !strings.Contains(got, askOwnerRule) {
 			t.Errorf("%s prompt missing shared ask_owner rule:\n%s", name, got)

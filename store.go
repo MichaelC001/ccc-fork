@@ -449,6 +449,9 @@ func validateBotName(db *gorm.DB, selfID int64, raw string) (string, error) {
 	if n := utf8.RuneCountInString(name); n > maxBotNameLen {
 		return "", fmt.Errorf("that name is %d characters long; the limit is %d", n, maxBotNameLen)
 	}
+	if isDispatcherName(name) {
+		return "", fmt.Errorf("%s is the dispatcher", chiefBotName)
+	}
 	if strings.ContainsAny(name, `/\`) {
 		return "", errors.New("a name cannot contain / or \\")
 	}
@@ -477,7 +480,7 @@ func validateBotName(db *gorm.DB, selfID int64, raw string) (string, error) {
 // reason /role rotates (DESIGN §14.14). Memories are untouched.
 func renameBot(db *gorm.DB, config *Config, b *Bot, name string) error {
 	if isGeneralBot(b) {
-		return fmt.Errorf("General stays General")
+		return fmt.Errorf("Chief stays Chief")
 	}
 	updates := map[string]any{"name": name, "session_id": ""}
 	if strings.TrimSpace(b.Cwd) == "" {
@@ -772,7 +775,7 @@ func createBotRow(db *gorm.DB, config *Config, name, role, cwd string) (*Bot, er
 }
 
 // startBackendSession creates a backend worker and queues prompt as a waking
-// inbox message from fromBot (usually General). Same path as spawn_session:
+// inbox message from fromBot (usually Chief). Same path as spawn_session:
 // the worker runs when the sender's turn ends (deliverInbox).
 func startBackendSession(db *gorm.DB, cfg *Config, from *Bot, name, prompt string) (*Bot, error) {
 	prompt = strings.TrimSpace(prompt)
@@ -786,8 +789,8 @@ func startBackendSession(db *gorm.DB, cfg *Config, from *Bot, name, prompt strin
 	if name == "" {
 		name = botNameFromText(prompt)
 	}
-	if strings.EqualFold(sanitizeBotName(name), generalBotName) {
-		return nil, fmt.Errorf("cannot spawn a session named General")
+	if isDispatcherName(name) {
+		return nil, fmt.Errorf("cannot spawn a session named %s", chiefBotName)
 	}
 	b, err := createBotRow(db, cfg, name, "", "")
 	if err != nil {
@@ -803,7 +806,7 @@ func startBackendSession(db *gorm.DB, cfg *Config, from *Bot, name, prompt strin
 // dropped and its automation stops. Memories are deliberately kept.
 func archiveBotRow(db *gorm.DB, botID int64) error {
 	if b, err := botByID(db, botID); err == nil && isGeneralBot(b) {
-		return fmt.Errorf("General cannot be archived")
+		return fmt.Errorf("Chief cannot be archived")
 	}
 	now := time.Now()
 	if err := db.Model(&Bot{}).Where("id = ?", botID).
