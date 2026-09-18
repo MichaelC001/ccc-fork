@@ -978,22 +978,22 @@ chooseProfile is 5h then 7d then load, spawn picks the engine with most
 headroom, auto-spawn is `source=user` only, watch TTL on General is silent.
 Not per-machine hygiene.
 
-## 15. Public hub (mobile)
+## 15. Public hub
 
-The phone app talks to `ccc listen` through an untrusted relay (`ccc hub`,
+Paired clients talk to `ccc listen` through an untrusted relay (`ccc hub`,
 default `wss://hub.mentasystems.com`). This is a DERP-style pipe, not a VPN: the
 instance opens an outbound websocket (so a Mac behind NAT is reachable), the
-device does the same, and the hub forwards NaCl boxes keyed by Curve25519
+client does the same, and the hub forwards NaCl boxes keyed by Curve25519
 public keys. The hub stores pairing codes and connected sockets. It never
 sees Telegram tokens, prompts, or plaintext RPC.
 
 `ccc pair` mints a 10-minute code and prints `ccc://pair/v1?h=&i=&k=&n=`.
-The `k` is the instance public key (TOFU). The phone encrypts its identity
+The `k` is the instance public key (TOFU). The client encrypts its identity
 to that key; the hub only routes. Paired devices live in SQLite on the
 instance (`hub_devices`). `ccc unpair` revokes them. `hub_url` `-` disables
 the client.
 
-Phone RPC (plaintext inside the box, instance `hubClient.dispatch`):
+Client RPC (plaintext inside the box, instance `hubClient.dispatch`):
 
 | Method | Params | Behavior |
 |---|---|---|
@@ -1012,18 +1012,18 @@ Listen also pushes events (same box as `post`/`progress`/`file`):
 
 | Event | When |
 |---|---|
-| `session` | Live roster changed (spawn, rename, status, archive). Phone reloads `bots`. |
+| `session` | Live roster changed (spawn, rename, status, archive). Client reloads `bots`. |
 | `archive` | A session left the live list. |
-| `question` | New unanswered `ask_owner`. Phone reloads `questions`. |
+| `question` | New unanswered `ask_owner`. Client reloads `questions`. |
 | `answered` | That question was answered or its session was archived. |
 
 Keepalive: clients send `{v:1,t:ping}` every ~30s; the hub replies `{t:pong}`.
-The hub's 2-minute read deadline resets on any data frame. The phone keeps one
-websocket per paired machine (foreground service on Android) and shows a local
-notification on General `post`, `file`, and `question` events — the same pings
-Telegram would send. Worker transcripts still emit `post`/`progress` so the
-phone can show a log, but they do not notify. `post`/`file` events include
-`general: true` when the session is General.
+The hub's 2-minute read deadline resets on any data frame. A paired client
+keeps one websocket per machine and surfaces General `post`, `file`, and
+`question` events — the same pings Telegram would send. Worker transcripts
+still emit `post`/`progress` so a client can show a log, but they do not
+notify. `post`/`file` events include `general: true` when the session is
+General.
 
 ## 16. Owner secrets vault
 

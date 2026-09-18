@@ -498,12 +498,6 @@ figcaption {
 .term code { background: none; padding: 0; }
 .after { margin-top: 0.9rem; font-size: 0.95rem; }
 
-.phone p {
-  max-width: 40rem;
-  margin: 0.75rem 0 0;
-}
-.phone a { text-decoration-thickness: 1px; text-underline-offset: 0.18em; }
-
 .close {
   padding: 6.5rem 0 5rem;
   text-align: center;

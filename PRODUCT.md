@@ -32,7 +32,6 @@ Not: a Claude Code plugin, a Slack bot, a web agent dashboard, or Claude backgro
 
 - One `ccc listen` process on one machine, bound to one Telegram bot token. Owner `chat_id` is the access-control root.
 - Default-deny by Telegram user id. Approved users can talk in the DM; `/account`, `/access`, `/model`, `/secret` stay owner-only.
-- Phone client (MIT, public): [ccc-app](https://github.com/kidandcat/ccc-app) — `ccc pair`, paste the URI. Default hub `wss://hub.mentasystems.com` is a free encrypted relay that cannot read chats. `ccc hub` runs your own.
 - Bootstrap is headless: BotFather token, `ccc config` / `ccc install` (launchd / systemd --user). Login URLs go to Telegram; ccc never opens a browser on the machine.
 - Implementation spec (not visual): [`docs/DESIGN.md`](docs/DESIGN.md). **Do not overwrite that file with a visual design system.** Visual DESIGN.md, if written, lives at the repo root.
 
@@ -61,7 +60,7 @@ Undecided / do not fabricate: user counts, testimonials, pricing (there is none 
 - Product name is **ccc** (lowercase in running text). No expansion (not “Crew Command Center”).
 - Voice in the README: precise, second-person, short. No hype, no “join developers who…”. Landing copy should stay in that register even when it is friendlier than the README.
 - Telegram is the interface, not the brand color by default.
-- MIT. Public repo. Phone app is a separate public repo.
+- MIT. Public repo. Public story is Telegram (+ CLI / `ccc listen`).
 - **Landing visual world (standing preference, 2026-09-18):** category canon — a typical coding-tool product site, sitting alongside Cursor, Claude, and Codex. Played straight at their craft level. No radio / ATC / sewing (or any other governing metaphor). No neo-terminal costume. No irony or smuggled quirk.
 
 ## Evidence on Hand

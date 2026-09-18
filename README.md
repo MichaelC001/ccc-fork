@@ -6,8 +6,6 @@
 [![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go)](https://go.dev)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Phone client (MIT, public): [ccc-app](https://github.com/kidandcat/ccc-app) — `ccc pair`, paste the URI in the app.
-
 ---
 
 ## What ccc is
@@ -64,17 +62,6 @@ the Telegram UX.
 | **Schedule** | A wakeup at a time (not a poll). Each fire is a full turn. |
 | **Routine** | Named recurring work. Each fire starts a **fresh worker** with a short prompt, then posts ⏰ in General. |
 | **Background job** | A long shell command on a session. The session stays responsive; it is woken when the job finishes. |
-
-### Phone app
-
-Anyone can run `ccc listen`, install the [CCC](https://github.com/kidandcat/ccc-app) app, and pair:
-
-```
-ccc pair          # on the machine
-# paste the ccc://pair/v1?… URI in the app
-```
-
-The default hub (`wss://hub.mentasystems.com`) is a free encrypted relay. It cannot read chats. `ccc hub` runs your own.
 
 ### What a session sees
 
@@ -586,7 +573,7 @@ ccc profile <cmd>             Manage accounts from a shell
                               (list/add/remove/default/login/accept-disclaimer)
 ccc send <file>               Send a file to the owner from the session owning this directory
 ccc relay [port]              Relay server for files over 50 MB
-ccc pair                      Print a URI to add this machine to the CCC phone app
+ccc pair                      Print a pairing URI for this machine
 ccc unpair                    List or revoke paired devices
 ccc hub [addr]                Run the public pairing hub (default :8787)
 ccc mcp --bot <id>            MCP server for one turn (spawned by Claude Code)
