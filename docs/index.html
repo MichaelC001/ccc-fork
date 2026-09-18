@@ -1,343 +1,216 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ccc — sessions in Telegram</title>
-    <meta name="description" content="ccc — coding sessions in Telegram. Talk to General in the bot's DM; sessions run in the backend.">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ccc — coding sessions in Telegram</title>
+  <meta name="description" content="Talk to General in the bot’s DM. It starts backend workers. Sessions have no Telegram topic. Self-hosted, MIT.">
+  <link rel="canonical" href="https://kidandcat.github.io/ccc/">
+  <meta name="theme-color" content="#09090b">
+  <meta property="og:title" content="ccc — coding sessions in Telegram">
+  <meta property="og:description" content="One Telegram DM is the dispatcher. Sessions are backend workers with no chat of their own.">
+  <meta property="og:url" content="https://kidandcat.github.io/ccc/">
+  <meta property="og:type" content="website">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <!-- Ambient background -->
-    <div class="ambient-glow"></div>
-    <div class="grid-overlay"></div>
+  <a class="skip" href="#main">Skip to content</a>
 
-    <!-- Navigation -->
-    <nav class="nav">
-        <div class="nav-brand">
-            <span class="logo">ccc</span>
-            <span class="logo-sub">sessions in Telegram</span>
-        </div>
-        <a href="https://github.com/kidandcat/ccc" class="nav-github" target="_blank">
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
-            </svg>
-            GitHub
-        </a>
+  <header class="nav">
+    <a class="wordmark" href="https://kidandcat.github.io/ccc/">ccc</a>
+    <nav aria-label="Primary">
+      <a href="#install">Install</a>
+      <a href="https://github.com/kidandcat/ccc-app">Phone app</a>
+      <a class="btn btn-nav" href="https://github.com/kidandcat/ccc">GitHub</a>
     </nav>
+  </header>
 
-    <!-- Hero Section -->
+  <main id="main">
     <section class="hero">
-        <div class="hero-content">
-            <div class="hero-badge">
-                <span class="badge-dot"></span>
-                Open Source & Self-Hosted
-            </div>
-            <h1 class="hero-title">
-                Code from your <span class="gradient-text">couch</span>
-            </h1>
-            <p class="hero-subtitle">
-                Coding sessions in Telegram. Write in the bot's DM (General); it starts a backend worker and that prompt is already the first turn.
-            </p>
-            <div class="hero-cta">
-                <a href="https://github.com/kidandcat/ccc" class="btn btn-primary">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                        <polyline points="7 10 12 15 17 10"/>
-                        <line x1="12" y1="15" x2="12" y2="3"/>
-                    </svg>
-                    Get Started
-                </a>
-                <a href="#how-it-works" class="btn btn-secondary">See How It Works</a>
-            </div>
+      <h1>Coding sessions in Telegram.</h1>
+      <p class="lede">Talk to General in the bot’s DM. It starts backend workers. Sessions have no chat of their own. Self-hosted, MIT.</p>
+      <div class="cta">
+        <a class="btn btn-fill" href="https://github.com/kidandcat/ccc">View on GitHub</a>
+        <a class="btn btn-line" href="#install">Install</a>
+      </div>
+
+      <figure class="product">
+        <div class="window" role="img" aria-label="Synthetic demonstration of the ccc Telegram DM beside a session list">
+          <div class="titlebar">
+            <span class="lights" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="titlebar-name">ccc</span>
+          </div>
+          <div class="panes">
+            <section class="pane dm" aria-label="Telegram DM with General">
+              <header class="dm-head">
+                <span class="avatar" aria-hidden="true">c</span>
+                <div>
+                  <strong>ccc</strong>
+                  <span class="sub">General · online</span>
+                </div>
+              </header>
+              <div class="thread">
+                <p class="day">Today</p>
+                <p class="bubble out" style="--d:0s">keep an eye on the deploy and tell me if anything breaks</p>
+                <p class="bubble in" style="--d:.35s">session deploy-watch started</p>
+                <p class="bubble in" style="--d:.55s">deploy-watch: health 200, replica caught up.</p>
+                <p class="bubble out" style="--d:.75s">also ship the CSS if tests are green</p>
+                <p class="bubble in" style="--d:.95s">landing-css is waiting on you — buttons below.</p>
+              </div>
+              <div class="composer" aria-hidden="true"><span>Message</span></div>
+            </section>
+            <section class="pane sessions" aria-label="Backend sessions">
+              <header class="sess-head">
+                <strong>Sessions</strong>
+                <span class="sub">backend · no Telegram topic</span>
+              </header>
+              <ul class="sess-list">
+                <li>
+                  <span class="dot run" aria-hidden="true"></span>
+                  <div>
+                    <div class="sess-row"><b>deploy-watch</b><span class="pill run">running</span></div>
+                    <p>health 200, replica caught up</p>
+                  </div>
+                </li>
+                <li>
+                  <span class="dot wait" aria-hidden="true"></span>
+                  <div>
+                    <div class="sess-row"><b>landing-css</b><span class="pill wait">waiting</span></div>
+                    <p>Ship the CSS change to Pages?</p>
+                  </div>
+                </li>
+                <li>
+                  <span class="dot idle" aria-hidden="true"></span>
+                  <div>
+                    <div class="sess-row"><b>digest</b><span class="pill idle">idle</span></div>
+                    <p>waiting on you</p>
+                  </div>
+                </li>
+              </ul>
+            </section>
+          </div>
         </div>
-
-        <!-- Interactive Demo -->
-        <div class="hero-demo">
-            <div class="demo-phone">
-                <div class="phone-notch"></div>
-                <div class="phone-screen">
-                    <div class="telegram-header">
-                        <div class="telegram-avatar">ccc</div>
-                        <div class="telegram-info">
-                            <span class="telegram-name">ccc</span>
-                            <span class="telegram-status">online</span>
-                        </div>
-                    </div>
-                    <div class="telegram-chat">
-                        <div class="msg msg-out">/new myproject</div>
-                        <div class="msg msg-in">
-                            <span class="msg-icon">🚀</span>
-                            Session 'myproject' started!
-                        </div>
-                        <div class="msg msg-out">Fix the auth bug in login.ts</div>
-                        <div class="msg msg-in typing">
-                            <span class="typing-dot"></span>
-                            <span class="typing-dot"></span>
-                            <span class="typing-dot"></span>
-                        </div>
-                        <div class="msg msg-in msg-delayed">
-                            <span class="msg-icon">✅</span>
-                            Fixed! Updated login.ts with proper token validation.
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="demo-connection">
-                <div class="connection-line">
-                    <div class="connection-dot"></div>
-                    <div class="connection-dot"></div>
-                    <div class="connection-dot"></div>
-                </div>
-                <span class="connection-label">Secure & Private</span>
-            </div>
-
-            <div class="demo-terminal">
-                <div class="terminal-bar">
-                    <div class="terminal-dots">
-                        <span></span><span></span><span></span>
-                    </div>
-                    <span class="terminal-title">claude-myproject</span>
-                </div>
-                <div class="terminal-content">
-                    <div class="term-line"><span class="term-prompt">$</span> ccc</div>
-                    <div class="term-line term-output">📱 Attached to session: myproject</div>
-                    <div class="term-line term-output"></div>
-                    <div class="term-line term-claude">
-                        <span class="claude-badge">Claude</span>
-                        I found the authentication bug...
-                    </div>
-                    <div class="term-line term-cursor"></div>
-                </div>
-            </div>
-        </div>
+        <figcaption>Synthetic demonstration — not a production screenshot.</figcaption>
+      </figure>
     </section>
 
-    <!-- Features Section -->
-    <section class="features" id="features">
-        <div class="section-header">
-            <h2>Everything you need to code remotely</h2>
-            <p>Built for developers who want AI assistance on their terms</p>
+    <section class="block split">
+      <div class="copy">
+        <h2>One DM is the dispatcher.</h2>
+        <p>Plain text in the bot’s 1:1 chat is a turn of General. It has a 60-second cap; longer work becomes a session. If the cap fires and General has not spawned, ccc starts the session itself. <code>/session</code> skips the dispatcher.</p>
+        <p>Workers report only to General. You get a short summary in the DM, not the transcript. If General cannot post it, listen posts a short fallback — never only <code>session done</code>.</p>
+      </div>
+      <figure class="product product-tight">
+        <div class="window window-ask" role="img" aria-label="Synthetic ask_owner decision in the DM">
+          <div class="titlebar">
+            <span class="lights" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="titlebar-name">General</span>
+          </div>
+          <div class="ask">
+            <header class="dm-head">
+              <span class="avatar" aria-hidden="true">c</span>
+              <div>
+                <strong>ccc</strong>
+                <span class="sub">General · online</span>
+              </div>
+            </header>
+            <div class="ask-body">
+              <p class="bubble in ask-msg">landing-css asks: Ship the CSS change to Pages?</p>
+              <div class="kbd" role="group" aria-label="Inline buttons">
+                <span class="kbd-btn">Ship it</span>
+                <span class="kbd-btn">Not yet</span>
+              </div>
+              <p class="ask-note">Recommended first. Tap, or reply to the question.</p>
+            </div>
+          </div>
         </div>
-
-        <div class="features-grid">
-            <div class="feature-card">
-                <div class="feature-icon">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                        <rect x="5" y="2" width="14" height="20" rx="2"/>
-                        <line x1="12" y1="18" x2="12" y2="18.01" stroke-width="2" stroke-linecap="round"/>
-                    </svg>
-                </div>
-                <h3>Phone Control</h3>
-                <p>Start and manage Claude Code sessions directly from Telegram. Perfect for when you're away from your desk.</p>
-            </div>
-
-            <div class="feature-card">
-                <div class="feature-icon">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                        <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
-                        <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
-                    </svg>
-                </div>
-                <h3>Smart Notifications</h3>
-                <p>Get pinged when Claude finishes a task. No more checking your terminal every 5 minutes.</p>
-            </div>
-
-            <div class="feature-card">
-                <div class="feature-icon">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                        <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
-                        <circle cx="9" cy="7" r="4"/>
-                        <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
-                        <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
-                    </svg>
-                </div>
-                <h3>Multi-Session</h3>
-                <p>Run multiple projects simultaneously. Each session is a backend worker; you talk to General, they report back.</p>
-            </div>
-
-            <div class="feature-card">
-                <div class="feature-icon">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                        <rect x="3" y="11" width="18" height="11" rx="2"/>
-                        <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
-                    </svg>
-                </div>
-                <h3>100% Self-Hosted</h3>
-                <p>Your code never leaves your machine. No cloud servers, no data collection, complete privacy.</p>
-            </div>
-
-            <div class="feature-card">
-                <div class="feature-icon">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                        <polyline points="4 17 10 11 4 5"/>
-                        <line x1="12" y1="19" x2="20" y2="19"/>
-                    </svg>
-                </div>
-                <h3>Background Agents</h3>
-                <p>Sessions are Claude Code background agents — they show up in <code>claude agents</code> and you can <code>claude attach</code> from any terminal, anytime.</p>
-            </div>
-
-            <div class="feature-card">
-                <div class="feature-icon">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                        <circle cx="12" cy="12" r="10"/>
-                        <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>
-                        <line x1="12" y1="17" x2="12.01" y2="17" stroke-width="2" stroke-linecap="round"/>
-                    </svg>
-                </div>
-                <h3>Interactive Approvals</h3>
-                <p>Approve Claude's plans with Telegram buttons. No need to type - just tap.</p>
-            </div>
-        </div>
+        <figcaption>Decisions use Telegram buttons. Sessions must not ask in chat prose.</figcaption>
+      </figure>
     </section>
 
-    <!-- How It Works -->
-    <section class="how-it-works" id="how-it-works">
-        <div class="section-header">
-            <h2>Up and running in 3 steps</h2>
-            <p>No complicated setup. Just simple commands.</p>
+    <section class="block quiet">
+      <h2>The ping is the answer.</h2>
+      <div class="quiet-grid">
+        <div>
+          <h3>Silent progress</h3>
+          <p>While General runs, one progress message is edited in place with notifications off. When the turn ends, that message is deleted and the reply is the ping you get.</p>
         </div>
-
-        <div class="steps">
-            <div class="step">
-                <div class="step-number">1</div>
-                <div class="step-content">
-                    <h3>Create a Telegram Bot</h3>
-                    <p>Message @BotFather on Telegram and create your personal bot. Takes about 30 seconds.</p>
-                    <div class="step-code">
-                        <code>/newbot</code>
-                        <span class="code-comment">→ Follow the prompts, save your token</span>
-                    </div>
-                </div>
-            </div>
-
-            <div class="step">
-                <div class="step-number">2</div>
-                <div class="step-content">
-                    <h3>Run Setup</h3>
-                    <p>One command configures everything: Telegram connection, Claude hook, and background service.</p>
-                    <div class="step-code">
-                        <code>ccc setup YOUR_BOT_TOKEN</code>
-                    </div>
-                </div>
-            </div>
-
-            <div class="step">
-                <div class="step-number">3</div>
-                <div class="step-content">
-                    <h3>Start Coding</h3>
-                    <p>Navigate to any project and run ccc. That's it. You're ready to code from anywhere.</p>
-                    <div class="step-code">
-                        <code>cd ~/myproject && ccc</code>
-                    </div>
-                </div>
-            </div>
+        <div>
+          <h3>Owner vault</h3>
+          <p><code>/secret add</code> captures the next DM before any session sees it. Values never come back. Sessions inject via env or stdin; there is no <code>secrets_get</code>.</p>
         </div>
+        <div>
+          <h3>Watches cost nothing until they fire</h3>
+          <p>A watch re-runs a command and wakes the session only when stdout changes. Polling with a wakeup is a full turn every time; don’t.</p>
+        </div>
+      </div>
     </section>
 
-    <!-- Workflow Demo -->
-    <section class="workflow">
-        <div class="section-header">
-            <h2>See it in action</h2>
-            <p>Start on your phone, finish on your PC - or vice versa</p>
-        </div>
-
-        <div class="workflow-visual">
-            <div class="workflow-step">
-                <div class="workflow-device phone">
-                    <div class="device-label">📱 Phone</div>
-                    <div class="device-action">Start session with /new</div>
-                </div>
-                <div class="workflow-arrow">→</div>
-            </div>
-
-            <div class="workflow-step">
-                <div class="workflow-device cloud">
-                    <div class="device-label">☁️ Your Mac</div>
-                    <div class="device-action">Claude works as a background agent</div>
-                </div>
-                <div class="workflow-arrow">→</div>
-            </div>
-
-            <div class="workflow-step">
-                <div class="workflow-device phone">
-                    <div class="device-label">📱 Phone</div>
-                    <div class="device-action">Get notified when done</div>
-                </div>
-                <div class="workflow-arrow">→</div>
-            </div>
-
-            <div class="workflow-step">
-                <div class="workflow-device terminal">
-                    <div class="device-label">💻 Terminal</div>
-                    <div class="device-action">Attach & continue</div>
-                </div>
-            </div>
-        </div>
+    <section class="block engines">
+      <h2>Same envelope. Four runners.</h2>
+      <p class="lede-s">A session’s turns pick a healthy account of that engine. Failover stays inside the engine. Mix Claude, Grok, Antigravity, and Codex on one instance.</p>
+      <ul class="engine-row">
+        <li><b>Claude Code</b><span>default</span></li>
+        <li><b>Grok Build</b><span>grok</span></li>
+        <li><b>Antigravity</b><span>agy</span></li>
+        <li><b>Codex</b><span>codex</span></li>
+      </ul>
     </section>
 
-    <!-- CTA Section -->
-    <section class="cta">
-        <div class="cta-content">
-            <h2>Ready to code from anywhere?</h2>
-            <p>Join developers who've untethered themselves from their desks.</p>
-            <div class="cta-buttons">
-                <a href="https://github.com/kidandcat/ccc" class="btn btn-primary btn-large">
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
-                    </svg>
-                    View on GitHub
-                </a>
-                <a href="https://github.com/kidandcat/ccc#quick-start" class="btn btn-secondary btn-large">
-                    Read the Docs
-                </a>
-            </div>
+    <section class="block install" id="install">
+      <h2>Headless bootstrap.</h2>
+      <p class="lede-s">BotFather token, your Telegram user id, then install. ccc never opens a browser on the machine. Login URLs go to Telegram.</p>
+      <div class="term">
+        <div class="term-bar">
+          <span>install</span>
+          <button type="button" class="copy-btn" data-copy="ccc config set bot_token  &lt;from @BotFather&gt;&#10;ccc config set chat_id    &lt;your Telegram user id&gt;&#10;ccc install" aria-label="Copy install commands">Copy</button>
         </div>
-        <div class="cta-decoration">
-            <div class="decoration-circle"></div>
-            <div class="decoration-circle"></div>
-            <div class="decoration-circle"></div>
-        </div>
+        <pre><code>ccc config set bot_token  &lt;from @BotFather&gt;
+ccc config set chat_id    &lt;your Telegram user id&gt;
+ccc install</code></pre>
+      </div>
+      <p class="after">DM the bot. That chat is General. Full path, including a VM: the README on GitHub.</p>
     </section>
 
-    <!-- Footer -->
-    <footer class="footer">
-        <div class="footer-content">
-            <div class="footer-brand">
-                <span class="logo">ccc</span>
-                <p>Made with Claude Code 🤖</p>
-            </div>
-            <div class="footer-links">
-                <a href="https://github.com/kidandcat/ccc">GitHub</a>
-                <a href="https://github.com/kidandcat/ccc/issues">Issues</a>
-                <a href="https://github.com/kidandcat/ccc/blob/main/LICENSE">MIT License</a>
-            </div>
-        </div>
-    </footer>
+    <section class="block phone">
+      <h2>A phone client, if you want one.</h2>
+      <p><code>ccc pair</code> prints a URI. Paste it in <a href="https://github.com/kidandcat/ccc-app">ccc-app</a>. The default hub is an encrypted relay that cannot read chats. <code>ccc hub</code> runs your own.</p>
+    </section>
 
-    <script>
-        // Animate elements on scroll
-        const observer = new IntersectionObserver((entries) => {
-            entries.forEach(entry => {
-                if (entry.isIntersecting) {
-                    entry.target.classList.add('visible');
-                }
-            });
-        }, { threshold: 0.1 });
+    <section class="close">
+      <h2>Your machine. Your token. MIT.</h2>
+      <a class="btn btn-fill btn-lg" href="https://github.com/kidandcat/ccc">View on GitHub</a>
+    </section>
+  </main>
 
-        document.querySelectorAll('.feature-card, .step, .workflow-step').forEach(el => {
-            observer.observe(el);
-        });
+  <footer class="foot">
+    <span class="wordmark">ccc</span>
+    <nav aria-label="Footer">
+      <a href="https://github.com/kidandcat/ccc">GitHub</a>
+      <a href="https://github.com/kidandcat/ccc/issues">Issues</a>
+      <a href="https://github.com/kidandcat/ccc-app">Phone app</a>
+      <a href="https://github.com/kidandcat/ccc/blob/main/LICENSE">MIT License</a>
+    </nav>
+  </footer>
 
-        // Typing animation for terminal
-        setTimeout(() => {
-            document.querySelector('.msg-delayed')?.classList.add('show');
-        }, 3000);
-    </script>
+  <script>
+    (function () {
+      const btn = document.querySelector(".copy-btn");
+      if (!btn) return;
+      btn.addEventListener("click", async () => {
+        const text = btn.getAttribute("data-copy") || "";
+        try {
+          await navigator.clipboard.writeText(text);
+          const prev = btn.textContent;
+          btn.textContent = "Copied";
+          btn.setAttribute("aria-live", "polite");
+          setTimeout(() => { btn.textContent = prev; }, 1600);
+        } catch (e) {
+          btn.textContent = "Select the commands";
+        }
+      });
+    })();
+  </script>
 </body>
 </html>

@@ -1,0 +1,273 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-18T15:45:50Z",
+  "title": "Design System: ccc",
+  "extensions": {
+    "colorMeta": {
+      "fill": {
+        "role": "primary",
+        "displayName": "Fill",
+        "canonical": "#f5f5f4",
+        "tonalRamp": ["oklch(15% 0.004 90)", "oklch(26% 0.004 90)", "oklch(38% 0.004 90)", "oklch(50% 0.004 90)", "oklch(62% 0.003 90)", "oklch(74% 0.003 90)", "oklch(86% 0.002 90)", "oklch(96.5% 0.002 90)"]
+      },
+      "on-fill": {
+        "role": "primary",
+        "displayName": "On Fill",
+        "canonical": "#09090b",
+        "tonalRamp": ["oklch(5.5% 0.004 280)", "oklch(18% 0.004 280)", "oklch(30% 0.004 280)", "oklch(42% 0.004 280)", "oklch(54% 0.003 280)", "oklch(66% 0.003 280)", "oklch(80% 0.002 280)", "oklch(95% 0.002 280)"]
+      },
+      "bg": {
+        "role": "neutral",
+        "displayName": "Ground",
+        "canonical": "#09090b",
+        "tonalRamp": ["oklch(5.5% 0.004 280)", "oklch(12% 0.004 280)", "oklch(20% 0.004 280)", "oklch(32% 0.004 280)", "oklch(46% 0.003 280)", "oklch(62% 0.003 280)", "oklch(78% 0.002 280)", "oklch(95% 0.002 280)"]
+      },
+      "bg-elev": {
+        "role": "neutral",
+        "displayName": "Elevated",
+        "canonical": "#111113",
+        "tonalRamp": ["oklch(8% 0.004 280)", "oklch(16% 0.004 280)", "oklch(28% 0.004 280)", "oklch(40% 0.004 280)", "oklch(54% 0.003 280)", "oklch(68% 0.003 280)", "oklch(82% 0.002 280)", "oklch(95% 0.002 280)"]
+      },
+      "bg-pane": {
+        "role": "neutral",
+        "displayName": "Pane",
+        "canonical": "#0c0c0e",
+        "tonalRamp": ["oklch(6.5% 0.004 280)", "oklch(14% 0.004 280)", "oklch(26% 0.004 280)", "oklch(38% 0.004 280)", "oklch(52% 0.003 280)", "oklch(66% 0.003 280)", "oklch(80% 0.002 280)", "oklch(95% 0.002 280)"]
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Ink",
+        "canonical": "#f5f5f4",
+        "tonalRamp": ["oklch(15% 0.004 90)", "oklch(26% 0.004 90)", "oklch(38% 0.004 90)", "oklch(50% 0.004 90)", "oklch(62% 0.003 90)", "oklch(74% 0.003 90)", "oklch(86% 0.002 90)", "oklch(96.5% 0.002 90)"]
+      },
+      "ink-dim": {
+        "role": "neutral",
+        "displayName": "Ink Dim",
+        "canonical": "color-mix(in srgb, #f5f5f4 78%, #09090b)",
+        "tonalRamp": ["oklch(18% 0.003 90)", "oklch(30% 0.003 90)", "oklch(42% 0.003 90)", "oklch(54% 0.003 90)", "oklch(66% 0.002 90)", "oklch(76% 0.002 90)", "oklch(86% 0.002 90)", "oklch(95% 0.002 90)"]
+      },
+      "ink-faint": {
+        "role": "neutral",
+        "displayName": "Ink Faint",
+        "canonical": "color-mix(in srgb, #f5f5f4 62%, #09090b)",
+        "tonalRamp": ["oklch(18% 0.003 90)", "oklch(30% 0.003 90)", "oklch(42% 0.003 90)", "oklch(54% 0.002 90)", "oklch(64% 0.002 90)", "oklch(74% 0.002 90)", "oklch(86% 0.002 90)", "oklch(95% 0.002 90)"]
+      },
+      "line": {
+        "role": "neutral",
+        "displayName": "Hairline",
+        "canonical": "color-mix(in srgb, #f5f5f4 12%, #09090b)",
+        "tonalRamp": ["oklch(10% 0.003 280)", "oklch(16% 0.003 280)", "oklch(24% 0.003 280)", "oklch(36% 0.003 280)", "oklch(50% 0.002 280)", "oklch(64% 0.002 280)", "oklch(80% 0.002 280)", "oklch(94% 0.002 280)"]
+      },
+      "tg-bg": {
+        "role": "secondary",
+        "displayName": "Telegram Ground",
+        "canonical": "#0e1621",
+        "tonalRamp": ["oklch(12% 0.02 250)", "oklch(22% 0.025 250)", "oklch(34% 0.03 250)", "oklch(46% 0.035 250)", "oklch(58% 0.035 250)", "oklch(70% 0.03 250)", "oklch(82% 0.02 250)", "oklch(94% 0.01 250)"]
+      },
+      "tg-head": {
+        "role": "secondary",
+        "displayName": "Telegram Head",
+        "canonical": "#17212b",
+        "tonalRamp": ["oklch(14% 0.02 250)", "oklch(24% 0.025 250)", "oklch(36% 0.03 250)", "oklch(48% 0.035 250)", "oklch(60% 0.035 250)", "oklch(72% 0.03 250)", "oklch(84% 0.02 250)", "oklch(94% 0.01 250)"]
+      },
+      "tg-in": {
+        "role": "secondary",
+        "displayName": "Incoming Bubble",
+        "canonical": "#182533",
+        "tonalRamp": ["oklch(15% 0.025 250)", "oklch(26% 0.03 250)", "oklch(38% 0.035 250)", "oklch(50% 0.04 250)", "oklch(62% 0.035 250)", "oklch(74% 0.03 250)", "oklch(86% 0.02 250)", "oklch(95% 0.01 250)"]
+      },
+      "tg-out": {
+        "role": "secondary",
+        "displayName": "Outgoing Bubble",
+        "canonical": "#2b5278",
+        "tonalRamp": ["oklch(18% 0.05 250)", "oklch(28% 0.06 250)", "oklch(38% 0.07 250)", "oklch(46% 0.08 250)", "oklch(56% 0.07 250)", "oklch(68% 0.05 250)", "oklch(82% 0.03 250)", "oklch(94% 0.015 250)"]
+      },
+      "tg-in-ink": {
+        "role": "secondary",
+        "displayName": "Incoming Ink",
+        "canonical": "#dbe6f0",
+        "tonalRamp": ["oklch(20% 0.015 240)", "oklch(32% 0.015 240)", "oklch(44% 0.015 240)", "oklch(56% 0.015 240)", "oklch(68% 0.012 240)", "oklch(80% 0.01 240)", "oklch(90% 0.008 240)", "oklch(96% 0.006 240)"]
+      },
+      "tg-out-ink": {
+        "role": "secondary",
+        "displayName": "Outgoing Ink",
+        "canonical": "#eef5fb",
+        "tonalRamp": ["oklch(20% 0.012 240)", "oklch(32% 0.012 240)", "oklch(44% 0.012 240)", "oklch(56% 0.012 240)", "oklch(68% 0.01 240)", "oklch(80% 0.008 240)", "oklch(90% 0.006 240)", "oklch(96.5% 0.005 240)"]
+      },
+      "run": {
+        "role": "tertiary",
+        "displayName": "Running",
+        "canonical": "#3dd68c",
+        "tonalRamp": ["oklch(18% 0.08 155)", "oklch(30% 0.1 155)", "oklch(42% 0.13 155)", "oklch(54% 0.15 155)", "oklch(66% 0.16 155)", "oklch(76% 0.12 155)", "oklch(86% 0.07 155)", "oklch(95% 0.03 155)"]
+      },
+      "wait": {
+        "role": "tertiary",
+        "displayName": "Waiting",
+        "canonical": "#e8b84a",
+        "tonalRamp": ["oklch(22% 0.08 85)", "oklch(34% 0.1 85)", "oklch(46% 0.12 85)", "oklch(58% 0.13 85)", "oklch(70% 0.13 85)", "oklch(80% 0.1 85)", "oklch(88% 0.06 85)", "oklch(95% 0.03 85)"]
+      },
+      "idle": {
+        "role": "tertiary",
+        "displayName": "Idle",
+        "canonical": "color-mix(in srgb, #f5f5f4 38%, #09090b)",
+        "tonalRamp": ["oklch(18% 0.003 90)", "oklch(28% 0.003 90)", "oklch(38% 0.003 90)", "oklch(48% 0.003 90)", "oklch(60% 0.002 90)", "oklch(72% 0.002 90)", "oklch(84% 0.002 90)", "oklch(95% 0.002 90)"]
+      },
+      "kbd-fill": {
+        "role": "secondary",
+        "displayName": "Keyboard Fill",
+        "canonical": "#25303d",
+        "tonalRamp": ["oklch(18% 0.02 250)", "oklch(28% 0.025 250)", "oklch(38% 0.03 250)", "oklch(48% 0.03 250)", "oklch(60% 0.025 250)", "oklch(72% 0.02 250)", "oklch(84% 0.012 250)", "oklch(94% 0.008 250)"]
+      },
+      "kbd-ink": {
+        "role": "secondary",
+        "displayName": "Keyboard Ink",
+        "canonical": "#6cb7f0",
+        "tonalRamp": ["oklch(20% 0.06 245)", "oklch(32% 0.08 245)", "oklch(44% 0.1 245)", "oklch(56% 0.12 245)", "oklch(68% 0.12 245)", "oklch(78% 0.09 245)", "oklch(88% 0.05 245)", "oklch(95% 0.02 245)"]
+      },
+      "avatar-fill": {
+        "role": "secondary",
+        "displayName": "Avatar Fill",
+        "canonical": "#2a3f54",
+        "tonalRamp": ["oklch(18% 0.03 250)", "oklch(28% 0.035 250)", "oklch(38% 0.04 250)", "oklch(48% 0.04 250)", "oklch(60% 0.035 250)", "oklch(72% 0.025 250)", "oklch(84% 0.015 250)", "oklch(94% 0.008 250)"]
+      },
+      "avatar-ink": {
+        "role": "secondary",
+        "displayName": "Avatar Ink",
+        "canonical": "#d7e3ee",
+        "tonalRamp": ["oklch(20% 0.012 240)", "oklch(32% 0.012 240)", "oklch(44% 0.012 240)", "oklch(56% 0.012 240)", "oklch(68% 0.01 240)", "oklch(80% 0.008 240)", "oklch(88% 0.006 240)", "oklch(95% 0.005 240)"]
+      }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Display", "purpose": "Hero and closing headlines; 14–16ch cap." },
+      "headline": { "displayName": "Headline", "purpose": "Section titles." },
+      "title": { "displayName": "Title", "purpose": "Quiet-grid headings and pane names." },
+      "body": { "displayName": "Body", "purpose": "Running copy and lede (lede at 1.1875rem, ink-dim)." },
+      "label": { "displayName": "Label", "purpose": "Nav, buttons, wordmark sibling controls." },
+      "mono": { "displayName": "Mono", "purpose": "Commands and inline code only." }
+    },
+    "shadows": [
+      {
+        "name": "window",
+        "value": "0 10px 28px -6px color-mix(in srgb, #000 62%, transparent)",
+        "purpose": "Ambient lift under the OS-style product frame only."
+      }
+    ],
+    "motion": [
+      {
+        "name": "rise",
+        "value": "0.55s cubic-bezier(0.16, 1, 0.3, 1)",
+        "purpose": "Chat bubbles enter 8px up; delay via --d."
+      },
+      {
+        "name": "pulse",
+        "value": "2.2s ease-out infinite",
+        "purpose": "Running session dot opacity pulse."
+      },
+      {
+        "name": "hover-dim",
+        "value": "filter: brightness(0.94)",
+        "purpose": "Filled button hover; no translate."
+      }
+    ],
+    "breakpoints": [
+      { "name": "stack", "value": "860px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Filled off-white CTA with near-black type.",
+      "html": "<button class=\"ds-btn-primary\" type=\"button\">View on GitHub</button>",
+      "css": ".ds-btn-primary { display: inline-flex; align-items: center; justify-content: center; height: 2.5rem; padding: 0 1rem; border-radius: 8px; font-family: \"Mona Sans\", ui-sans-serif, system-ui, sans-serif; font-size: 0.9375rem; font-weight: 500; letter-spacing: -0.015em; text-decoration: none; border: 1px solid transparent; background: #f5f5f4; color: #09090b; cursor: pointer; } .ds-btn-primary:hover { filter: brightness(0.94); } .ds-btn-primary:focus-visible { outline: 2px solid #f5f5f4; outline-offset: 3px; }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Hairline ghost action on ground.",
+      "html": "<button class=\"ds-btn-secondary\" type=\"button\">Install</button>",
+      "css": ".ds-btn-secondary { display: inline-flex; align-items: center; justify-content: center; height: 2.5rem; padding: 0 1rem; border-radius: 8px; font-family: \"Mona Sans\", ui-sans-serif, system-ui, sans-serif; font-size: 0.9375rem; font-weight: 500; letter-spacing: -0.015em; border: 1px solid color-mix(in srgb, #f5f5f4 12%, #09090b); background: transparent; color: #f5f5f4; cursor: pointer; } .ds-btn-secondary:hover { background: color-mix(in srgb, #f5f5f4 6%, #09090b); } .ds-btn-secondary:focus-visible { outline: 2px solid #f5f5f4; outline-offset: 3px; }"
+    },
+    {
+      "name": "Nav GitHub",
+      "kind": "nav",
+      "refersTo": "button-nav",
+      "description": "Compact filled control in the sticky nav.",
+      "html": "<a class=\"ds-btn-nav\" href=\"#\">GitHub</a>",
+      "css": ".ds-btn-nav { display: inline-flex; align-items: center; justify-content: center; height: 2rem; padding: 0 0.75rem; border-radius: 8px; font-family: \"Mona Sans\", ui-sans-serif, system-ui, sans-serif; font-size: 0.8125rem; font-weight: 500; letter-spacing: -0.015em; text-decoration: none; background: #f5f5f4; color: #09090b; } .ds-btn-nav:hover { filter: brightness(0.94); color: #09090b; } .ds-btn-nav:focus-visible { outline: 2px solid #f5f5f4; outline-offset: 3px; }"
+    },
+    {
+      "name": "Status Pill",
+      "kind": "chip",
+      "refersTo": "chip-status",
+      "description": "Lowercase session state chip; running/waiting tint the hairline.",
+      "html": "<span class=\"ds-pill ds-pill-run\">running</span>",
+      "css": ".ds-pill { font-family: \"Mona Sans\", ui-sans-serif, system-ui, sans-serif; font-size: 0.6875rem; font-weight: 500; letter-spacing: 0.02em; text-transform: lowercase; padding: 0.12rem 0.4rem; border-radius: 999px; border: 1px solid color-mix(in srgb, #f5f5f4 12%, #09090b); color: color-mix(in srgb, #f5f5f4 78%, #09090b); } .ds-pill-run { color: #3dd68c; border-color: color-mix(in srgb, #3dd68c 35%, transparent); }"
+    },
+    {
+      "name": "Copy Control",
+      "kind": "button",
+      "refersTo": "copy-btn",
+      "description": "Small hairline control on the install terminal bar.",
+      "html": "<button class=\"ds-copy-btn\" type=\"button\">Copy</button>",
+      "css": ".ds-copy-btn { background: transparent; color: #f5f5f4; border: 1px solid color-mix(in srgb, #f5f5f4 12%, #09090b); border-radius: 6px; height: 1.85rem; padding: 0 0.7rem; font-family: \"Mona Sans\", ui-sans-serif, system-ui, sans-serif; font-size: 0.75rem; font-weight: 500; cursor: pointer; } .ds-copy-btn:hover { background: color-mix(in srgb, #f5f5f4 6%, transparent); } .ds-copy-btn:focus-visible { outline: 2px solid #f5f5f4; outline-offset: 3px; }"
+    },
+    {
+      "name": "Ask-owner Keyboard",
+      "kind": "button",
+      "refersTo": "kbd-btn",
+      "description": "Telegram inline decision buttons — interface only, not page CTA.",
+      "html": "<div class=\"ds-kbd\"><span class=\"ds-kbd-btn\">Ship it</span><span class=\"ds-kbd-btn\">Not yet</span></div>",
+      "css": ".ds-kbd { display: grid; grid-template-columns: 1fr 1fr; gap: 0.4rem; } .ds-kbd-btn { display: flex; align-items: center; justify-content: center; min-height: 2.2rem; padding: 0.4rem 0.6rem; border-radius: 8px; background: #25303d; color: #6cb7f0; font-family: \"Mona Sans\", ui-sans-serif, system-ui, sans-serif; font-size: 0.875rem; font-weight: 500; text-align: center; }"
+    },
+    {
+      "name": "Install Terminal",
+      "kind": "card",
+      "refersTo": "term",
+      "description": "Hairline command block; no window shadow.",
+      "html": "<div class=\"ds-term\"><div class=\"ds-term-bar\"><span>install</span></div><pre class=\"ds-term-pre\">ccc install</pre></div>",
+      "css": ".ds-term { border: 1px solid color-mix(in srgb, #f5f5f4 12%, #09090b); border-radius: 12px; overflow: hidden; background: #111113; color: #f5f5f4; } .ds-term-bar { display: flex; align-items: center; min-height: 2.65rem; padding: 0.45rem 0.95rem; border-bottom: 1px solid color-mix(in srgb, #f5f5f4 12%, #09090b); font-family: \"Mona Sans\", ui-sans-serif, system-ui, sans-serif; font-size: 0.75rem; color: color-mix(in srgb, #f5f5f4 62%, #09090b); } .ds-term-pre { margin: 0; padding: 1.1rem 1.15rem 1.25rem; font-family: \"Monaspace Neon\", ui-monospace, monospace; font-size: 0.9rem; font-weight: 450; line-height: 1.7; color: #f5f5f4; }"
+    },
+    {
+      "name": "Product Window",
+      "kind": "custom",
+      "refersTo": "window",
+      "description": "OS-style two-pane frame: Telegram DM | backend sessions.",
+      "html": "<div class=\"ds-window\"><div class=\"ds-titlebar\"><span class=\"ds-lights\" aria-hidden=\"true\"><i></i><i></i><i></i></span><span class=\"ds-titlebar-name\">ccc</span></div><div class=\"ds-panes\"><div class=\"ds-dm\"><p class=\"ds-bubble ds-out\">keep an eye on the deploy</p><p class=\"ds-bubble ds-in\">session deploy-watch started</p></div><div class=\"ds-sessions\"><b>Sessions</b></div></div></div>",
+      "css": ".ds-window { border-radius: 12px; overflow: hidden; background: #111113; box-shadow: 0 10px 28px -6px color-mix(in srgb, #000 62%, transparent); font-family: \"Mona Sans\", ui-sans-serif, system-ui, sans-serif; color: #f5f5f4; } .ds-titlebar { display: flex; align-items: center; gap: 0.75rem; min-height: 2.65rem; padding: 0.55rem 0.95rem; border-bottom: 1px solid color-mix(in srgb, #f5f5f4 12%, #09090b); background: #0c0c0e; } .ds-titlebar-name { font-size: 0.75rem; font-weight: 500; color: color-mix(in srgb, #f5f5f4 62%, #09090b); } .ds-lights { display: flex; gap: 0.35rem; } .ds-lights i { width: 0.65rem; height: 0.65rem; border-radius: 50%; display: block; } .ds-lights i:nth-child(1) { background: #ff5f57; } .ds-lights i:nth-child(2) { background: #febc2e; } .ds-lights i:nth-child(3) { background: #28c840; } .ds-panes { display: grid; grid-template-columns: 1.2fr 0.8fr; } .ds-dm { background: #0e1621; padding: 0.85rem; display: flex; flex-direction: column; gap: 0.45rem; } .ds-sessions { background: #0c0c0e; padding: 0.85rem 1rem; border-left: 1px solid color-mix(in srgb, #f5f5f4 12%, #09090b); font-size: 0.9rem; font-weight: 600; } .ds-bubble { margin: 0; max-width: 85%; padding: 0.55rem 0.75rem; border-radius: 12px; font-size: 0.9rem; line-height: 1.4; } .ds-out { align-self: flex-end; background: #2b5278; color: #eef5fb; border-bottom-right-radius: 4px; } .ds-in { align-self: flex-start; background: #182533; color: #dbe6f0; border-bottom-left-radius: 4px; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Coding-Tool Product Page",
+    "overview": "ccc’s public face is a straight 2026 coding-tool landing: near-black ground, off-white ink, hairline rules, a white filled button with black type. It sits next to Cursor, Claude, and Codex in craft, not in costume. There is no governing metaphor — not radio, not ATC, not sewing — and no neo-terminal theatre. The product is shown the way those sites show an editor: a two-pane window, full content width, with the Telegram DM on the left and backend sessions on the right.\n\nPersonality is precise and quiet. Density is editorial, not dashboard: large type, long measure, generous section air, one signature object. Color on the page is almost only ink on ground; the Telegram blues and session greens live inside the product chrome as interface content. Motion is a single bubble rise and a running-state pulse, both off when the visitor asks for reduced motion.",
+    "keyCharacteristics": [
+      "Near-black page ground with off-white ink and 1px hairlines at ink-on-ground 12%",
+      "Primary action is a filled off-white pill-rect with black type — no colored CTA",
+      "Mona Sans for all UI; Monaspace Neon only for commands and inline code",
+      "Product chrome is an OS-style window (traffic lights, titlebar, two panes)",
+      "Telegram palette is nested interface, never page brand"
+    ],
+    "rules": [
+      { "name": "The Frame Rule", "body": "Telegram blues, keyboard cyan, avatar steel, and session status hues exist only inside product chrome. The page around the window stays near-black / off-white / hairline.", "section": "colors" },
+      { "name": "The Fill Rule", "body": "The only page-level accent is inverted fill: off-white surface, near-black type. Do not introduce a brand hue for buttons, links, or headlines.", "section": "colors" },
+      { "name": "The Command Face Rule", "body": "Monaspace Neon is for commands and code. It is not a headline, a label, or a “developer atmosphere” texture on body copy.", "section": "typography" },
+      { "name": "The One Shadow Rule", "body": "One ambient window shadow. No glow, no grid overlay, no stacked drop shadows on controls.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do keep page chrome on ground / ink / hairline / fill, and put Telegram and status color only inside the product frame (The Frame Rule).",
+      "Do set primary actions in fill with on-fill type at 8px radius and 2.5rem height.",
+      "Do set Mona Sans for UI and Monaspace Neon for commands only (The Command Face Rule).",
+      "Do show the product as a two-pane window with one ambient shadow (The One Shadow Rule).",
+      "Do collapse multi-column layouts to one column at 860px, turning left hairlines into top hairlines."
+    ],
+    "donts": [
+      "Don't use Telegram blue, keyboard cyan, or session green as page-level brand, link, or button color.",
+      "Don't add glow, grid overlay, gradient text, or an icon-card feature grid.",
+      "Don't dress the page as a terminal (scanlines, phosphor, prompt-as-headline) or as a radio / ATC / sewing world.",
+      "Don't put a second drop shadow on buttons or the install terminal — the window already carries the only shadow.",
+      "Don't uppercase labels or buttons; status pills stay lowercase."
+    ]
+  }
+}
