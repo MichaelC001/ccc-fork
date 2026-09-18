@@ -18,7 +18,7 @@ Secondary: someone evaluating the public OSS repo (`kidandcat/ccc`) before cloni
 
 ## Product Purpose
 
-**ccc** is coding sessions in Telegram. The bot's 1:1 DM is **Chief**, the dispatcher: you talk to it, it sees live sessions, and it can start a backend worker (`spawn_session`) or message one (`tell_session`). Sessions live in the backend — no Telegram topic. The owner never writes into a session chat. Workers report only to Chief (`report_to_chief`); the owner does not see the transcript. Chief posts a short DM summary.
+**ccc** is coding sessions in Telegram. The bot's 1:1 DM is **General**, the dispatcher: you talk to it, it sees live sessions, and it can start a backend worker (`spawn_session`) or message one (`tell_session`). Sessions live in the backend — no Telegram topic. The owner never writes into a session chat. Workers report only to General (`report_to_general`); the owner does not see the transcript. General posts a short DM summary.
 
 Success for this landing: a first-time visitor understands that model in seconds, believes the product is self-hosted OSS (not a hosted chat SaaS), and goes to https://github.com/kidandcat/ccc.
 
@@ -40,9 +40,9 @@ Not: a Claude Code plugin, a Slack bot, a web agent dashboard, or Claude backgro
 
 Confirmed (README / `docs/DESIGN.md`):
 
-- Chief 60s cap; longer work goes to a session. If the cap fires and Chief does not spawn, ccc starts the session itself. `/session <prompt>` starts a worker without Chief.
-- Idle sessions waiting on the owner wake Chief every 10 minutes (inbox, not a chat ping).
-- Tools sessions actually have: `remember` / `recall` / `forget`; `notify_owner` / `ask_owner`; `watch` / `schedule_wakeup` / `set_routine`; `run_background` / `run` with vault inject; `secrets_list` / `secrets_delete` (no `secrets_get`); Chief-only `spawn_session` / `tell_session`; workers-only `report_to_chief`; `send_file`; `get_project` / `set_project`; `set_name`; `archive_bot`.
+- General 60s cap; longer work goes to a session. If the cap fires and General does not spawn, ccc starts the session itself. `/session <prompt>` starts a worker without General.
+- Idle sessions waiting on the owner wake General every 10 minutes (inbox, not a chat ping).
+- Tools sessions actually have: `remember` / `recall` / `forget`; `notify_owner` / `ask_owner`; `watch` / `schedule_wakeup` / `set_routine`; `run_background` / `run` with vault inject; `secrets_list` / `secrets_delete` (no `secrets_get`); General-only `spawn_session` / `tell_session`; workers-only `report_to_general`; `send_file`; `get_project` / `set_project`; `set_name`; `archive_bot`.
 - Engines: Claude Code, Grok Build, Antigravity, Codex. Failover stays inside the same engine.
 - Owner vault (`/secret add`); values never shown; sessions inject via env/stdin.
 - MIT license. Go 1.25+.
@@ -73,7 +73,7 @@ Undecided / do not fabricate: user counts, testimonials, pricing (there is none 
 
 ## Product Principles
 
-1. **The DM is Chief.** If a sentence implies the owner chats with a worker, it is wrong.
+1. **The DM is General.** If a sentence implies the owner chats with a worker, it is wrong.
 2. **Facts over atmosphere.** Friendliness is tone and craft, not extra capabilities.
 3. **Self-hosted is the product.** The public hub is an encrypted pipe, not a cloud that runs your agents.
 4. **Quiet by default.** Progress is silent; the ping is the answer; `ask_owner` is how decisions happen.

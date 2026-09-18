@@ -123,7 +123,7 @@ func setup(botToken string) error {
 	}
 
 	fmt.Println()
-	fmt.Println("✅ Setup complete. DM the bot (that chat is Chief), or")
+	fmt.Println("✅ Setup complete. DM the bot (that chat is General), or")
 	fmt.Println("   /account add you@example.com claude.")
 	startListenerService()
 	return nil
@@ -223,7 +223,7 @@ func doctor(fix bool) {
 			hint  string
 		}{
 			{"bot_token", config.BotToken != "", "configured", "ccc config set bot_token <token>"},
-			{"chat_id", config.ChatID != 0, fmt.Sprint(config.ChatID), "ccc config set chat_id <your telegram user id> — this DM is Chief"},
+			{"chat_id", config.ChatID != 0, fmt.Sprint(config.ChatID), "ccc config set chat_id <your telegram user id> — this DM is General"},
 		} {
 			fmt.Printf("  %-14s ", check.label)
 			if check.ok {
@@ -315,17 +315,17 @@ COMMANDS:
     profile <cmd>           Manage accounts (list/add/remove/default/
                             login/accept-disclaimer); engine is set at add
     mcp --bot <id>          MCP server for one turn (spawned by claude/grok/codex)
-    routine add|list|cancel Named recurring wakeup (⏰ in Chief)
+    routine add|list|cancel Named recurring wakeup (⏰ in General)
     send <file>             Send a file to the owner from the session owning this directory
     relay [port]            Relay server for files over 50 MB (default port: 8080)
     pair                    Print a QR / URI to add this machine to the mobile app
     unpair [device]         List or revoke paired mobile devices
     hub [addr]              Run the public pairing hub (default :8787)
 
-TELEGRAM (the bot's 1:1 DM is Chief):
+TELEGRAM (the bot's 1:1 DM is General):
     Text in the DM          Talk to the dispatcher (sees sessions, can spawn them)
-    /session <prompt>       Start a backend session without going through Chief
-    /new /stop /cwd /memory /forget /watches /schedules         Chief, in the DM
+    /session <prompt>       Start a backend session without going through General
+    /new /stop /cwd /memory /forget /watches /schedules         General, in the DM
     /engine                 assign this session to an engine's account pool
     /sessions /status /usage                                    anywhere
     /memory stats|restore <id>                                  memory upkeep

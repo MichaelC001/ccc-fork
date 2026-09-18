@@ -1,8 +1,6 @@
 package main
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -111,7 +109,7 @@ func TestReportToGeneralIsWorkerOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !res.IsError {
-		t.Fatal("Chief must not report to itself")
+		t.Fatal("General must not report to itself")
 	}
 
 	worker, err := in.createBot("worker", "")
@@ -257,42 +255,6 @@ func TestChiefEnvelopeListsWorkersNotItself(t *testing.T) {
 	}
 }
 
-func TestEnsureGeneralBotMigratesLegacyName(t *testing.T) {
-	in, _, _ := testInstance(t)
-	cfg := in.config()
-	legacyCwd := botWorkspace(cfg, legacyChiefBotName)
-	if err := os.MkdirAll(legacyCwd, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	marker := filepath.Join(legacyCwd, "keep-me.txt")
-	if err := os.WriteFile(marker, []byte("ok"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	row := &Bot{Name: legacyChiefBotName, TopicID: 0, Cwd: legacyCwd, Status: botIdle, Engine: defaultEngine(cfg)}
-	if err := in.db.Create(row).Error; err != nil {
-		t.Fatal(err)
-	}
-	got, err := in.ensureGeneralBot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Name != chiefBotName {
-		t.Errorf("name = %q, want %s", got.Name, chiefBotName)
-	}
-	if got.Cwd != botWorkspace(cfg, chiefBotName) {
-		t.Errorf("cwd = %q", got.Cwd)
-	}
-	if _, err := os.Stat(filepath.Join(got.Cwd, "keep-me.txt")); err != nil {
-		t.Errorf("workspace was not moved: %v", err)
-	}
-	if _, err := startBackendSession(in.db, cfg, got, legacyChiefBotName, "nope"); err == nil {
-		t.Fatal("must not spawn a worker named General")
-	}
-	if _, err := startBackendSession(in.db, cfg, got, chiefBotName, "nope"); err == nil {
-		t.Fatal("must not spawn a worker named Chief")
-	}
-}
-
 func TestArchiveAndRenameRefuseGeneral(t *testing.T) {
 	in, _, _ := testInstance(t)
 	chief, err := in.ensureGeneralBot()
@@ -320,7 +282,7 @@ func TestArchiveAndRenameRefuseGeneral(t *testing.T) {
 }
 
 func TestChiefPromptIsByteStable(t *testing.T) {
-	b := promptBot{Name: "Chief", Cwd: "/tmp", Chief: true}
+	b := promptBot{Name: "General", Cwd: "/tmp", Chief: true}
 	first := renderSystemPrompt(b, "host", []otherBot{{Name: "a"}})
 	second := renderSystemPrompt(b, "host", []otherBot{{Name: "b"}})
 	if first != second {
@@ -404,7 +366,7 @@ func TestChiefTimeoutIsSixtySecondsForGeneralOnly(t *testing.T) {
 
 func TestChiefTimeoutInputTellsGeneralToSpawn(t *testing.T) {
 	got := chiefTimeoutInput()
-	for _, want := range []string{"Error:", "too long for Chief", "spawn_session", "tell_session"} {
+	for _, want := range []string{"Error:", "too long for General", "spawn_session", "tell_session"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("timeout input missing %q:\n%s", want, got)
 		}
@@ -439,7 +401,7 @@ func TestPersistChiefTimeoutEnqueuesTheInstruction(t *testing.T) {
 	if queued[0].Source != sourceSystem {
 		t.Errorf("source = %q, want system", queued[0].Source)
 	}
-	if !strings.Contains(queued[0].Input, "too long for Chief") {
+	if !strings.Contains(queued[0].Input, "too long for General") {
 		t.Errorf("injected input = %q", queued[0].Input)
 	}
 

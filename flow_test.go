@@ -622,8 +622,8 @@ func TestNameCommandOnGeneralStaysGeneral(t *testing.T) {
 	}
 	in.handleMessage(ownerMessage("/name"))
 	joined := strings.Join(api.texts(""), "\n")
-	if !strings.Contains(joined, "Chief stays Chief") && !strings.Contains(joined, generalBotName) {
-		t.Errorf("/name in the DM should mention Chief: %q", joined)
+	if !strings.Contains(joined, "General stays General") && !strings.Contains(joined, generalBotName) {
+		t.Errorf("/name in the DM should mention General: %q", joined)
 	}
 	in.handleMessage(ownerMessage("/name shipper"))
 	g, err := generalBot(in.db)

@@ -388,8 +388,8 @@ func TestHubRenameAndArchiveRefuseGeneral(t *testing.T) {
 	}
 	params, _ := json.Marshal(map[string]any{"bot_id": chief.ID, "name": "Chief"})
 	res := h.dispatch(hubRPC{Kind: "req", ID: "1", Method: "rename", Params: params})
-	if res.OK || !strings.Contains(res.Error, "Chief stays Chief") {
-		t.Fatalf("rename Chief: ok=%v err=%q", res.OK, res.Error)
+	if res.OK || !strings.Contains(res.Error, "General stays General") {
+		t.Fatalf("rename General: ok=%v err=%q", res.OK, res.Error)
 	}
 	got, err := botByID(in.db, chief.ID)
 	if err != nil || got.Name != generalBotName {
@@ -397,8 +397,8 @@ func TestHubRenameAndArchiveRefuseGeneral(t *testing.T) {
 	}
 	arch, _ := json.Marshal(map[string]any{"bot_id": chief.ID})
 	res = h.dispatch(hubRPC{Kind: "req", ID: "2", Method: "archive", Params: arch})
-	if res.OK || !strings.Contains(res.Error, "Chief cannot be archived") {
-		t.Fatalf("archive Chief: ok=%v err=%q", res.OK, res.Error)
+	if res.OK || !strings.Contains(res.Error, "General cannot be archived") {
+		t.Fatalf("archive General: ok=%v err=%q", res.OK, res.Error)
 	}
 	got, err = botByID(in.db, chief.ID)
 	if err != nil || got.ArchivedAt != nil {

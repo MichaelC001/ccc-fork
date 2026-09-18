@@ -605,7 +605,7 @@ func (h *hubClient) rpcArchive(params json.RawMessage, out *hubRPC) {
 		return
 	}
 	if isGeneralBot(b) {
-		out.OK, out.Error = false, "Chief cannot be archived"
+		out.OK, out.Error = false, "General cannot be archived"
 		return
 	}
 	if err := archiveBotRow(h.in.db, b.ID); err != nil {
@@ -646,7 +646,7 @@ func (h *hubClient) rpcRename(params json.RawMessage, out *hubRPC) {
 		return
 	}
 	if isGeneralBot(b) {
-		out.OK, out.Error = false, "Chief stays Chief"
+		out.OK, out.Error = false, "General stays General"
 		return
 	}
 	name, err := validateBotName(h.in.db, b.ID, p.Name)

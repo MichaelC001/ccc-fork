@@ -267,7 +267,7 @@ func TestRoutineFiresInTimezoneAndPosts(t *testing.T) {
 	if !strings.Contains(got.Text, "mira ventas") {
 		t.Errorf("prompt missing from turn: %q", got.Text)
 	}
-	if !strings.Contains(got.Text, "you are not Chief") || !strings.Contains(got.Text, "archive_bot") {
+	if !strings.Contains(got.Text, "you are not General") || !strings.Contains(got.Text, "archive_bot") {
 		t.Errorf("worker prompt must isolate the job:\n%s", got.Text)
 	}
 	posted := false

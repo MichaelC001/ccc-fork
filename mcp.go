@@ -205,7 +205,7 @@ func (s *mcpServer) registerCrew(server *mcp.Server) {
 	if s.isChief() {
 		mcp.AddTool(server, &mcp.Tool{
 			Name:        "list_sessions",
-			Description: "List live sessions (not including Chief): name, status, engine, last output.",
+			Description: "List live sessions (not including General): name, status, engine, last output.",
 		}, s.listSessions)
 		mcp.AddTool(server, &mcp.Tool{
 			Name:        "spawn_session",
@@ -213,18 +213,13 @@ func (s *mcpServer) registerCrew(server *mcp.Server) {
 		}, s.spawnSession)
 		mcp.AddTool(server, &mcp.Tool{
 			Name:        "tell_session",
-			Description: "Message an existing live session and wake it. Sessions cannot message each other; only Chief can tell them.",
+			Description: "Message an existing live session and wake it. Sessions cannot message each other; only General can tell them.",
 		}, s.tellSession)
 		return
 	}
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        "report_to_chief",
-		Description: "Send a status update to Chief (the dispatcher). Full reports stay with Chief; they are not posted to the owner. Use it for finished work, a blocker, or a question for the dispatcher. You cannot message other sessions.",
-	}, s.reportToGeneral)
-	// Alias so workers that still have the old system prompt keep working.
-	mcp.AddTool(server, &mcp.Tool{
 		Name:        "report_to_general",
-		Description: "Deprecated alias of report_to_chief. Send a status update to Chief (the dispatcher).",
+		Description: "Send a status update to General (the dispatcher). Full reports stay with General; they are not posted to the owner. Use it for finished work, a blocker, or a question for the dispatcher. You cannot message other sessions.",
 	}, s.reportToGeneral)
 }
 
@@ -347,14 +342,14 @@ func (s *mcpServer) sendToBot(_ context.Context, _ *mcp.CallToolRequest, in send
 
 func (s *mcpServer) listSessions(_ context.Context, _ *mcp.CallToolRequest, _ emptyIn) (*mcp.CallToolResult, any, error) {
 	if !s.isChief() {
-		return toolErr("only Chief can list sessions"), nil, nil
+		return toolErr("only General can list sessions"), nil, nil
 	}
 	return text("%s", formatSessionRoster(sessionRoster(s.db, s.botID))), nil, nil
 }
 
 func (s *mcpServer) spawnSession(_ context.Context, _ *mcp.CallToolRequest, in spawnSessionIn) (*mcp.CallToolResult, any, error) {
 	if !s.isChief() {
-		return toolErr("only Chief can spawn sessions"), nil, nil
+		return toolErr("only General can spawn sessions"), nil, nil
 	}
 	prompt := strings.TrimSpace(in.Prompt)
 	if prompt == "" {
@@ -373,7 +368,7 @@ func (s *mcpServer) spawnSession(_ context.Context, _ *mcp.CallToolRequest, in s
 
 func (s *mcpServer) tellSession(_ context.Context, _ *mcp.CallToolRequest, in tellSessionIn) (*mcp.CallToolResult, any, error) {
 	if !s.isChief() {
-		return toolErr("only Chief can message sessions"), nil, nil
+		return toolErr("only General can message sessions"), nil, nil
 	}
 	body := strings.TrimSpace(in.Text)
 	if body == "" {
@@ -384,7 +379,7 @@ func (s *mcpServer) tellSession(_ context.Context, _ *mcp.CallToolRequest, in te
 		return toolErr("no live session named %q", in.Session), nil, nil
 	}
 	if isGeneralBot(target) || target.ID == s.botID {
-		return toolErr("tell_session is for worker sessions, not Chief"), nil, nil
+		return toolErr("tell_session is for worker sessions, not General"), nil, nil
 	}
 	self, err := s.bot()
 	if err != nil {
@@ -398,14 +393,14 @@ func (s *mcpServer) tellSession(_ context.Context, _ *mcp.CallToolRequest, in te
 
 func (s *mcpServer) reportToGeneral(_ context.Context, _ *mcp.CallToolRequest, in reportToGeneralIn) (*mcp.CallToolResult, any, error) {
 	if s.isChief() {
-		return toolErr("you are Chief; talk to the owner here"), nil, nil
+		return toolErr("you are General; talk to the owner here"), nil, nil
 	}
 	body := strings.TrimSpace(in.Text)
 	if body == "" {
-		return toolErr("report_to_chief needs text"), nil, nil
+		return toolErr("report_to_general needs text"), nil, nil
 	}
 	if _, err := generalBot(s.db); err != nil {
-		return toolErr("Chief dispatcher is not running"), nil, nil
+		return toolErr("General dispatcher is not running"), nil, nil
 	}
 	self, err := s.bot()
 	if err != nil {
@@ -414,7 +409,7 @@ func (s *mcpServer) reportToGeneral(_ context.Context, _ *mcp.CallToolRequest, i
 	if _, _, err := queueOwnerRelay(s.db, self, body); err != nil {
 		return toolErr("%s", err.Error()), nil, nil
 	}
-	return text("reported to Chief; it will run when this turn ends"), nil, nil
+	return text("reported to General; it will run when this turn ends"), nil, nil
 }
 
 func (s *mcpServer) notifyOwner(_ context.Context, _ *mcp.CallToolRequest, in notifyOwnerIn) (*mcp.CallToolResult, any, error) {
@@ -494,7 +489,7 @@ func (s *mcpServer) setName(_ context.Context, _ *mcp.CallToolRequest, in setNam
 		return toolErr("unknown bot"), nil, nil
 	}
 	if isGeneralBot(b) {
-		return toolErr("Chief stays Chief"), nil, nil
+		return toolErr("General stays General"), nil, nil
 	}
 	name, err := validateBotName(s.db, b.ID, in.Name)
 	if err != nil {
@@ -778,7 +773,7 @@ func (s *mcpServer) registerAutomation(server *mcp.Server) {
 	}, s.cancelSchedule)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "set_routine",
-		Description: "Create or replace a named recurring routine. Each fire starts a fresh isolated worker with a short prompt (not a turn on Chief). Always fires, timezone-aware, ⏰ in Chief. Upserts by name.",
+		Description: "Create or replace a named recurring routine. Each fire starts a fresh isolated worker with a short prompt (not a turn on General). Always fires, timezone-aware, ⏰ in General. Upserts by name.",
 	}, s.setRoutine)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list_routines",
@@ -1045,7 +1040,7 @@ func (s *mcpServer) archiveBot(_ context.Context, _ *mcp.CallToolRequest, in arc
 		}
 	}
 	if isGeneralBot(target) {
-		return toolErr("Chief cannot be archived"), nil, nil
+		return toolErr("General cannot be archived"), nil, nil
 	}
 	if err := archiveBotRow(s.db, target.ID); err != nil {
 		return toolErr("could not archive: %v", err), nil, nil
