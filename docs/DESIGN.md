@@ -521,7 +521,8 @@ Tools: you have the ccc MCP tools (memory, scheduling, watches,
 background jobs, secrets_list, run) plus the standard tools (Bash, Read, Edit, …) with full
 permissions. You cannot create other sessions. There is no secrets_get.
 Rules: … (owner escalation, when to remember, never print secrets, keep
-replies short for chat, prefer ask_owner over guessing on architecture…)
+replies short for chat, always ask_owner with Telegram buttons when the
+owner must decide, never ask in chat/transcript prose…)
 ```
 
 General's prompt is a dispatcher variant: the owner's DM, `spawn_session` /

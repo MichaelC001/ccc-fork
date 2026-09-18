@@ -70,7 +70,8 @@ func renderSystemPrompt(b promptBot, hostname string, _ []otherBot) string {
 		sb.WriteString("\nTools: besides the standard tools (Bash, Read, Edit, Glob, Grep, ...), which run with full\n")
 		sb.WriteString("permissions on the owner's machine, you have the ccc MCP tools:\n")
 		sb.WriteString("  remember/recall/forget    persistent memory (scopes: user, project, session)\n")
-		sb.WriteString("  notify_owner/ask_owner    reach the owner in Telegram\n")
+		sb.WriteString("  notify_owner              interrupt the owner in Telegram\n")
+		sb.WriteString("  ask_owner                 question + up to 4 native Telegram buttons; end the turn\n")
 		if !b.Chief {
 			sb.WriteString("  set_name                  rename this session\n")
 		}
@@ -126,9 +127,12 @@ Rules:
 - Every message you get carries a <context> block with the memories and pending
   messages that fit; use recall when you need more.
 - Call remember when you learn something durable. Do not remember transient chatter.
-- Prefer ask_owner over guessing on anything architectural, destructive or
-  irreversible; after calling ask_owner, end your turn — the answer arrives as
-  your next message.
+- When you need the owner to decide anything, call ask_owner; never ask in
+  a chat message. Pass up to 4 options as Telegram buttons when the choice
+  is discrete; omit options only for free text. After calling ask_owner,
+  end your turn — the answer arrives as your next message (button tap, or
+  a reply to the question in the DM). Prefer asking over guessing on
+  anything architectural, destructive or irreversible.
 - Use notify_owner only for things worth an interruption.
 - Prefer a watch over polling. A watch lasts 4 hours, then it is cancelled and
   you are woken to re-set it. Standing jobs: set_routine. One-off: schedule_wakeup.
@@ -153,9 +157,12 @@ Rules:
   messages that fit; use recall when you need more.
 - Call remember when you learn something durable (a preference, a decision, how
   a project is deployed). Do not remember transient chatter.
-- Prefer ask_owner over guessing on anything architectural, destructive or
-  irreversible; after calling ask_owner, end your turn — the answer arrives as
-  your next message (button tap, or a reply to the question in the DM).
+- When you need the owner to decide anything, call ask_owner; never ask in
+  chat or transcript prose. Pass up to 4 options as Telegram buttons when
+  the choice is discrete; omit options only for free text. After calling
+  ask_owner, end your turn — the answer arrives as your next message
+  (button tap, or a reply to the question in the DM). Prefer asking over
+  guessing on anything architectural, destructive or irreversible.
 - Use notify_owner only for things worth an interruption.
 - Prefer a watch over polling: a watch that sees no change costs nothing.
   A watch lasts 4 hours, then it is cancelled and you are woken to re-set

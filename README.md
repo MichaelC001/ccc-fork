@@ -286,7 +286,9 @@ use `ccc routine` there). Grok calls them through `search_tool` / `use_tool`.
 - `remember` / `recall` / `forget` — durable memory in `user` and `project`
   (plus a leftover per-session scope).
 - `notify_owner` / `ask_owner` — reach you (interruptions, not report dumps);
-  `ask_owner` renders inline buttons and the turn ends until you answer.
+  `ask_owner` is how a session asks you to decide: Telegram inline buttons
+  (≤4) or a reply-to for free text. The turn ends until you answer. Sessions
+  must not ask in chat or transcript prose.
 - `watch` / `unwatch` / `list_watches` — a command re-run on an interval that
   wakes the session only when its output changes. Lasts `watch_ttl_s` (default 4 h),
   then it is cancelled and the session is woken to re-set it. Standing jobs are

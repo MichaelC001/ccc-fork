@@ -54,6 +54,29 @@ func TestRenderSystemPromptCarriesIdentity(t *testing.T) {
 	}
 }
 
+func TestSystemPromptRequiresAskOwnerForDecisions(t *testing.T) {
+	worker := renderSystemPrompt(promptBot{Name: "a", Cwd: "/tmp"}, "host", nil)
+	chief := renderSystemPrompt(promptBot{Name: "General", Cwd: "/tmp", Chief: true}, "host", nil)
+	for name, got := range map[string]string{"worker": worker, "chief": chief} {
+		for _, want := range []string{
+			"ask_owner",
+			"Telegram buttons",
+			"never ask",
+			"architectural",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("%s prompt missing %q:\n%s", name, want, got)
+			}
+		}
+	}
+	if !strings.Contains(worker, "native Telegram buttons") {
+		t.Errorf("worker tool list should name native Telegram buttons:\n%s", worker)
+	}
+	if strings.Contains(worker, "Prefer ask_owner over guessing on anything architectural") {
+		t.Error("old ask_owner wording leaked into the worker prompt")
+	}
+}
+
 func TestRenderSystemPromptHasNoRoleCeremony(t *testing.T) {
 	got := renderSystemPrompt(promptBot{Name: "fresh", Cwd: "/tmp"}, "host", nil)
 	if strings.Contains(got, "/role") || strings.Contains(got, "no specific role") {
