@@ -635,6 +635,10 @@ func (r *Runner) persistChiefTimeout(b *Bot, t *Turn, input string, end time.Tim
 		// General already spawn_session / tell_session during this turn.
 		return
 	}
+	if spawned == nil && !chiefTimeoutShouldSpawn(t, input) {
+		// A session report / watch / schedule timed out. Not owner work.
+		return
+	}
 	inject := chiefTimeoutInput()
 	if spawned != nil {
 		inject = chiefTimeoutInputAfterSpawn(spawned.Name)
@@ -659,18 +663,27 @@ func (r *Runner) ensureChiefTimeoutHandoff(b *Bot, t *Turn, input string) *Bot {
 	if chiefHandedOffSince(r.db, b.ID, since) {
 		return nil
 	}
-	spawned, err := r.autoSpawnChiefTimeout(b, input)
+	spawned, err := r.autoSpawnChiefTimeout(b, t, input)
 	if err != nil {
 		hookLog("chief timeout auto-spawn: %v", err)
 		r.postChiefTimeoutHandoff(nil, err)
+		return nil
+	}
+	if spawned == nil {
 		return nil
 	}
 	r.postChiefTimeoutHandoff(spawned, nil)
 	return spawned
 }
 
-func (r *Runner) autoSpawnChiefTimeout(chief *Bot, timedOutInput string) (*Bot, error) {
-	owner := lastNonTimeoutInput(r.db, chief.ID, timedOutInput)
+func (r *Runner) autoSpawnChiefTimeout(chief *Bot, timedOut *Turn, timedOutInput string) (*Bot, error) {
+	if !chiefTimeoutShouldSpawn(timedOut, timedOutInput) {
+		return nil, nil
+	}
+	owner := lastOwnerRequest(r.db, chief.ID, timedOut)
+	if strings.TrimSpace(owner) == "" {
+		return nil, nil
+	}
 	name := botNameFromText(owner)
 	if name == "" || isChiefTimeoutFollowUp(name) {
 		name = "timed-out request"
@@ -1227,7 +1240,7 @@ func (r *Runner) pickAccount(engine string, exclude map[string]bool) (Profile, b
 	r.mu.Unlock()
 
 	now := time.Now()
-	stats := collectProfileStats(cfg, nil, now)
+	stats := collectProfileStats(cfg, r.runningByProfile(), now)
 	open := stats[:0:0]
 	for _, s := range stats {
 		if s.Engine != engine {
@@ -1257,6 +1270,16 @@ func (r *Runner) pickAccount(engine string, exclude map[string]bool) (Profile, b
 	name := chooseProfile(open, now)
 	p, ok := profileByKey(cfg, name)
 	return p, ok
+}
+
+// runningByProfile counts turns currently running on each account, for the
+// load tie-break in chooseProfile (DESIGN §4). Nil when the runner has no db
+// (unit tests that only exercise exclusion).
+func (r *Runner) runningByProfile() map[string]int {
+	if r == nil || r.db == nil {
+		return nil
+	}
+	return runningTurnsByProfileDB(r.db)
 }
 
 // botEnv is claudeEnv plus the instance's env_passthrough list (DESIGN §3.1):

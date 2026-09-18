@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 // Multi-profile support: one ccc can drive several accounts at once, mixing
@@ -1003,10 +1005,11 @@ type profileStat struct {
 }
 
 // chooseProfile picks the profile a new session should run under: the lowest
-// five-hour utilization wins, ties break on fewer working agents, then on name
-// (so the choice is deterministic). Profiles still inside a rate-limit cooldown
-// are excluded — unless every profile is cooling down, in which case the one
-// whose cooldown ends soonest is used rather than refusing to dispatch.
+// five-hour utilization wins, then the lowest seven-day, then fewer working
+// agents, then name (so the choice is deterministic). Profiles still inside a
+// rate-limit cooldown are excluded — unless every profile is cooling down, in
+// which case the one whose cooldown ends soonest is used rather than refusing
+// to dispatch.
 func chooseProfile(stats []profileStat, now time.Time) string {
 	if len(stats) == 0 {
 		return ""
@@ -1040,10 +1043,47 @@ func betterProfile(a, b profileStat) bool {
 	if a.FiveHour != b.FiveHour {
 		return a.FiveHour < b.FiveHour
 	}
+	if a.SevenDay != b.SevenDay {
+		return a.SevenDay < b.SevenDay
+	}
 	if a.WorkingAgents != b.WorkingAgents {
 		return a.WorkingAgents < b.WorkingAgents
 	}
 	return a.Name < b.Name
+}
+
+// pickSpawnEngine is the engine a new worker joins: the account with the most
+// 5-hour headroom (usagefetch cache, then disk), across engines. Unknown usage
+// falls back to defaultEngine so a cold cache does not reshuffle every spawn.
+// A running turn still failovers only inside its engine (DESIGN §4).
+func pickSpawnEngine(db *gorm.DB, cfg *Config) string {
+	def := defaultEngine(cfg)
+	now := time.Now()
+	for _, p := range listProfiles(cfg) {
+		refreshProfileUsage(p)
+	}
+	var working map[string]int
+	if db != nil {
+		working = runningTurnsByProfileDB(db)
+	}
+	stats := collectProfileStats(cfg, working, now)
+	if !spawnUsageKnown(stats) {
+		return def
+	}
+	name := chooseProfile(stats, now)
+	if p, ok := profileByKey(cfg, name); ok {
+		return profileEngine(p)
+	}
+	return def
+}
+
+func spawnUsageKnown(stats []profileStat) bool {
+	for _, s := range stats {
+		if s.Usage.FiveHourKnown || s.Usage.SevenDayKnown || len(s.Usage.Windows) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------

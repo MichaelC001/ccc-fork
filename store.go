@@ -756,7 +756,7 @@ func createBotRow(db *gorm.DB, config *Config, name, role, cwd string) (*Bot, er
 	if err := os.MkdirAll(cwd, 0o755); err != nil {
 		return nil, err
 	}
-	engine := defaultEngine(config)
+	engine := pickSpawnEngine(db, config)
 	b := &Bot{Name: name, Role: role, Cwd: cwd, Engine: engine, Status: botIdle}
 	if err := db.Create(b).Error; err != nil {
 		return nil, err

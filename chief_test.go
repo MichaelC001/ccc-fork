@@ -306,6 +306,9 @@ func TestChiefPromptIsByteStable(t *testing.T) {
 	if !strings.Contains(first, "every 10 minutes") || !strings.Contains(first, "Do not notify_owner just to repeat the nag") {
 		t.Errorf("chief prompt must teach idle nags are dispatcher-only:\n%s", first)
 	}
+	if !strings.Contains(first, "MUST be a watch") || !strings.Contains(first, "fresh worker") {
+		t.Errorf("chief prompt must teach watch-not-wakeup and isolated routines:\n%s", first)
+	}
 }
 
 func TestCreateBotIsBackendOnly(t *testing.T) {
@@ -522,6 +525,65 @@ func TestEnsureChiefTimeoutHandoffOnSuccessfulFollowUp(t *testing.T) {
 		t.Fatal("follow-up without spawn_session must auto-spawn")
 	}
 	mustAutoSpawnedWorker(t, in.db, chief, "ship the fix")
+}
+
+func TestPersistChiefTimeoutIgnoresSessionReports(t *testing.T) {
+	in, _, _ := testInstance(t)
+	chief, err := in.ensureGeneralBot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := in.createBot("worker", ""); err != nil {
+		t.Fatal(err)
+	}
+	// A recent owner request exists, but this timeout is a session report.
+	orig := &Turn{BotID: chief.ID, Source: sourceUser, Input: "fix fecha", Status: turnDone}
+	if err := in.db.Create(orig).Error; err != nil {
+		t.Fatal(err)
+	}
+	ui := &fakeUI{}
+	r := newRunner(in.db, in.cfg, ui)
+	row := &Turn{BotID: chief.ID, Source: sourceBot, Input: "Message from worker:\ndone.", Status: turnRunning}
+	if err := in.db.Create(row).Error; err != nil {
+		t.Fatal(err)
+	}
+	r.persistChiefTimeout(chief, row, row.Input, time.Now(), nil)
+
+	var workers int64
+	in.db.Model(&Bot{}).Where("id != ? AND archived_at IS NULL AND name != ?", chief.ID, "worker").Count(&workers)
+	if workers != 0 {
+		t.Fatalf("session-report timeout spawned %d extra workers", workers)
+	}
+	var queued int64
+	in.db.Model(&Turn{}).Where("bot_id = ? AND status = ?", chief.ID, turnQueued).Count(&queued)
+	if queued != 0 {
+		t.Errorf("session-report timeout must not inject a follow-up, got %d queued", queued)
+	}
+}
+
+func TestLastOwnerRequestSkipsBotReports(t *testing.T) {
+	in, _, _ := testInstance(t)
+	chief, err := in.ensureGeneralBot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	user := &Turn{BotID: chief.ID, Source: sourceUser, Input: "ship the fix", Status: turnDone}
+	bot := &Turn{BotID: chief.ID, Source: sourceBot, Input: "Message from worker:\ndone.", Status: turnRunning}
+	if err := in.db.Create(user).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := in.db.Create(bot).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got := lastOwnerRequest(in.db, chief.ID, bot); got != "ship the fix" {
+		t.Errorf("lastOwnerRequest = %q, want the user text", got)
+	}
+	if chiefTimeoutShouldSpawn(bot, bot.Input) {
+		t.Error("a bot report must not auto-spawn")
+	}
+	if !chiefTimeoutShouldSpawn(user, user.Input) {
+		t.Error("an owner turn must auto-spawn")
+	}
 }
 
 func TestChiefTimeoutInputAfterSpawnIsStillAFollowUp(t *testing.T) {

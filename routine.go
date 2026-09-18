@@ -131,6 +131,49 @@ func (s *scheduler) postRoutineFired(b *Bot, sc Schedule) {
 	s.in.notifyBot(b, html)
 }
 
+// routineWorkerPrompt is the first turn of the isolated session a routine
+// fire starts. Short on purpose: the whole point is not inheriting General.
+func routineWorkerPrompt(name, note string) string {
+	return fmt.Sprintf(
+		"Scheduled routine %q. Do this work yourself (you are not General). When finished, report_to_general with a short result and archive_bot. Do not spawn_session and do not wait for more input.\n\n%s",
+		name, note,
+	)
+}
+
+// startRoutineWorker creates a fresh backend session and enqueues the routine
+// prompt on it. Named routines must not run as a turn of the owning bot
+// (usually General): that re-reads the dispatcher's whole transcript.
+func (s *scheduler) startRoutineWorker(owner *Bot, name, note string) error {
+	if s == nil || s.in == nil || s.in.runner == nil {
+		return fmt.Errorf("no runner")
+	}
+	if owner == nil {
+		return fmt.Errorf("unknown owner")
+	}
+	cfg := s.in.config()
+	sessionName := "routine-" + sanitizeRoutineName(name)
+	// Fresh conversation on a reused worker so a daily fire does not reread
+	// yesterday, and does not pile idle sessions that nag General.
+	if existing, err := botByName(s.in.db, sessionName); err == nil && !isGeneralBot(existing) {
+		s.in.db.Model(&Bot{}).Where("id = ?", existing.ID).Update("session_id", "")
+		prompt := routineWorkerPrompt(name, note)
+		if _, err := s.in.runner.Enqueue(existing.ID, routineSource(name), prompt, 0); err != nil {
+			return err
+		}
+		return nil
+	}
+	b, err := createBotRow(s.in.db, cfg, sessionName, "", "")
+	if err != nil {
+		return err
+	}
+	prompt := routineWorkerPrompt(name, note)
+	if _, err := s.in.runner.Enqueue(b.ID, routineSource(name), prompt, 0); err != nil {
+		_ = archiveBotRow(s.in.db, b.ID) // safe-ignore: empty worker must not linger
+		return err
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // `ccc routine` — Grok/agy substitute for set_routine / list / cancel
 // ---------------------------------------------------------------------------

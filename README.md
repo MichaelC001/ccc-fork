@@ -56,8 +56,9 @@ the Telegram UX.
 | **Engine** | Which CLI an **account** runs: `claude`, `grok` / `grok-build`, or `antigravity` / `agy`. Set when you add the account (`/account add <identity> <engine>`). A session's turns pick a healthy account from that engine's pool. `/engine` is a secondary way to assign a session onto another pool. |
 | **Account** | One login for one engine. Claude = `CLAUDE_CONFIG_DIR`. Grok = isolated `GROK_HOME`. Antigravity = isolated `HOME` (`~/.gemini`). One ccc process can hold several Claude emails + several Grok logins + several agy logins at once. Failover stays inside the same engine. |
 | **Memory** | Durable facts in `user` (about you, shared across sessions) and `project` (about one code base). A leftover per-session scope still exists internally; it is not a persona. |
-| **Watch** | A command re-run on an interval. The session is woken **only when the output changes**, with a diff. Nothing changing costs nothing. Lives 4 hours, then it is cancelled and the session is woken to re-set it. Standing jobs are routines. |
-| **Schedule** | A wakeup at a time, or on a cron expression. |
+| **Watch** | A command re-run on an interval. The session is woken **only when the output changes**, with a diff. Nothing changing costs nothing. This is the polling tool. Lives 4 hours, then it is cancelled and the session is woken to re-set it. Standing jobs are routines. |
+| **Schedule** | A wakeup at a time (not a poll). Each fire is a full turn. |
+| **Routine** | Named recurring work. Each fire starts a **fresh worker** with a short prompt, then posts ⏰ in General. |
 | **Background job** | A long shell command on a session. The session stays responsive; it is woken when the job finishes. |
 
 ### Phone app
@@ -289,13 +290,15 @@ use `ccc routine` there). Grok calls them through `search_tool` / `use_tool`.
   `ask_owner` is how a session asks you to decide: Telegram inline buttons
   (≤4, recommended first) or a reply-to for free text. The turn ends until you
   answer. Sessions must not ask in chat or transcript prose.
-- `watch` / `unwatch` / `list_watches` — a command re-run on an interval that
-  wakes the session only when its output changes. Lasts `watch_ttl_s` (default 4 h),
-  then it is cancelled and the session is woken to re-set it. Standing jobs are
-  `set_routine`.
-- `schedule_wakeup` / `cancel_schedule` — one-off (or unnamed cron) wakeups.
+- `watch` / `unwatch` / `list_watches` — poll a command; wake only when output
+  changes (no change = zero tokens). Lasts `watch_ttl_s` (default 4 h), then
+  it is cancelled and the session is woken to re-set it. Standing jobs are
+  `set_routine`. Do not use `schedule_wakeup` to poll.
+- `schedule_wakeup` / `cancel_schedule` — wake at a time. Each fire is a full
+  turn, even if nothing changed.
 - `set_routine` / `list_routines` / `cancel_routine` — named recurring work,
-  timezone-aware (default `Europe/Madrid`), ⏰ in General when it fires.
+  timezone-aware (default `Europe/Madrid`). Each fire starts a fresh worker
+  (it does not run inside General). ⏰ in General when it fires.
   Agy: `ccc routine add <name> --cron "0 9 * * 1-5" <prompt>`.
 - `run_background` / `list_background` / `get_background` / `cancel_background`
   — start a long shell command without blocking the turn (builds, installs,

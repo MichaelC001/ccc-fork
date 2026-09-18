@@ -424,6 +424,32 @@ func TestPickProfileExcludingSkipsTriedAndLoggedOutAccounts(t *testing.T) {
 	}
 }
 
+func TestPickAccountBreaksTieOnRunningTurns(t *testing.T) {
+	in, _, _ := testInstance(t)
+	dir := t.TempDir()
+	cfg := &Config{
+		DataDir: dir,
+		Profiles: map[string]*Profile{
+			"alpha": {ConfigDir: filepath.Join(dir, "alpha")},
+			"beta":  {ConfigDir: filepath.Join(dir, "beta")},
+		},
+	}
+	r := newRunner(in.db, cfg, nil)
+	idle, err := in.createBot("idle", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both accounts have unknown usage, so name would pick alpha. A running
+	// turn on alpha must send the next session to beta.
+	if err := in.db.Create(&Turn{BotID: idle.ID, Profile: "alpha", Status: turnRunning}).Error; err != nil {
+		t.Fatal(err)
+	}
+	got, ok := r.pickAccount(engineClaude, nil)
+	if !ok || got.Name != "beta" {
+		t.Fatalf("pick = %+v ok=%v, want beta (alpha is busy)", got, ok)
+	}
+}
+
 func TestPickAccountStaysInsideEngine(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{

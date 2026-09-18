@@ -28,6 +28,12 @@ func TestRenderSystemPromptCarriesIdentity(t *testing.T) {
 	if !strings.Contains(got, "4 hours") {
 		t.Error("system prompt must say watches expire so they can be re-set")
 	}
+	if !strings.Contains(got, "MUST be a watch") {
+		t.Error("system prompt must forbid polling via schedule_wakeup")
+	}
+	if !strings.Contains(got, "fresh worker") {
+		t.Error("system prompt must say routines run as a fresh worker")
+	}
 	if !strings.Contains(got, "run_background") {
 		t.Error("system prompt does not describe background jobs")
 	}

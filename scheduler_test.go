@@ -241,18 +241,34 @@ func TestRoutineFiresInTimezoneAndPosts(t *testing.T) {
 		t.Fatalf("next fire = %s, want %s", row.FireAt, wantNext)
 	}
 
-	// Due now: fire, post ⏰, roll to the following morning.
+	// Due now: fire as a fresh worker (not a turn of sales), post ⏰, roll.
 	in.db.Model(&Schedule{}).Where("id = ?", row.ID).Update("fire_at", now.Add(-time.Minute))
 	s.fireDueSchedules(now)
 	if len(runner.enqueued) != 1 {
 		t.Fatalf("%d turns, want 1: %+v", len(runner.enqueued), runner.enqueued)
 	}
 	got := runner.enqueued[0]
+	if got.BotID == b.ID {
+		t.Error("a named routine must not run as a turn of the owning bot")
+	}
+	worker, err := botByID(in.db, got.BotID)
+	if err != nil {
+		t.Fatalf("routine worker: %v", err)
+	}
+	if isGeneralBot(worker) || worker.TopicID >= 0 {
+		t.Errorf("routine worker should be a backend session, got %+v", worker)
+	}
+	if !strings.HasPrefix(worker.Name, "routine-morning-ventas") {
+		t.Errorf("worker name = %q, want routine-morning-ventas…", worker.Name)
+	}
 	if got.Source != "routine:morning-ventas" {
 		t.Errorf("source = %q, want routine:morning-ventas", got.Source)
 	}
 	if !strings.Contains(got.Text, "mira ventas") {
 		t.Errorf("prompt missing from turn: %q", got.Text)
+	}
+	if !strings.Contains(got.Text, "you are not General") || !strings.Contains(got.Text, "archive_bot") {
+		t.Errorf("worker prompt must isolate the job:\n%s", got.Text)
 	}
 	posted := false
 	for _, c := range api.since("sendMessage") {
@@ -270,6 +286,41 @@ func TestRoutineFiresInTimezoneAndPosts(t *testing.T) {
 	}
 	if !after.FireAt.Equal(wantNext) {
 		t.Errorf("rolled to %s, want %s", after.FireAt, wantNext)
+	}
+}
+
+func TestRoutineReusesNamedWorker(t *testing.T) {
+	s, in, runner, _ := testScheduler(t)
+	chief, err := in.ensureGeneralBot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	row, err := upsertRoutine(in.db, chief.ID, "morning-ventas", "mira ventas", "@hourly", defaultRoutineTZ, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.db.Model(&Schedule{}).Where("id = ?", row.ID).Update("fire_at", now.Add(-time.Minute))
+	s.fireDueSchedules(now)
+	if len(runner.enqueued) != 1 {
+		t.Fatalf("first fire: %d turns", len(runner.enqueued))
+	}
+	first := runner.enqueued[0].BotID
+	if first == chief.ID {
+		t.Fatal("routine ran on General")
+	}
+	in.db.Model(&Schedule{}).Where("id = ?", row.ID).Update("fire_at", now.Add(-time.Second))
+	s.fireDueSchedules(now.Add(time.Minute))
+	if len(runner.enqueued) != 2 {
+		t.Fatalf("second fire: %d turns", len(runner.enqueued))
+	}
+	if runner.enqueued[1].BotID != first {
+		t.Errorf("second fire spawned %d, want reuse of %d", runner.enqueued[1].BotID, first)
+	}
+	var workers int64
+	in.db.Model(&Bot{}).Where("id != ? AND archived_at IS NULL", chief.ID).Count(&workers)
+	if workers != 1 {
+		t.Errorf("routine fires piled %d workers, want 1 reused", workers)
 	}
 }
 
@@ -697,6 +748,28 @@ func TestLegacyWatchWithZeroCreatedAtExpires(t *testing.T) {
 	}
 	if len(runner.enqueued) != 1 || runner.enqueued[0].Source != sourceSystem {
 		t.Errorf("legacy expire should wake the bot: %+v", runner.enqueued)
+	}
+}
+
+func TestWatchExpiryDoesNotWakeGeneral(t *testing.T) {
+	s, in, runner, _ := testScheduler(t)
+	chief, err := in.ensureGeneralBot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := upsertWatch(in.db, chief.ID, "ci", "echo hi", 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.db.Model(&Watch{}).Where("id = ?", w.ID).UpdateColumn("created_at", time.Now().Add(-5*time.Hour))
+	s.expireWatches(time.Now())
+	var n int64
+	in.db.Model(&Watch{}).Where("id = ?", w.ID).Count(&n)
+	if n != 0 {
+		t.Error("the expired watch should still be deleted")
+	}
+	if len(runner.enqueued) != 0 {
+		t.Errorf("watch TTL must not wake General: %+v", runner.enqueued)
 	}
 }
 

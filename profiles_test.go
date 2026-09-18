@@ -122,6 +122,22 @@ func TestChooseProfile(t *testing.T) {
 			want: "work2",
 		},
 		{
+			name: "tie on five-hour breaks on lower seven-day",
+			stats: []profileStat{
+				{Name: "hot", FiveHour: 40, SevenDay: 80},
+				{Name: "cool", FiveHour: 40, SevenDay: 10},
+			},
+			want: "cool",
+		},
+		{
+			name: "tie on five-hour breaks on lower seven-day",
+			stats: []profileStat{
+				{Name: "hot", FiveHour: 30, SevenDay: 80},
+				{Name: "cool", FiveHour: 30, SevenDay: 20},
+			},
+			want: "cool",
+		},
+		{
 			name: "tie on utilization breaks on fewer working agents",
 			stats: []profileStat{
 				{Name: "a", FiveHour: 30, WorkingAgents: 4},

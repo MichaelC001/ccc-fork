@@ -165,6 +165,11 @@ func (s *scheduler) expireWatches(now time.Time) {
 		if err != nil || b.ArchivedAt != nil {
 			continue
 		}
+		if isGeneralBot(b) {
+			// Re-setting a watch on General is a no-op wakeup of the fattest
+			// transcript. The watch is already gone.
+			continue
+		}
 		if _, err := s.in.runner.Enqueue(b.ID, sourceSystem, renderWatchExpired(&w, ttl), 0); err != nil {
 			hookLog("watch %s: expire enqueue failed: %v", w.Name, err)
 		}
@@ -503,7 +508,8 @@ func parseCron(expr string) (cron.Schedule, error) {
 	return cronParser.Parse(expr)
 }
 
-// fireDueSchedules enqueues a turn for every schedule whose time has come.
+// fireDueSchedules fires every schedule whose time has come. Unnamed wakeups
+// enqueue on the owning bot; named routines start a fresh worker.
 func (s *scheduler) fireDueSchedules(now time.Time) {
 	var due []Schedule
 	if err := s.in.db.Where("fired_at IS NULL AND fire_at <= ?", now).Find(&due).Error; err != nil {
@@ -521,17 +527,17 @@ func (s *scheduler) fireDueSchedules(now time.Time) {
 			note = "(no note)"
 		}
 		name := strings.TrimSpace(sc.Name)
-		source, input := sourceSchedule, fmt.Sprintf("Scheduled wakeup: %s", note)
 		if name != "" {
-			source = routineSource(name)
-			input = fmt.Sprintf("Routine %q:\n%s", name, note)
-		}
-		if _, err := s.in.runner.Enqueue(b.ID, source, input, 0); err != nil {
-			hookLog("schedule %d: enqueue failed: %v", sc.ID, err)
-			continue
-		}
-		if name != "" {
+			if err := s.startRoutineWorker(b, name, note); err != nil {
+				hookLog("schedule %d: routine worker: %v", sc.ID, err)
+			}
 			s.postRoutineFired(b, sc)
+		} else {
+			input := fmt.Sprintf("Scheduled wakeup: %s", note)
+			if _, err := s.in.runner.Enqueue(b.ID, sourceSchedule, input, 0); err != nil {
+				hookLog("schedule %d: enqueue failed: %v", sc.ID, err)
+				continue
+			}
 		}
 		// A recurring schedule rolls forward instead of being retired, so one
 		// row keeps firing for the life of the bot. Named routines interpret

@@ -757,6 +757,34 @@ func TestCreateBotUsesDefaultEngine(t *testing.T) {
 	}
 }
 
+func TestCreateBotPicksEngineWithMostHeadroom(t *testing.T) {
+	in, _, _ := testInstance(t)
+	usageMemClear()
+	t.Cleanup(usageMemClear)
+	dir := t.TempDir()
+	in.cfg.DefaultEngine = engineGrok
+	in.cfg.DefaultProfile = "work"
+	in.cfg.Profiles = map[string]*Profile{
+		"work":     {Engine: engineGrok, ConfigDir: filepath.Join(dir, "grok")},
+		"personal": {Engine: engineClaude, ConfigDir: filepath.Join(dir, "claude")},
+	}
+	for _, p := range listProfiles(in.cfg) {
+		switch profileEngine(p) {
+		case engineGrok:
+			usageMemPut(p, profileUsage{FiveHour: 63, FiveHourKnown: true, SevenDay: 40, SevenDayKnown: true})
+		case engineClaude:
+			usageMemPut(p, profileUsage{FiveHour: 10, FiveHourKnown: true, SevenDay: 32, SevenDayKnown: true})
+		}
+	}
+	b, err := in.createBot("from-headroom", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if botEngine(b) != engineClaude {
+		t.Errorf("engine = %q, want claude (10%% 5h vs grok 63%%)", b.Engine)
+	}
+}
+
 func TestSessionForAntigravityMintsNothing(t *testing.T) {
 	r := &Runner{}
 	id, resume := r.sessionFor(&Bot{Engine: engineAntigravity})

@@ -149,26 +149,33 @@ sessions do not. When the cap fires, ccc SIGTERMs the engine process
 (without dropping the queue — this is not `/stop`). If this turn already
 `spawn_session` / `tell_session`'d, that is the handoff. Otherwise ccc
 **starts a backend worker itself** (same path as `spawn_session` / `/session`)
-with the owner's request plus a short note that General timed out, and
-posts at most a quiet `session <name> started` one-liner in the DM. The
-owner is never told to `/session`. A first timeout also enqueues a
-`source=system` turn whose input is an error: this work is too long for
-General — spawn if you still can, and do not spawn a duplicate if ccc
-already started one. The owner is not shown a ❌; the injection *is* the
-next turn. A timeout of that follow-up is not injected again (avoids a
-loop); if the episode still has no handoff, ccc auto-spawns then. A
-follow-up turn that finishes without `spawn_session` / `tell_session` is
-the same auto-spawn.
+with the **owner's** request (`source=user`) plus a short note that General
+timed out, and posts at most a quiet `session <name> started` one-liner in
+the DM. Session reports (`source=bot`), watches, schedules and routines are
+not owner work: timing out on those does not auto-spawn and does not inject
+a follow-up (that duplicated turns). The owner is never told to `/session`.
+A first timeout of owner work also enqueues a `source=system` turn whose
+input is an error: this work is too long for General — spawn if you still
+can, and do not spawn a duplicate if ccc already started one. The owner is
+not shown a ❌; the injection *is* the next turn. A timeout of that
+follow-up is not injected again (avoids a loop); if the episode still has
+no handoff, ccc auto-spawns then. A follow-up turn that finishes without
+`spawn_session` / `tell_session` is the same auto-spawn.
 
 ## 4. Profiles: selection and shared sessions
 
 - `pickAccount(engine)` chooses per **turn** among accounts of that engine:
   lowest cached 5-hour utilization (Claude; Grok/Codex map their first window
-  onto the same field), tie-break fewer turns currently running on that
-  account (read from `turns.status = running`, §14.6), then name; excludes
+  onto the same field), then lowest 7-day, then fewer turns currently running
+  on that account (read from `turns.status = running`, §14.6), then name;
+  excludes
   profiles in cooldown or `needs_login`. Failover never crosses engines
   (Claude↔Claude, Grok↔Grok) unless a future design documents it.
-  Utilization is fetched on `/account`, `/status` and the doctor (5 min TTL).
+  New workers (`spawn_session`, `/session`, routine fires, 60s auto-spawn)
+  pick the **engine** of the account with the most 5-hour headroom across
+  engines (`pickSpawnEngine`, usagefetch 5 min cache). A cold cache falls
+  back to `default_engine`. Utilization is fetched on `/account`, `/status`
+  and the doctor (5 min TTL).
   Each window is `5h 62% · reset 1h20m` / `7d 40% · reset 3d` / `week 8% · reset 5d23h`
   when the API gives a reset time; omit ` · reset …` when it does not (do not
   invent a clock). Sources:
@@ -268,8 +275,9 @@ home (Codex also gets per-turn `exec -c`). Identity is `--bot`/`--turn` or
 | `notify_owner` | `text`, `urgency` (normal\|urgent) | Post in General (the DM), labelled with the session name. Interruptions only — not a report dump. |
 | `ask_owner` | `question`, `options?` (≤4 strings) | Post question with inline buttons (or free text if no options) in General. Returns immediately with `{"status":"asked"}`; the session should end its turn. The answer arrives as the next input (`source=user`, prefixed `Answer to "<question>": …`) via a button tap or a reply-to that question in the DM. Free text in the DM is always General. Prompt contract: mandatory for every owner decision (yes/no, pick one, architectural fork); recommended option first; never ask in chat prose. |
 | `set_name` | `name` | Rename this session: validate (§8 `/name`), update `bots.name`. Rotates the conversation (§14.14). `/name` in the DM only hits General, which refuses. No topic icon. |
-| `watch` | `name`, `command`, `interval_s` (≥60) | Register a deterministic watch (§7). Lasts `watch_ttl_s` (default 4h); re-upserting the name renews it. `unwatch(name)`, `list_watches()`. |
-| `schedule_wakeup` | `in_seconds` or `at` (RFC3339), `note`, `cron?` | Self-wakeup (§7). `cancel_schedule(id)`. |
+| `watch` | `name`, `command`, `interval_s` (≥60) | Register a deterministic watch (§7). Polling tool: no change = zero tokens. Lasts `watch_ttl_s` (default 4h); re-upserting the name renews it. `unwatch(name)`, `list_watches()`. |
+| `schedule_wakeup` | `in_seconds` or `at` (RFC3339), `note`, `cron?` | Wake at a time (§7). Each fire is a full turn. Not for polling. `cancel_schedule(id)`. |
+| `set_routine` | `name`, `prompt`, `cron`, `timezone?` | Named recurring work. Each fire starts a fresh worker (§7). `list_routines()`, `cancel_routine(name)`. |
 | `run_background` | `command`, `name?`, `env?`, `stdin_secret?` | Queue a long-running shell command in the bot's cwd with `env_passthrough`. Optional `env` is env-var-name → vault secret name (names only). Optional `stdin_secret` is a vault name piped to stdin. Values are never stored on the row. Returns a job id immediately; does not block the turn. Use when Bash/a tool is expected to exceed ~60s. |
 | `secrets_list` | — | Owner vault names, sorted. Values are never returned. **There is no `secrets_get` / `secrets_show`.** |
 | `secrets_delete` | `name` | Delete one vault secret by name. |
@@ -281,7 +289,7 @@ home (Codex also gets per-turn `exec -c`). Identity is `--bot`/`--turn` or
 | `get_project` / `set_project` | `path`, fields | Read/update the project registry. |
 | `send_file` | `path`, `caption?` | Send a file to the owner in General (≤50 MB; larger → existing relay if kept). |
 | `list_sessions` | — | **General only.** Live workers: name, status, last output. |
-| `spawn_session` | `prompt`, `name?` | **General only.** Create a backend worker (no Telegram topic) and queue the prompt (wakes after this turn). |
+| `spawn_session` | `prompt`, `name?` | **General only.** Create a backend worker (no Telegram topic) on the account/engine with the most usage headroom and queue the prompt (wakes after this turn). |
 | `tell_session` | `session`, `text` | **General only.** Inbox + wake a live worker. |
 | `report_to_general` | `text` | **Workers only.** Inbox + wake General. Not posted to the owner. |
 
@@ -308,8 +316,10 @@ One goroutine in `ccc listen`:
   tokens while nothing changes. A watch lives `watch_ttl_s` (default 4h,
   matching the background-job safety cap) from `created_at`; when that
   elapses, ccc deletes it and enqueues `source=system` on the bot that set
-  it so it can put the watch back. Re-upserting the same name restarts the
-  clock. Legacy rows with a zero `created_at` expire immediately on upgrade.
+  it so it can put the watch back — except General: a watch TTL on the
+  dispatcher is silent (re-setting it would re-read the fattest transcript).
+  Re-upserting the same name restarts the clock. Legacy rows with a zero
+  `created_at` expire immediately on upgrade.
   Routines (named cron on `schedules`) do not expire. `watch_ttl_s=0`
   disables expiry.
 - **Idle session rotation**: an idle bot whose last turn ended more than
@@ -329,8 +339,19 @@ One goroutine in `ccc listen`:
   archive, or ignore. Stop when the session is working again, gains a
   keepalive, gets a user message, or is archived. `idle_reminded_at` on the
   bot row is the anti-spam clock.
-- **Schedules**: enqueue a turn with `source=schedule` and the note when
-  `fire_at` passes; recurring via cron expression.
+- **Schedules**: unnamed `schedule_wakeup` enqueues a turn with
+  `source=schedule` and the note on the owning bot when `fire_at` passes;
+  recurring via cron expression. Polling a command is a watch, not a
+  wakeup (a no-change wakeup is a full turn; a no-change watch is free).
+- **Routines**: named cron on `schedules`. Each fire starts a **backend
+  worker** (`routine-<name>`) with a short prompt and
+  `source=routine:<name>`, then posts ⏰ in General. It does not run as a
+  turn of the owning bot (usually General) — that inherited the
+  dispatcher's whole transcript. A live worker with that name is reused
+  with `session_id` cleared so a daily fire does not reread yesterday or
+  pile idle sessions that nag General. The worker is told to do the work,
+  `report_to_general`, and `archive_bot`. Unnamed one-shot wakeups are
+  unchanged.
 - **Background jobs**: every second, claim queued `background_jobs` (cap: 8
   running per bot) and start a detached `/bin/sh` wrapper in the bot's cwd
   with the instance env (same as watches: `env_passthrough`, no Claude
@@ -881,10 +902,11 @@ model call. Waiting bots (unanswered `ask_owner`) are skipped so the
 answer still has the question. Watches are the other leak: they are
 change-detectors for a finite job (a PR's CI, a deploy), not standing
 monitors. After `watch_ttl_s` (default 4h) the watch is deleted and the
-bot that set it is woken (`source=system`) to re-set it. Re-upserting the
-same name restarts the clock. Routines do not expire. Both knobs are
-config.json keys; 0 disables. General is never idle-rotated: the dispatcher
-keeps its transcript.
+bot that set it is woken (`source=system`) to re-set it, except General
+(silent delete — a dispatcher turn to re-set a watch is a no-op wakeup).
+Re-upserting the same name restarts the clock. Routines do not expire. Both
+knobs are config.json keys; 0 disables. General is never idle-rotated: the
+dispatcher keeps its transcript.
 
 **14.30 Grok and Codex get ccc MCP.** Claude already had `--mcp-config`.
 Grok/Codex have no inline equivalent; ccc writes `[mcp_servers.ccc]`
@@ -926,6 +948,20 @@ redacted of known values before the model sees it.
 Honest limit: a hostile `ps eww` or `set -x` on the child, or a Bash `cat`
 of the 0600 file (sessions already run as the owner), can still leak. The
 happy path does not. DESIGN examples never include a value.
+
+**14.33 Usage waste is a product bug, not an install tweak.** Two days of
+work-CCC traffic showed the cost is rereading context, not writing: ~190
+cache-read tokens per output token, and a 7-day window only at 32%. The
+leaks were (1) `schedule_wakeup` used as a poll — each no-change fire is a
+full turn; a watch is free until the output changes; (2) named routines
+running as a turn of General, so a 381-token digest paid for the
+dispatcher's whole transcript; (3) `pickAccount` ignoring 7-day utilization
+and running-turn load (the second Claude account sat almost idle); (4) the
+60s auto-spawn treating `source=bot` inbox reports as the owner's request
+and starting duplicate workers. Fixes live in this repo: prompt + MCP copy,
+routine fires spawn `routine-<name>` workers, chooseProfile is 5h then 7d
+then load, auto-spawn is `source=user` only, watch TTL on General is silent.
+Not per-machine hygiene.
 
 ## 15. Public hub (mobile)
 

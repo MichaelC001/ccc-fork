@@ -95,14 +95,28 @@ func chiefTimeoutWindowStart(t *Turn) time.Time {
 	return t.CreatedAt
 }
 
-// lastNonTimeoutInput is the owner's request that General was dispatching.
-// A follow-up inject is not that request; walk back to the real input.
-func lastNonTimeoutInput(db *gorm.DB, botID int64, timedOutInput string) string {
-	if s := strings.TrimSpace(timedOutInput); s != "" && !isChiefTimeoutFollowUp(s) {
-		return s
+// chiefTimeoutShouldSpawn is true when the timed-out turn was owner work
+// (or the injected follow-up of that episode). Session reports, watches and
+// schedules are not owner work: auto-spawning them duplicates turns.
+func chiefTimeoutShouldSpawn(t *Turn, input string) bool {
+	if t != nil && t.Source == sourceUser {
+		return true
+	}
+	return isChiefTimeoutFollowUp(input)
+}
+
+// lastOwnerRequest is the owner's text General was dispatching. Session
+// reports, watches, schedules, routines and the timeout inject itself are
+// not that. Empty means there is nothing to hand off.
+func lastOwnerRequest(db *gorm.DB, botID int64, timedOut *Turn) string {
+	if timedOut != nil && timedOut.Source == sourceUser {
+		if s := strings.TrimSpace(timedOut.Input); s != "" && !isChiefTimeoutFollowUp(s) {
+			return s
+		}
 	}
 	var turns []Turn
-	if err := db.Where("bot_id = ?", botID).Order("id DESC").Limit(30).Find(&turns).Error; err != nil {
+	if err := db.Where("bot_id = ? AND source = ?", botID, sourceUser).
+		Order("id DESC").Limit(30).Find(&turns).Error; err != nil {
 		return ""
 	}
 	for _, t := range turns {

@@ -209,7 +209,7 @@ func (s *mcpServer) registerCrew(server *mcp.Server) {
 		}, s.listSessions)
 		mcp.AddTool(server, &mcp.Tool{
 			Name:        "spawn_session",
-			Description: "Start a backend worker session (no Telegram topic) and give it a first prompt. The session starts when this turn ends. Use this instead of doing long work yourself. Reports come back here.",
+			Description: "Start a backend worker session (no Telegram topic) and give it a first prompt. The session starts when this turn ends. ccc assigns it to the account/engine with the most usage headroom. Use this instead of doing long work yourself. Reports come back here.",
 		}, s.spawnSession)
 		mcp.AddTool(server, &mcp.Tool{
 			Name:        "tell_session",
@@ -754,7 +754,7 @@ type setProjectIn struct {
 func (s *mcpServer) registerAutomation(server *mcp.Server) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "watch",
-		Description: "Re-run a command on an interval and wake you ONLY when its output changes. Costs nothing while nothing changes. Lasts 4 hours, then it is cancelled and you are woken to re-set it. For standing jobs use set_routine.",
+		Description: "Poll a command on an interval and wake you ONLY when its output changes. Costs nothing while nothing changes. Use this instead of schedule_wakeup for CI, PR state, or any poll. Lasts 4 hours, then it is cancelled and you are woken to re-set it. For standing jobs use set_routine.",
 	}, s.watch)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "unwatch",
@@ -766,7 +766,7 @@ func (s *mcpServer) registerAutomation(server *mcp.Server) {
 	}, s.listWatchesTool)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "schedule_wakeup",
-		Description: "Ask ccc to start a turn for you later, once or on a cron schedule.",
+		Description: "Wake this session at a time (in_seconds, at, or a one-off cron). Each fire is a full turn, even if nothing changed. For polling a command use watch. For standing recurring work use set_routine.",
 	}, s.scheduleWakeup)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "cancel_schedule",
@@ -774,7 +774,7 @@ func (s *mcpServer) registerAutomation(server *mcp.Server) {
 	}, s.cancelSchedule)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "set_routine",
-		Description: "Create or replace a named recurring routine. It always fires (unlike a watch), in the given timezone, and posts ⏰ in your topic. Upserts by name.",
+		Description: "Create or replace a named recurring routine. Each fire starts a fresh isolated worker with a short prompt (not a turn on General). Always fires, timezone-aware, ⏰ in General. Upserts by name.",
 	}, s.setRoutine)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list_routines",
