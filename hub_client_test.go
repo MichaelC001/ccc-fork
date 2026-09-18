@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -341,5 +342,131 @@ func TestHubRename(t *testing.T) {
 	}
 	if len(api.since("editForumTopic")) != 0 {
 		t.Error("backend sessions have no forum topic to rename")
+	}
+}
+
+func TestHubQuestionsAndAnswer(t *testing.T) {
+	h, in, runner, _ := testHub(t)
+	live, err := in.createBot("worker", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gone, _ := in.createBot("gone", "")
+	opts, _ := json.Marshal([]string{"ship", "hold"})
+	q := Question{BotID: live.ID, Question: "Deploy?", OptionsJSON: string(opts)}
+	if err := in.db.Create(&q).Error; err != nil {
+		t.Fatal(err)
+	}
+	orphaned := Question{BotID: gone.ID, Question: "hidden?"}
+	if err := in.db.Create(&orphaned).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := archiveBotRow(in.db, gone.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	listed := h.dispatch(hubRPC{Kind: "req", ID: "1", Method: "questions"})
+	if !listed.OK {
+		t.Fatalf("questions: %s", listed.Error)
+	}
+	var qs []hubQuestionInfo
+	if err := json.Unmarshal(listed.Body, &qs); err != nil {
+		t.Fatal(err)
+	}
+	if len(qs) != 1 || qs[0].ID != q.ID || qs[0].Bot != "worker" || len(qs[0].Options) != 2 {
+		t.Fatalf("questions = %+v", qs)
+	}
+
+	botsRes := h.dispatch(hubRPC{Kind: "req", ID: "2", Method: "bots"})
+	var bots []hubBotInfo
+	if err := json.Unmarshal(botsRes.Body, &bots); err != nil {
+		t.Fatal(err)
+	}
+	var worker hubBotInfo
+	for _, b := range bots {
+		if b.ID == live.ID {
+			worker = b
+		}
+	}
+	if worker.Question == nil || worker.Question.Question != "Deploy?" {
+		t.Fatalf("bots question = %+v", worker)
+	}
+
+	opt := 0
+	params, _ := json.Marshal(map[string]any{"question_id": q.ID, "option": opt})
+	ans := h.dispatch(hubRPC{Kind: "req", ID: "3", Method: "answer", Params: params})
+	if !ans.OK {
+		t.Fatalf("answer: %s", ans.Error)
+	}
+	last, ok := runner.last()
+	if !ok || !strings.Contains(last.Text, "ship") {
+		t.Fatalf("enqueued %v ok=%v", last, ok)
+	}
+	listed = h.dispatch(hubRPC{Kind: "req", ID: "4", Method: "questions"})
+	qs = nil
+	if err := json.Unmarshal(listed.Body, &qs); err != nil {
+		t.Fatal(err)
+	}
+	if len(qs) != 0 {
+		t.Fatalf("answered question still listed: %+v", qs)
+	}
+	again := h.dispatch(hubRPC{Kind: "req", ID: "5", Method: "answer", Params: params})
+	if again.OK {
+		t.Fatal("second answer must fail")
+	}
+}
+
+func TestHubSendAnswersPendingQuestion(t *testing.T) {
+	h, in, runner, _ := testHub(t)
+	b, _ := in.createBot("worker", "")
+	q := Question{BotID: b.ID, Question: "Which branch?"}
+	if err := in.db.Create(&q).Error; err != nil {
+		t.Fatal(err)
+	}
+	params, _ := json.Marshal(map[string]any{"bot_id": b.ID, "text": "main"})
+	res := h.dispatch(hubRPC{Kind: "req", ID: "1", Method: "send", Params: params})
+	if !res.OK {
+		t.Fatalf("send: %s", res.Error)
+	}
+	last, ok := runner.last()
+	if !ok || !strings.Contains(last.Text, "main") || !strings.Contains(last.Text, "Which branch?") {
+		t.Fatalf("send while waiting must answer, got %+v", last)
+	}
+	var stored Question
+	if err := in.db.First(&stored, q.ID).Error; err != nil || stored.AnsweredAt == nil {
+		t.Fatalf("question not answered: %+v err=%v", stored, err)
+	}
+}
+
+func TestHubFlushQuestionsAndRoster(t *testing.T) {
+	h, in, _, _ := testHub(t)
+	b, _ := in.createBot("worker", "")
+	h.flushRoster()
+	h.flushQuestions()
+	q := Question{BotID: b.ID, Question: "Go?"}
+	if err := in.db.Create(&q).Error; err != nil {
+		t.Fatal(err)
+	}
+	h.flushQuestions()
+	h.syncMu.Lock()
+	_, seen := h.pendingQ[q.ID]
+	h.syncMu.Unlock()
+	if !seen {
+		t.Fatal("new question must enter the snapshot")
+	}
+	if err := archiveBotRow(in.db, b.ID); err != nil {
+		t.Fatal(err)
+	}
+	h.flushRoster()
+	h.flushQuestions()
+	h.syncMu.Lock()
+	_, still := h.pendingQ[q.ID]
+	fp := h.roster
+	h.syncMu.Unlock()
+	if still {
+		t.Fatal("archived session questions must leave the snapshot")
+	}
+	if strings.Contains(fp, fmt.Sprintf("%d|", b.ID)) {
+		t.Fatalf("archived bot still in roster fingerprint %q", fp)
 	}
 }

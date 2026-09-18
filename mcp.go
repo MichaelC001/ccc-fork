@@ -646,6 +646,24 @@ func answerQuestion(db *gorm.DB, q *Question, answer string) string {
 	return fmt.Sprintf("Answer to %q: %s", q.Question, answer)
 }
 
+// resolveQuestionAnswer records the answer, clears waiting, and enqueues the
+// follow-up turn. Shared by Telegram taps/replies and the phone hub.
+func resolveQuestionAnswer(db *gorm.DB, runner turnRunner, q *Question, answer string) error {
+	if q == nil {
+		return fmt.Errorf("unknown question")
+	}
+	if q.AnsweredAt != nil {
+		return fmt.Errorf("already answered")
+	}
+	text := answerQuestion(db, q, answer)
+	setBotStatus(db, q.BotID, botIdle)
+	if runner == nil {
+		return fmt.Errorf("runner not running")
+	}
+	_, err := runner.Enqueue(q.BotID, sourceUser, text, 0)
+	return err
+}
+
 // questionOptions decodes the stored options list.
 func questionOptions(q *Question) []string {
 	var opts []string

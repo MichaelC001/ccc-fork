@@ -471,6 +471,19 @@ func (in *instance) handleMessage(msg *TelegramMessage) {
 	in.deliver(b, msg, text)
 }
 
+func (in *instance) tickAskedMessage(q *Question, answer string) {
+	if q == nil || q.AskedMessageID == 0 {
+		return
+	}
+	cfg := in.config()
+	chat, thread, ok := destForTopic(cfg, 0)
+	if !ok {
+		return
+	}
+	confirmed := "❓ " + htmlEscape(q.Question) + "\n✓ <b>" + htmlEscape(answer) + "</b>"
+	_ = editMessageHTML(cfg, chat, q.AskedMessageID, thread, confirmed) // safe-ignore: ticking the question message is cosmetic
+}
+
 // botForQuestionReply matches a reply-to against any pending ask_owner
 // question, so the owner can answer a worker from the DM.
 func (in *instance) botForQuestionReply(msg *TelegramMessage) (*Bot, bool) {
@@ -512,9 +525,7 @@ func (in *instance) handleEditedMessage(msg *TelegramMessage) {
 // pending question or a new turn.
 func (in *instance) deliver(b *Bot, msg *TelegramMessage, text string) {
 	if q, ok := in.matchQuestion(b, msg); ok {
-		answer := answerQuestion(in.db, q, text)
-		setBotStatus(in.db, b.ID, botIdle)
-		if _, err := in.runner.Enqueue(b.ID, sourceUser, answer, int64(msg.MessageID)); err != nil {
+		if err := resolveQuestionAnswer(in.db, in.runner, q, text); err != nil {
 			in.reply(msg, "Could not queue that: "+err.Error())
 		}
 		return
@@ -594,13 +605,11 @@ func (in *instance) handleCallback(cb *CallbackQuery) {
 		return
 	}
 	choice := opts[idx]
-	answer := answerQuestion(in.db, &q, choice)
 	if cb.Message != nil {
 		confirmed := "❓ " + htmlEscape(q.Question) + "\n✓ <b>" + htmlEscape(choice) + "</b>"
 		_ = editMessageHTML(cfg, cb.Message.Chat.ID, int64(cb.Message.MessageID), cb.Message.MessageThreadID, confirmed) // safe-ignore: ticking the question message is cosmetic
 	}
-	setBotStatus(in.db, q.BotID, botIdle)
-	if _, err := in.runner.Enqueue(q.BotID, sourceUser, answer, 0); err != nil {
+	if err := resolveQuestionAnswer(in.db, in.runner, &q, choice); err != nil {
 		hookLog("enqueue answer: %v", err)
 	}
 }

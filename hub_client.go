@@ -36,6 +36,11 @@ type hubClient struct {
 
 	upMu    sync.Mutex
 	uploads map[string]*hubUpload
+
+	syncMu   sync.Mutex
+	pendingQ map[int64]struct{} // unanswered question ids last pushed to phones
+	roster   string             // live bot id|name|status fingerprint
+	rosterOK bool
 }
 
 func instanceDisplayName(cfg *Config) string {
@@ -385,6 +390,10 @@ func (h *hubClient) dispatch(rpc hubRPC) hubRPC {
 		h.rpcUnarchive(rpc.Params, &out)
 	case "rename":
 		h.rpcRename(rpc.Params, &out)
+	case "questions":
+		h.rpcQuestions(&out)
+	case "answer":
+		h.rpcAnswer(rpc.Params, &out)
 	default:
 		out.OK, out.Error = false, "unknown method"
 	}
@@ -403,9 +412,14 @@ func (h *hubClient) rpcBots(archived bool, out *hubRPC) {
 		out.OK, out.Error = false, err.Error()
 		return
 	}
+	pending := pendingQuestionsByBot(h.in.db)
 	list := make([]hubBotInfo, 0, len(bots))
 	for i := range bots {
-		list = append(list, fillBotInfo(h.in.db, &bots[i], h.progressOf(bots[i].ID)))
+		var q *Question
+		if found, ok := pending[bots[i].ID]; ok {
+			q = &found
+		}
+		list = append(list, fillBotInfo(h.in.db, &bots[i], h.progressOf(bots[i].ID), q))
 	}
 	if !archived {
 		sort.SliceStable(list, func(i, j int) bool { return list[i].Last > list[j].Last })
@@ -413,7 +427,7 @@ func (h *hubClient) rpcBots(archived bool, out *hubRPC) {
 	out.Body, _ = json.Marshal(list)
 }
 
-func fillBotInfo(db *gorm.DB, b *Bot, progress string) hubBotInfo {
+func fillBotInfo(db *gorm.DB, b *Bot, progress string, pending *Question) hubBotInfo {
 	info := hubBotInfo{ID: b.ID, Name: b.Name, Role: b.Role, Status: b.Status, Engine: botEngine(b), Archived: b.ArchivedAt != nil}
 	var last Turn
 	if err := db.Where("bot_id = ?", b.ID).Order("id DESC").First(&last).Error; err == nil {
@@ -425,7 +439,38 @@ func fillBotInfo(db *gorm.DB, b *Bot, progress string) hubBotInfo {
 		info.LastText = truncate(preview, 80)
 		info.Progress = liveProgress(last.Status, progress)
 	}
+	if pending != nil && pending.AnsweredAt == nil {
+		q := hubQuestionFrom(pending, b.Name)
+		info.Question = &q
+	}
 	return info
+}
+
+func hubQuestionFrom(q *Question, botName string) hubQuestionInfo {
+	opts := questionOptions(q)
+	if opts == nil {
+		opts = []string{}
+	}
+	at := ""
+	if !q.CreatedAt.IsZero() {
+		at = q.CreatedAt.UTC().Format(time.RFC3339)
+	}
+	return hubQuestionInfo{
+		ID: q.ID, BotID: q.BotID, Bot: botName,
+		Question: q.Question, Options: opts, At: at,
+	}
+}
+
+func pendingQuestionsByBot(db *gorm.DB) map[int64]Question {
+	var rows []Question
+	db.Where("answered_at IS NULL").Order("id").Find(&rows)
+	out := map[int64]Question{}
+	for i := range rows {
+		if _, ok := out[rows[i].BotID]; !ok {
+			out[rows[i].BotID] = rows[i]
+		}
+	}
+	return out
 }
 
 func (h *hubClient) rpcHistory(params json.RawMessage, out *hubRPC) {
@@ -531,6 +576,14 @@ func (h *hubClient) rpcSend(params json.RawMessage, out *hubRPC) {
 		out.OK, out.Error = false, "empty message"
 		return
 	}
+	if q, ok := pendingQuestion(h.in.db, b.ID); ok {
+		if err := h.answerPending(q, p.Text); err != nil {
+			out.OK, out.Error = false, err.Error()
+			return
+		}
+		out.Body, _ = json.Marshal(map[string]any{"queued": true, "bot": b.Name, "answered": q.ID})
+		return
+	}
 	if _, err := h.in.runner.Enqueue(b.ID, sourceUser, p.Text, 0); err != nil {
 		out.OK, out.Error = false, err.Error()
 		return
@@ -552,6 +605,7 @@ func (h *hubClient) rpcArchive(params json.RawMessage, out *hubRPC) {
 		out.OK, out.Error = false, err.Error()
 		return
 	}
+	h.pushEvent("archive", map[string]any{"bot_id": b.ID, "bot": b.Name, "archived": true})
 	out.Body, _ = json.Marshal(map[string]any{"archived": true, "bot": b.Name})
 }
 
@@ -569,6 +623,7 @@ func (h *hubClient) rpcUnarchive(params json.RawMessage, out *hubRPC) {
 		out.OK, out.Error = false, err.Error()
 		return
 	}
+	h.pushEvent("session", map[string]any{"action": "unarchive", "bot_id": b.ID, "bot": b.Name})
 	out.Body, _ = json.Marshal(map[string]any{"archived": false, "bot": b.Name})
 }
 
@@ -596,6 +651,174 @@ func (h *hubClient) rpcRename(params json.RawMessage, out *hubRPC) {
 		}
 	}
 	out.Body, _ = json.Marshal(map[string]any{"name": name, "old": old})
+}
+
+func (h *hubClient) rpcQuestions(out *hubRPC) {
+	list, err := h.liveQuestions()
+	if err != nil {
+		out.OK, out.Error = false, err.Error()
+		return
+	}
+	out.Body, _ = json.Marshal(list)
+}
+
+func (h *hubClient) liveQuestions() ([]hubQuestionInfo, error) {
+	var rows []Question
+	if err := h.in.db.Where("answered_at IS NULL").Order("id").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	list := make([]hubQuestionInfo, 0, len(rows))
+	for i := range rows {
+		b, err := botByID(h.in.db, rows[i].BotID)
+		if err != nil || b.ArchivedAt != nil {
+			continue
+		}
+		list = append(list, hubQuestionFrom(&rows[i], b.Name))
+	}
+	return list, nil
+}
+
+func (h *hubClient) rpcAnswer(params json.RawMessage, out *hubRPC) {
+	var p struct {
+		QuestionID int64  `json:"question_id"`
+		Option     *int   `json:"option"`
+		Text       string `json:"text"`
+	}
+	_ = json.Unmarshal(params, &p)
+	var q Question
+	if err := h.in.db.First(&q, p.QuestionID).Error; err != nil {
+		out.OK, out.Error = false, "unknown question"
+		return
+	}
+	if q.AnsweredAt != nil {
+		out.OK, out.Error = false, "already answered"
+		return
+	}
+	b, err := botByID(h.in.db, q.BotID)
+	if err != nil || b.ArchivedAt != nil {
+		out.OK, out.Error = false, "unknown bot"
+		return
+	}
+	answer := strings.TrimSpace(p.Text)
+	if p.Option != nil {
+		opts := questionOptions(&q)
+		if *p.Option < 0 || *p.Option >= len(opts) {
+			out.OK, out.Error = false, "unknown option"
+			return
+		}
+		answer = opts[*p.Option]
+	}
+	if answer == "" {
+		out.OK, out.Error = false, "empty answer"
+		return
+	}
+	if err := h.answerPending(&q, answer); err != nil {
+		out.OK, out.Error = false, err.Error()
+		return
+	}
+	out.Body, _ = json.Marshal(map[string]any{"answered": q.ID, "bot": b.Name, "answer": answer})
+}
+
+func (h *hubClient) answerPending(q *Question, answer string) error {
+	if err := resolveQuestionAnswer(h.in.db, h.in.runner, q, answer); err != nil {
+		return err
+	}
+	h.in.tickAskedMessage(q, answer)
+	b, err := botByID(h.in.db, q.BotID)
+	name := ""
+	if err == nil {
+		name = b.Name
+	}
+	h.noteQuestionGone(q.ID)
+	h.pushEvent("answered", map[string]any{"id": q.ID, "bot_id": q.BotID, "bot": name, "answer": answer, "text": answer})
+	return nil
+}
+
+func (h *hubClient) noteQuestionGone(id int64) {
+	h.syncMu.Lock()
+	defer h.syncMu.Unlock()
+	delete(h.pendingQ, id)
+}
+
+func rosterFingerprint(bots []Bot) string {
+	parts := make([]string, len(bots))
+	for i := range bots {
+		parts[i] = fmt.Sprintf("%d|%s|%s", bots[i].ID, bots[i].Name, bots[i].Status)
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
+}
+
+func (h *hubClient) flushRoster() {
+	if h.in == nil || h.in.db == nil {
+		return
+	}
+	bots, err := liveBots(h.in.db)
+	if err != nil {
+		return
+	}
+	next := rosterFingerprint(bots)
+	h.syncMu.Lock()
+	if !h.rosterOK {
+		h.roster = next
+		h.rosterOK = true
+		h.syncMu.Unlock()
+		return
+	}
+	changed := h.roster != next
+	h.roster = next
+	h.syncMu.Unlock()
+	if !changed {
+		return
+	}
+	h.pushEvent("session", map[string]any{"action": "sync", "text": "roster"})
+}
+
+func (h *hubClient) flushQuestions() {
+	if h.in == nil || h.in.db == nil {
+		return
+	}
+	list, err := h.liveQuestions()
+	if err != nil {
+		return
+	}
+	next := map[int64]struct{}{}
+	byID := map[int64]hubQuestionInfo{}
+	for _, q := range list {
+		next[q.ID] = struct{}{}
+		byID[q.ID] = q
+	}
+	type ev struct {
+		kind string
+		body map[string]any
+	}
+	var out []ev
+	h.syncMu.Lock()
+	if h.pendingQ == nil {
+		h.pendingQ = next
+		h.syncMu.Unlock()
+		return
+	}
+	for id, q := range byID {
+		if _, ok := h.pendingQ[id]; ok {
+			continue
+		}
+		out = append(out, ev{"question", map[string]any{
+			"id": q.ID, "bot_id": q.BotID, "bot": q.Bot,
+			"question": q.Question, "options": q.Options, "at": q.At, "text": q.Question,
+		}})
+	}
+	for id := range h.pendingQ {
+		if _, ok := next[id]; ok {
+			continue
+		}
+		out = append(out, ev{"answered", map[string]any{"id": id}})
+	}
+	h.pendingQ = next
+	h.syncMu.Unlock()
+	for _, e := range out {
+		h.pushEvent(e.kind, e.body)
+	}
 }
 
 func decodeHubBytes(s string) ([]byte, error) {

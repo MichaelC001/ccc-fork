@@ -119,6 +119,8 @@ func (h *hubClient) fileLoop() {
 	defer t.Stop()
 	for range t.C {
 		h.flushOutgoingFiles()
+		h.flushQuestions()
+		h.flushRoster()
 		h.gcUploads()
 	}
 }

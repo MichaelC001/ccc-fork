@@ -947,18 +947,29 @@ Phone RPC (plaintext inside the box, instance `hubClient.dispatch`):
 | Method | Params | Behavior |
 |---|---|---|
 | `hello` | — | Instance name + live session count. |
-| `bots` | — | Live sessions, most recently active first (`last`, `last_text`). |
+| `bots` | — | Live sessions, most recently active first (`last`, `last_text`, `status`, pending `question`). |
 | `archived` | — | Sessions with `archived_at` set. |
 | `history` | `bot_id`, `limit?` | Turns, oldest first. |
-| `send` | `bot_id`, `text?`, `image?` (`mime`, `name`, `data` base64) | Enqueue a user turn. An image is written to the session `inbox/` (≤512 KiB) the same way a Telegram photo is. |
+| `send` | `bot_id`, `text?`, `image?` (`mime`, `name`, `data` base64) | Enqueue a user turn. An image is written to the session `inbox/` (≤512 KiB) the same way a Telegram photo is. A send while that session has an unanswered `ask_owner` is the answer (same as a Telegram reply). |
 | `rename` | `bot_id`, `name` | `validateBotName` + `renameBot`. |
 | `archive` | `bot_id` | `archiveBotRow`. Drops off `bots`. |
 | `unarchive` | `bot_id` | `unarchiveBotRow`. |
+| `questions` | — | Unanswered `ask_owner` rows on live sessions (options are the same buttons Telegram shows). |
+| `answer` | `question_id`, `option?` (0-based index), `text?` | Resolve that question and enqueue `Answer to "…": …`. |
+
+Listen also pushes events (same box as `post`/`progress`/`file`):
+
+| Event | When |
+|---|---|
+| `session` | Live roster changed (spawn, rename, status, archive). Phone reloads `bots`. |
+| `archive` | A session left the live list. |
+| `question` | New unanswered `ask_owner`. Phone reloads `questions`. |
+| `answered` | That question was answered or its session was archived. |
 
 Keepalive: clients send `{v:1,t:ping}` every ~30s; the hub replies `{t:pong}`.
 The hub's 2-minute read deadline resets on any data frame. The phone keeps one
 websocket per paired machine (foreground service on Android) and shows a local
-notification on `post` events — the same posts Telegram would ping. `progress`
+notification on `post` and `question` events — the same posts Telegram would ping. `progress`
 is silent.
 
 ## 16. Owner secrets vault
