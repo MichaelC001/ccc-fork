@@ -146,11 +146,19 @@ A retried turn reuses the same session UUID: because profiles share
 
 The dispatcher (topic id 0) has a **60 second cap** on each turn. Other
 sessions do not. When the cap fires, ccc SIGTERMs the engine process
-(without dropping the queue — this is not `/stop`) and enqueues a
+(without dropping the queue — this is not `/stop`). If this turn already
+`spawn_session` / `tell_session`'d, that is the handoff. Otherwise ccc
+**starts a backend worker itself** (same path as `spawn_session` / `/session`)
+with the owner's request plus a short note that General timed out, and
+posts at most a quiet `session <name> started` one-liner in the DM. The
+owner is never told to `/session`. A first timeout also enqueues a
 `source=system` turn whose input is an error: this work is too long for
-General and it MUST `spawn_session` or `tell_session`. The owner is not
-shown a ❌; the injection *is* the next turn. A timeout of that follow-up
-is not injected again (avoids a loop); the topic is told to use `/session`.
+General — spawn if you still can, and do not spawn a duplicate if ccc
+already started one. The owner is not shown a ❌; the injection *is* the
+next turn. A timeout of that follow-up is not injected again (avoids a
+loop); if the episode still has no handoff, ccc auto-spawns then. A
+follow-up turn that finishes without `spawn_session` / `tell_session` is
+the same auto-spawn.
 
 ## 4. Profiles: selection and shared sessions
 

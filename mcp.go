@@ -355,23 +355,13 @@ func (s *mcpServer) spawnSession(_ context.Context, _ *mcp.CallToolRequest, in s
 	if prompt == "" {
 		return toolErr("spawn_session needs a prompt"), nil, nil
 	}
-	name := strings.TrimSpace(in.Name)
-	if name == "" {
-		name = botNameFromText(prompt)
-	}
-	if strings.EqualFold(sanitizeBotName(name), generalBotName) {
-		return toolErr("cannot spawn a session named General"), nil, nil
-	}
-	b, err := createBotRow(s.db, s.config, name, "", "")
-	if err != nil {
-		return toolErr("could not start the session: %v", err), nil, nil
-	}
 	self, err := s.bot()
 	if err != nil {
 		return toolErr("unknown bot"), nil, nil
 	}
-	if _, _, err := queueBotMessage(s.db, self, b.Name, prompt, true); err != nil {
-		return toolErr("started %s but could not queue the first prompt: %s", b.Name, err.Error()), nil, nil
+	b, err := startBackendSession(s.db, s.config, self, strings.TrimSpace(in.Name), prompt)
+	if err != nil {
+		return toolErr("could not start the session: %v", err), nil, nil
 	}
 	return text("started session %q; it will run when this turn ends. Reports come back here; tell_session to message it.", b.Name), nil, nil
 }

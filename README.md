@@ -15,7 +15,9 @@ Phone client (MIT, public): [ccc-app](https://github.com/kidandcat/ccc-app) — 
 The bot's **1:1 DM is General**, the dispatcher: you talk to it, it sees
 live sessions, and it can start a backend worker (`spawn_session`) or message
 one (`tell_session`). Sessions live in the backend — no Telegram topic. It
-has a 60s cap — longer work must go to a session. Idle sessions waiting on
+has a 60s cap — longer work must go to a session. If the cap fires and
+General does not spawn, ccc starts the session itself (the owner is never
+asked to `/session`). Idle sessions waiting on
 you wake General every 10 minutes (inbox, not a chat ping); General decides
 what to do. `/session <prompt>`
 still starts a worker without going through General. Sessions report only

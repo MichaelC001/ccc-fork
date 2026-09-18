@@ -228,12 +228,12 @@ func (Access) TableName() string { return "access" }
 // It runs outside the conversational turn: status here is independent of
 // turns.status, so the topic stays responsive while the job works.
 type BackgroundJob struct {
-	ID              int64 `gorm:"primaryKey"`
-	BotID           int64 `gorm:"index;not null"`
-	Name            string
-	Status          string `gorm:"index;not null"` // queued|running|done|failed
-	Kind            string // "shell"
-	Command         string
+	ID      int64 `gorm:"primaryKey"`
+	BotID   int64 `gorm:"index;not null"`
+	Name    string
+	Status  string `gorm:"index;not null"` // queued|running|done|failed
+	Kind    string // "shell"
+	Command string
 	// EnvJSON is env-var-name → secret-name (names only). Values are read
 	// from the vault at start time and never stored here.
 	EnvJSON string
@@ -763,6 +763,34 @@ func createBotRow(db *gorm.DB, config *Config, name, role, cwd string) (*Bot, er
 	}
 	if err := markBackendTopic(db, b); err != nil {
 		return nil, err
+	}
+	return b, nil
+}
+
+// startBackendSession creates a backend worker and queues prompt as a waking
+// inbox message from fromBot (usually General). Same path as spawn_session:
+// the worker runs when the sender's turn ends (deliverInbox).
+func startBackendSession(db *gorm.DB, cfg *Config, from *Bot, name, prompt string) (*Bot, error) {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return nil, fmt.Errorf("session prompt is empty")
+	}
+	if from == nil {
+		return nil, fmt.Errorf("unknown sender")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = botNameFromText(prompt)
+	}
+	if strings.EqualFold(sanitizeBotName(name), generalBotName) {
+		return nil, fmt.Errorf("cannot spawn a session named General")
+	}
+	b, err := createBotRow(db, cfg, name, "", "")
+	if err != nil {
+		return nil, err
+	}
+	if _, _, err := queueBotMessage(db, from, b.Name, prompt, true); err != nil {
+		return b, fmt.Errorf("started %s but could not queue the first prompt: %w", b.Name, err)
 	}
 	return b, nil
 }

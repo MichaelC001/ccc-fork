@@ -551,6 +551,9 @@ func (r *Runner) execute(b *Bot, t *Turn, input string, triggers []int64) {
 		for _, m := range triggers {
 			r.ui.React(m, "✅")
 		}
+		if isGeneralBot(b) && isChiefTimeoutFollowUp(input) {
+			r.ensureChiefTimeoutHandoff(b, t, input)
+		}
 	} else if class == chiefTimeoutClass {
 		r.persistChiefTimeout(b, t, input, end, prog)
 	} else {
@@ -612,26 +615,81 @@ func (r *Runner) postOwnerSessionStatus(b *Bot, class string, waiting bool) {
 	_, _ = r.ui.Post(0, ownerSessionStatusLine(b.Name, status)) // safe-ignore: a missed one-liner must not fail the turn
 }
 
-// persistChiefTimeout records the killed General turn and injects the
-// "hand this to a session" error as the next turn. A timeout of that
-// follow-up is not injected again, so a stuck dispatcher cannot loop.
+// persistChiefTimeout records the killed General turn. First timeout: inject
+// so General can still spawn_session if it gets a turn, and ccc starts a
+// worker itself when this turn did not. A timeout of that follow-up is not
+// injected again (avoids a loop); ccc auto-spawns instead of asking the
+// owner to /session.
 func (r *Runner) persistChiefTimeout(b *Bot, t *Turn, input string, end time.Time, prog *progress) {
 	r.db.Model(&Turn{}).Where("id = ?", t.ID).Updates(map[string]any{
 		"status": turnFailed, "ended_at": end, "error_class": chiefTimeoutClass,
 		"stop_reason": truncate(chiefTimeoutInput(), 500), "session_id": b.SessionID,
 	})
-	if isChiefTimeoutFollowUp(input) {
-		prog.finish("General hit its 60s cap again and could not hand this off. Use /session.")
+	followUp := isChiefTimeoutFollowUp(input)
+	spawned := r.ensureChiefTimeoutHandoff(b, t, input)
+	prog.discard()
+	if followUp {
 		return
 	}
-	prog.discard()
+	if spawned == nil && chiefHandedOffSince(r.db, b.ID, chiefHandoffSince(r.db, b.ID, t, input)) {
+		// General already spawn_session / tell_session during this turn.
+		return
+	}
+	inject := chiefTimeoutInput()
+	if spawned != nil {
+		inject = chiefTimeoutInputAfterSpawn(spawned.Name)
+	}
 	// Insert into the queue without kick: execute runs inside runNext's loop,
 	// which will pick this up as soon as we return. Enqueue would kick a
 	// second loop in tests and spawn a real engine.
-	follow := &Turn{BotID: b.ID, Source: sourceSystem, Input: chiefTimeoutInput(), Status: turnQueued}
+	follow := &Turn{BotID: b.ID, Source: sourceSystem, Input: inject, Status: turnQueued}
 	if err := r.db.Create(follow).Error; err != nil {
 		hookLog("chief timeout enqueue: %v", err)
 	}
+}
+
+// ensureChiefTimeoutHandoff starts a backend worker with the owner's request
+// when this timeout episode has no spawn_session / tell_session yet. Quiet
+// one-liner in the DM; never tells the owner to /session.
+func (r *Runner) ensureChiefTimeoutHandoff(b *Bot, t *Turn, input string) *Bot {
+	if r == nil || b == nil {
+		return nil
+	}
+	since := chiefHandoffSince(r.db, b.ID, t, input)
+	if chiefHandedOffSince(r.db, b.ID, since) {
+		return nil
+	}
+	spawned, err := r.autoSpawnChiefTimeout(b, input)
+	if err != nil {
+		hookLog("chief timeout auto-spawn: %v", err)
+		r.postChiefTimeoutHandoff(nil, err)
+		return nil
+	}
+	r.postChiefTimeoutHandoff(spawned, nil)
+	return spawned
+}
+
+func (r *Runner) autoSpawnChiefTimeout(chief *Bot, timedOutInput string) (*Bot, error) {
+	owner := lastNonTimeoutInput(r.db, chief.ID, timedOutInput)
+	name := botNameFromText(owner)
+	if name == "" || isChiefTimeoutFollowUp(name) {
+		name = "timed-out request"
+	}
+	return startBackendSession(r.db, r.config(), chief, name, chiefTimeoutWorkerPrompt(owner))
+}
+
+func (r *Runner) postChiefTimeoutHandoff(b *Bot, err error) {
+	if r == nil || r.ui == nil {
+		return
+	}
+	if err != nil {
+		_, _ = r.ui.Post(0, "session could not be started") // safe-ignore: owner must not be asked to /session
+		return
+	}
+	if b == nil {
+		return
+	}
+	_, _ = r.ui.Post(0, ownerSessionStatusLine(b.Name, "started")) // safe-ignore: a missed one-liner must not fail the handoff
 }
 
 func (r *Runner) hasPendingQuestion(botID int64) bool {

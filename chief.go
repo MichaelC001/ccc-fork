@@ -61,8 +61,91 @@ func chiefTimeoutInput() string {
 		"Do not continue the work yourself."
 }
 
+// chiefTimeoutInputAfterSpawn is the inject when ccc already started the
+// worker: General still gets a turn so it knows, but must not spawn another.
+func chiefTimeoutInputAfterSpawn(name string) string {
+	return "Error: this work is too long for General (60s cap). " +
+		fmt.Sprintf("CCC started session %q with the owner's request. ", name) +
+		"Do not do the work yourself and do not spawn a duplicate. " +
+		"tell_session if you need to add context."
+}
+
 func isChiefTimeoutFollowUp(input string) bool {
 	return strings.Contains(input, "too long for General")
+}
+
+// chiefTimeoutWorkerPrompt is the first turn of a worker ccc started because
+// General timed out without spawn_session / tell_session.
+func chiefTimeoutWorkerPrompt(owner string) string {
+	owner = strings.TrimSpace(owner)
+	msg := "General hit its 60s cap and did not hand this off. Do the work."
+	if owner == "" {
+		return msg
+	}
+	return msg + "\n\n" + owner
+}
+
+func chiefTimeoutWindowStart(t *Turn) time.Time {
+	if t == nil {
+		return time.Time{}
+	}
+	if t.StartedAt != nil {
+		return *t.StartedAt
+	}
+	return t.CreatedAt
+}
+
+// lastNonTimeoutInput is the owner's request that General was dispatching.
+// A follow-up inject is not that request; walk back to the real input.
+func lastNonTimeoutInput(db *gorm.DB, botID int64, timedOutInput string) string {
+	if s := strings.TrimSpace(timedOutInput); s != "" && !isChiefTimeoutFollowUp(s) {
+		return s
+	}
+	var turns []Turn
+	if err := db.Where("bot_id = ?", botID).Order("id DESC").Limit(30).Find(&turns).Error; err != nil {
+		return ""
+	}
+	for _, t := range turns {
+		if isChiefTimeoutFollowUp(t.Input) {
+			continue
+		}
+		if s := strings.TrimSpace(t.Input); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+// chiefHandoffSince is the start of this timeout episode: the original
+// General turn if this is a follow-up, otherwise the current turn. Inbox
+// rows from General after that instant count as spawn_session / tell_session.
+func chiefHandoffSince(db *gorm.DB, chiefID int64, current *Turn, input string) time.Time {
+	since := chiefTimeoutWindowStart(current)
+	if !isChiefTimeoutFollowUp(input) {
+		return since
+	}
+	var orig Turn
+	q := db.Where("bot_id = ? AND error_class = ?", chiefID, chiefTimeoutClass)
+	if current != nil && current.ID != 0 {
+		q = q.Where("id < ?", current.ID)
+	}
+	if q.Order("id DESC").First(&orig).Error != nil {
+		return since
+	}
+	if t := chiefTimeoutWindowStart(&orig); !t.IsZero() && (since.IsZero() || t.Before(since)) {
+		return t
+	}
+	return since
+}
+
+func chiefHandedOffSince(db *gorm.DB, chiefID int64, since time.Time) bool {
+	q := db.Model(&InboxMessage{}).Where("from_bot_id = ? AND wake = ?", chiefID, true)
+	if !since.IsZero() {
+		q = q.Where("created_at >= ?", since)
+	}
+	var n int64
+	q.Count(&n)
+	return n > 0
 }
 
 func idleRemindText(name string) string {

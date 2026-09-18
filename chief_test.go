@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 func TestSpawnSessionIsChiefOnly(t *testing.T) {
@@ -295,6 +297,9 @@ func TestChiefPromptIsByteStable(t *testing.T) {
 	if !strings.Contains(first, "60 second") {
 		t.Errorf("chief prompt must mention the 60s cap:\n%s", first)
 	}
+	if !strings.Contains(first, "ccc starts one") {
+		t.Errorf("chief prompt must say ccc auto-spawns if General cannot:\n%s", first)
+	}
 	if !strings.Contains(first, "does not see those reports") {
 		t.Errorf("chief prompt must not dump session reports to the owner:\n%s", first)
 	}
@@ -374,7 +379,8 @@ func TestPersistChiefTimeoutEnqueuesTheInstruction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := newRunner(in.db, in.cfg, nil)
+	ui := &fakeUI{}
+	r := newRunner(in.db, in.cfg, ui)
 	row := &Turn{BotID: chief.ID, Source: sourceUser, Input: "fix fecha", Status: turnRunning}
 	if err := in.db.Create(row).Error; err != nil {
 		t.Fatal(err)
@@ -389,7 +395,7 @@ func TestPersistChiefTimeoutEnqueuesTheInstruction(t *testing.T) {
 	if queued[0].Source != sourceSystem {
 		t.Errorf("source = %q, want system", queued[0].Source)
 	}
-	if queued[0].Input != chiefTimeoutInput() {
+	if !strings.Contains(queued[0].Input, "too long for General") {
 		t.Errorf("injected input = %q", queued[0].Input)
 	}
 
@@ -403,6 +409,15 @@ func TestPersistChiefTimeoutEnqueuesTheInstruction(t *testing.T) {
 	if stillQueued != 0 {
 		t.Error("the killed turn must not stay queued")
 	}
+
+	spawned := mustAutoSpawnedWorker(t, in.db, chief, "fix fecha")
+	if !strings.Contains(queued[0].Input, spawned.Name) {
+		t.Errorf("inject should name the auto-spawned session %q:\n%s", spawned.Name, queued[0].Input)
+	}
+	assertNoOwnerSessionNudge(t, ui)
+	if got := strings.Join(ui.posts, "\n"); !strings.Contains(got, "session "+spawned.Name+" started") {
+		t.Errorf("owner one-liner missing, posts=%v", ui.posts)
+	}
 }
 
 func TestPersistChiefTimeoutDoesNotLoop(t *testing.T) {
@@ -411,7 +426,12 @@ func TestPersistChiefTimeoutDoesNotLoop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := newRunner(in.db, in.cfg, nil)
+	ui := &fakeUI{}
+	r := newRunner(in.db, in.cfg, ui)
+	orig := &Turn{BotID: chief.ID, Source: sourceUser, Input: "fix fecha", Status: turnFailed, ErrorClass: chiefTimeoutClass}
+	if err := in.db.Create(orig).Error; err != nil {
+		t.Fatal(err)
+	}
 	row := &Turn{BotID: chief.ID, Source: sourceSystem, Input: chiefTimeoutInput(), Status: turnRunning}
 	if err := in.db.Create(row).Error; err != nil {
 		t.Fatal(err)
@@ -422,5 +442,133 @@ func TestPersistChiefTimeoutDoesNotLoop(t *testing.T) {
 	in.db.Model(&Turn{}).Where("bot_id = ? AND status = ?", chief.ID, turnQueued).Count(&queued)
 	if queued != 0 {
 		t.Errorf("follow-up timeout enqueued %d more turns; that would loop", queued)
+	}
+	mustAutoSpawnedWorker(t, in.db, chief, "fix fecha")
+	assertNoOwnerSessionNudge(t, ui)
+}
+
+func TestPersistChiefTimeoutSkipsWhenAlreadyHandedOff(t *testing.T) {
+	in, _, _ := testInstance(t)
+	chief, err := in.ensureGeneralBot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := newRunner(in.db, in.cfg, &fakeUI{})
+	started := time.Now().Add(-time.Second)
+	row := &Turn{BotID: chief.ID, Source: sourceUser, Input: "fix fecha", Status: turnRunning, StartedAt: &started}
+	if err := in.db.Create(row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := startBackendSession(in.db, in.cfg, chief, "deployer", "fix fecha"); err != nil {
+		t.Fatal(err)
+	}
+	r.persistChiefTimeout(chief, row, "fix fecha", time.Now(), nil)
+
+	var workers int64
+	in.db.Model(&Bot{}).Where("id != ? AND archived_at IS NULL", chief.ID).Count(&workers)
+	if workers != 1 {
+		t.Fatalf("already-handed-off timeout spawned extra workers: %d", workers)
+	}
+	var queued int64
+	in.db.Model(&Turn{}).Where("bot_id = ? AND status = ?", chief.ID, turnQueued).Count(&queued)
+	if queued != 0 {
+		t.Errorf("General already spawned; should not inject, got %d queued turns", queued)
+	}
+}
+
+func TestPersistChiefTimeoutFollowUpDoesNotDuplicate(t *testing.T) {
+	in, _, _ := testInstance(t)
+	chief, err := in.ensureGeneralBot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := newRunner(in.db, in.cfg, &fakeUI{})
+	first := &Turn{BotID: chief.ID, Source: sourceUser, Input: "fix fecha", Status: turnRunning}
+	if err := in.db.Create(first).Error; err != nil {
+		t.Fatal(err)
+	}
+	r.persistChiefTimeout(chief, first, "fix fecha", time.Now(), nil)
+	mustAutoSpawnedWorker(t, in.db, chief, "fix fecha")
+
+	follow := &Turn{BotID: chief.ID, Source: sourceSystem, Input: chiefTimeoutInputAfterSpawn("fix fecha"), Status: turnRunning}
+	if err := in.db.Create(follow).Error; err != nil {
+		t.Fatal(err)
+	}
+	r.persistChiefTimeout(chief, follow, chiefTimeoutInputAfterSpawn("fix fecha"), time.Now(), nil)
+
+	var workers int64
+	in.db.Model(&Bot{}).Where("id != ? AND archived_at IS NULL", chief.ID).Count(&workers)
+	if workers != 1 {
+		t.Fatalf("follow-up timeout spawned a duplicate worker: %d", workers)
+	}
+}
+
+func TestEnsureChiefTimeoutHandoffOnSuccessfulFollowUp(t *testing.T) {
+	in, _, _ := testInstance(t)
+	chief, err := in.ensureGeneralBot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := newRunner(in.db, in.cfg, &fakeUI{})
+	orig := &Turn{BotID: chief.ID, Source: sourceUser, Input: "ship the fix", Status: turnFailed, ErrorClass: chiefTimeoutClass}
+	if err := in.db.Create(orig).Error; err != nil {
+		t.Fatal(err)
+	}
+	follow := &Turn{BotID: chief.ID, Source: sourceSystem, Input: chiefTimeoutInput(), Status: turnDone}
+	if err := in.db.Create(follow).Error; err != nil {
+		t.Fatal(err)
+	}
+	if spawned := r.ensureChiefTimeoutHandoff(chief, follow, chiefTimeoutInput()); spawned == nil {
+		t.Fatal("follow-up without spawn_session must auto-spawn")
+	}
+	mustAutoSpawnedWorker(t, in.db, chief, "ship the fix")
+}
+
+func TestChiefTimeoutInputAfterSpawnIsStillAFollowUp(t *testing.T) {
+	got := chiefTimeoutInputAfterSpawn("deployer")
+	if !isChiefTimeoutFollowUp(got) {
+		t.Error("after-spawn inject must still be recognised as a follow-up")
+	}
+	if strings.Contains(got, "MUST pass it to a session") {
+		t.Error("after-spawn inject must not tell General to spawn again")
+	}
+	if !strings.Contains(got, "deployer") || !strings.Contains(got, "do not spawn a duplicate") {
+		t.Errorf("after-spawn inject missing the session name:\n%s", got)
+	}
+}
+
+func mustAutoSpawnedWorker(t *testing.T, db *gorm.DB, chief *Bot, owner string) *Bot {
+	t.Helper()
+	wantName := botNameFromText(owner)
+	spawned, err := botByName(db, wantName)
+	if err != nil {
+		t.Fatalf("auto-spawned worker %q: %v", wantName, err)
+	}
+	if spawned.TopicID >= 0 {
+		t.Fatalf("auto-spawned worker should be backend-only, got %+v", spawned)
+	}
+	var queued []InboxMessage
+	db.Where("from_bot_id = ? AND to_bot_id = ?", chief.ID, spawned.ID).Find(&queued)
+	if len(queued) != 1 {
+		t.Fatalf("first prompt not queued: %+v", queued)
+	}
+	if !strings.Contains(queued[0].Text, owner) {
+		t.Errorf("worker prompt missing owner request %q: %q", owner, queued[0].Text)
+	}
+	if !strings.Contains(queued[0].Text, "60s cap") {
+		t.Errorf("worker prompt missing timeout context: %q", queued[0].Text)
+	}
+	if !queued[0].Wake {
+		t.Error("auto-spawned worker must wake")
+	}
+	return spawned
+}
+
+func assertNoOwnerSessionNudge(t *testing.T, ui *fakeUI) {
+	t.Helper()
+	for _, p := range ui.posts {
+		if strings.Contains(p, "/session") || strings.Contains(strings.ToLower(p), "could not hand this off") {
+			t.Errorf("owner-facing text must not ask for /session: %q", p)
+		}
 	}
 }
