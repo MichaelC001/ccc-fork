@@ -1,6 +1,6 @@
 ---
 name: ccc
-description: Coding sessions in Telegram — a typical 2026 coding-tool product page.
+description: One assistant, every subscription — a typical 2026 product page.
 colors:
   fill: "#f5f5f4"
   on-fill: "#09090b"

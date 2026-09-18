@@ -12,19 +12,19 @@ Static HTML and CSS in `docs/`, deployed by `.github/workflows/pages.yml` on pus
 
 ## Users
 
-Primary: a developer who already runs (or will run) coding CLIs on a machine they own, and who wants a **Telegram dispatcher** for AI sessions — one DM to talk to, backend workers that do the work. They are often away from a desk (phone, couch) and do not want a web dashboard, a Slack app, or a forum of session topics.
+Primary: someone who already has (or will have) Claude, Grok, Codex, or Antigravity subscriptions, and who wants **one Telegram assistant** instead of four separate chats. They run those CLIs on a machine they own. They are often away from a desk (phone, couch) and do not want a web dashboard, a Slack app, or a forum of session topics. Coding is a common use, not the pitch.
 
 Secondary: someone evaluating the public OSS repo (`kidandcat/ccc`) before cloning. They need an accurate picture, not a sales fiction.
 
 ## Product Purpose
 
-**ccc** is coding sessions in Telegram. The bot's 1:1 DM is **General**, the dispatcher: you talk to it, it sees live sessions, and it can start a backend worker (`spawn_session`) or message one (`tell_session`). Sessions live in the backend — no Telegram topic. The owner never writes into a session chat. Workers report only to General (`report_to_general`); the owner does not see the transcript. General posts a short DM summary.
+**ccc** is a personal assistant in Telegram. One DM; every subscription you already pay for (Claude, Grok, Codex, Antigravity). The bot's 1:1 DM is **General**, the dispatcher: you talk to it, it sees live sessions, and it can start a backend worker (`spawn_session`) or message one (`tell_session`). Sessions live in the backend — no Telegram topic. The owner never writes into a session chat. Workers report only to General (`report_to_general`); the owner does not see the transcript. General posts a short DM summary.
 
-Success for this landing: a first-time visitor understands that model in seconds, believes the product is self-hosted OSS (not a hosted chat SaaS), and goes to https://github.com/kidandcat/ccc.
+Success for this landing: a first-time visitor understands they get one assistant for every AI subscription they already pay for, in Telegram; believes the product is self-hosted OSS (not a hosted chat SaaS); and goes to https://github.com/kidandcat/ccc.
 
 ## Positioning
 
-The mechanism a neighboring product could not copy without becoming ccc: **one Telegram DM is the dispatcher; sessions are backend workers with no chat of their own.** Quiet owner UX (`ask_owner` buttons, vault secrets the model never reads, watches that cost nothing until output changes, routines that fire as fresh workers). Engines are interchangeable runners (Claude Code default; Grok Build, Antigravity, Codex) behind the same envelope.
+Visitor-facing pitch: **one personal assistant, every subscription, in Telegram.** Coding is a use, not the category. The mechanism a neighboring product could not copy without becoming ccc: **one Telegram DM is the dispatcher; sessions are backend workers with no chat of their own.** Quiet owner UX (`ask_owner` buttons, vault secrets the model never reads, watches that cost nothing until output changes, routines that fire as fresh workers). Engines are interchangeable runners (Claude Code default; Grok Build, Antigravity, Codex) behind the same envelope — the subscriptions you already pay for, one place.
 
 Not: a Claude Code plugin, a Slack bot, a web agent dashboard, or Claude background agents / `claude attach` (explicitly dropped in v3).
 
@@ -61,7 +61,7 @@ Undecided / do not fabricate: user counts, testimonials, pricing (there is none 
 - Voice in the README: precise, second-person, short. No hype, no “join developers who…”. Landing copy should stay in that register even when it is friendlier than the README.
 - Telegram is the interface, not the brand color by default.
 - MIT. Public repo. Public story is Telegram (+ CLI / `ccc listen`).
-- **Landing visual world (standing preference, 2026-09-18):** category canon — a typical coding-tool product site, sitting alongside Cursor, Claude, and Codex. Played straight at their craft level. No radio / ATC / sewing (or any other governing metaphor). No neo-terminal costume. No irony or smuggled quirk.
+- **Landing visual world (standing preference, 2026-09-18):** category canon — a typical 2026 product site, sitting alongside Cursor, Claude, and Codex in craft. Played straight at their craft level. No radio / ATC / sewing (or any other governing metaphor). No neo-terminal costume. No irony or smuggled quirk. Pitch is assistant + subscriptions, not “coding sessions”.
 
 ## Evidence on Hand
 

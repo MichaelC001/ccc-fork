@@ -1,7 +1,8 @@
 # ccc
 
-**ccc** — coding sessions in Telegram. You talk to **General** in the bot's
-1:1 DM; it spawns backend workers. Sessions have no Telegram topic.
+**ccc** — a personal assistant in Telegram. You talk to **General** in the
+bot's 1:1 DM; it runs backend workers on the Claude, Grok, Codex, and
+Antigravity accounts you already pay for. Sessions have no Telegram topic.
 
 [![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go)](https://go.dev)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
