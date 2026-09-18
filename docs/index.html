@@ -41,12 +41,12 @@
             <span class="titlebar-name">ccc</span>
           </div>
           <div class="panes">
-            <section class="pane dm" aria-label="Telegram DM with General">
+            <section class="pane dm" aria-label="Telegram DM with the orchestrator">
               <header class="dm-head">
                 <span class="avatar" aria-hidden="true">c</span>
                 <div>
                   <strong>ccc</strong>
-                  <span class="sub">General · online</span>
+                  <span class="sub">orchestrator · online</span>
                 </div>
               </header>
               <div class="thread">
@@ -97,21 +97,21 @@
     <section class="block split">
       <div class="copy">
         <h2>One DM is the assistant.</h2>
-        <p>Plain text in the bot’s 1:1 chat is a turn of General. It has a 60-second cap; longer work becomes a session. If the cap fires and General has not spawned, ccc starts the session itself. <code>/session</code> skips the dispatcher.</p>
-        <p>Workers report only to General. You get a short summary in the DM, not the transcript. If General cannot post it, listen posts a short fallback — never only <code>session done</code>.</p>
+        <p>Plain text in the bot’s 1:1 chat is a turn of the orchestrator. It has a 60-second cap; longer work becomes a session. If the cap fires and the orchestrator has not spawned, ccc starts the session itself. <code>/session</code> skips the orchestrator.</p>
+        <p>Workers report only to the orchestrator. You get a short summary in the DM, not the transcript. If the orchestrator cannot post it, listen posts a short fallback — never only <code>session done</code>.</p>
       </div>
       <figure class="product product-tight">
         <div class="window window-ask" role="img" aria-label="Synthetic ask_owner decision in the DM">
           <div class="titlebar">
             <span class="lights" aria-hidden="true"><i></i><i></i><i></i></span>
-            <span class="titlebar-name">General</span>
+            <span class="titlebar-name">orchestrator</span>
           </div>
           <div class="ask">
             <header class="dm-head">
               <span class="avatar" aria-hidden="true">c</span>
               <div>
                 <strong>ccc</strong>
-                <span class="sub">General · online</span>
+                <span class="sub">orchestrator · online</span>
               </div>
             </header>
             <div class="ask-body">
@@ -133,7 +133,7 @@
       <div class="quiet-grid">
         <div>
           <h3>Silent progress</h3>
-          <p>While General runs, one progress message is edited in place with notifications off. When the turn ends, that message is deleted and the reply is the ping you get.</p>
+          <p>While the orchestrator runs, one progress message is edited in place with notifications off. When the turn ends, that message is deleted and the reply is the ping you get.</p>
         </div>
         <div>
           <h3>Owner vault</h3>
@@ -169,7 +169,7 @@
 ccc config set chat_id    &lt;your Telegram user id&gt;
 ccc install</code></pre>
       </div>
-      <p class="after">DM the bot. That chat is General. Full path, including a VM: the README on GitHub.</p>
+      <p class="after">DM the bot. That chat is the orchestrator. Full path, including a VM: the README on GitHub.</p>
     </section>
 
     <section class="close">

@@ -18,13 +18,13 @@ Secondary: someone evaluating the public OSS repo (`kidandcat/ccc`) before cloni
 
 ## Product Purpose
 
-**ccc** is a personal assistant in Telegram. One DM; every subscription you already pay for (Claude, Grok, Codex, Antigravity). The bot's 1:1 DM is **General**, the dispatcher: you talk to it, it sees live sessions, and it can start a backend worker (`spawn_session`) or message one (`tell_session`). Sessions live in the backend — no Telegram topic. The owner never writes into a session chat. Workers report only to General (`report_to_general`); the owner does not see the transcript. General posts a short DM summary.
+**ccc** is a personal assistant in Telegram. One DM; every subscription you already pay for (Claude, Grok, Codex, Antigravity). The bot's 1:1 DM is the **orchestrator**: you talk to it, it sees live sessions, and it can start a backend worker (`spawn_session`) or message one (`tell_session`). Sessions live in the backend — no Telegram topic. The owner never writes into a session chat. Workers report only to the orchestrator (`report_to_general`); the owner does not see the transcript. The orchestrator posts a short DM summary.
 
 Success for this landing: a first-time visitor understands they get one assistant for every AI subscription they already pay for, in Telegram; believes the product is self-hosted OSS (not a hosted chat SaaS); and goes to https://github.com/kidandcat/ccc.
 
 ## Positioning
 
-Visitor-facing pitch: **one personal assistant, every subscription, in Telegram.** Coding is a use, not the category. The mechanism a neighboring product could not copy without becoming ccc: **one Telegram DM is the dispatcher; sessions are backend workers with no chat of their own.** Quiet owner UX (`ask_owner` buttons, vault secrets the model never reads, watches that cost nothing until output changes, routines that fire as fresh workers). Engines are interchangeable runners (Claude Code default; Grok Build, Antigravity, Codex) behind the same envelope — the subscriptions you already pay for, one place.
+Visitor-facing pitch: **one personal assistant, every subscription, in Telegram.** Coding is a use, not the category. The mechanism a neighboring product could not copy without becoming ccc: **one Telegram DM is the orchestrator; sessions are backend workers with no chat of their own.** Quiet owner UX (`ask_owner` buttons, vault secrets the model never reads, watches that cost nothing until output changes, routines that fire as fresh workers). Engines are interchangeable runners (Claude Code default; Grok Build, Antigravity, Codex) behind the same envelope — the subscriptions you already pay for, one place.
 
 Not: a Claude Code plugin, a Slack bot, a web agent dashboard, or Claude background agents / `claude attach` (explicitly dropped in v3).
 
@@ -39,10 +39,10 @@ Not: a Claude Code plugin, a Slack bot, a web agent dashboard, or Claude backgro
 
 Confirmed (README / `docs/DESIGN.md`):
 
-- General 60s cap; longer work goes to a session. If the cap fires and General does not spawn, ccc starts the session itself. `/session <prompt>` starts a worker without General.
+- Orchestrator 60s cap; longer work goes to a session. If the cap fires and the orchestrator does not spawn, ccc starts the session itself. `/session <prompt>` starts a worker without the orchestrator.
 - Live session card in the Telegram DM (one block per working session), pinned while a worker is running, waiting, or on a background job. `/sessions` is the full list.
-- Idle sessions waiting on the owner wake General every 10 minutes (inbox, not a chat ping).
-- Tools sessions actually have: `remember` / `recall` / `forget`; `notify_owner` / `ask_owner`; `watch` / `schedule_wakeup` / `set_routine`; `run_background` / `run` with vault inject; `secrets_list` / `secrets_delete` (no `secrets_get`); General-only `spawn_session` / `tell_session`; workers-only `report_to_general`; `send_file`; `get_project` / `set_project`; `set_name`; `archive_bot`.
+- Idle sessions waiting on the owner wake the orchestrator every 10 minutes (inbox, not a chat ping).
+- Tools sessions actually have: `remember` / `recall` / `forget`; `notify_owner` / `ask_owner`; `watch` / `schedule_wakeup` / `set_routine`; `run_background` / `run` with vault inject; `secrets_list` / `secrets_delete` (no `secrets_get`); orchestrator-only `spawn_session` / `tell_session`; workers-only `report_to_general`; `send_file`; `get_project` / `set_project`; `set_name`; `archive_bot`.
 - Engines: Claude Code, Grok Build, Antigravity, Codex. Failover stays inside the same engine.
 - Owner vault (`/secret add`); values never shown; sessions inject via env/stdin.
 - MIT license. Go 1.25+.
@@ -58,6 +58,7 @@ Undecided / do not fabricate: user counts, testimonials, pricing (there is none 
 ## Brand Commitments
 
 - Product name is **ccc** (lowercase in running text). No expansion (not “Crew Command Center”).
+- Public copy calls the 1:1 DM the **orchestrator** (English pages: that word, not Spanish). The implementation session is still named General (`report_to_general`, `topic_id` 0). Do not rename listen, the dispatcher, or the DM in code.
 - Voice in the README: precise, second-person, short. No hype, no “join developers who…”. Landing copy should stay in that register even when it is friendlier than the README.
 - Telegram is the interface, not the brand color by default.
 - MIT. Public repo. Public story is Telegram (+ CLI / `ccc listen`).
@@ -73,7 +74,7 @@ Undecided / do not fabricate: user counts, testimonials, pricing (there is none 
 
 ## Product Principles
 
-1. **The DM is General.** If a sentence implies the owner chats with a worker, it is wrong.
+1. **The DM is the orchestrator.** If a sentence implies the owner chats with a worker, it is wrong.
 2. **Facts over atmosphere.** Friendliness is tone and craft, not extra capabilities.
 3. **Self-hosted is the product.** The public hub is an encrypted pipe, not a cloud that runs your agents.
 4. **Quiet by default.** Progress is silent; the ping is the answer; `ask_owner` is how decisions happen.
